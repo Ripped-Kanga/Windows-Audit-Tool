@@ -170,9 +170,10 @@ Write-Host "Computer Name: $compName" -ForegroundColor DarkGreen
 # OS Info
 $os = Safe-Invoke { Get-CimInstance Win32_OperatingSystem } "Operating System"
 if ($os -ne "Error") {
-    $Report += "- Operating System:" 
+    $Report += "- Operating System:"
     Write-Host "<Operating System>" -ForegroundColor DarkMagenta
-    Write-host ""
+    Write-Host ""
+
     # Name
     $Report += "  - Name: $($os.Caption)"
     Write-Host "Name: $($os.Caption)" -ForegroundColor DarkGreen
@@ -190,7 +191,6 @@ if ($os -ne "Error") {
     Write-Host "Architecture: $($os.OSArchitecture)" -ForegroundColor DarkGreen
 }
 
-
 # Feature Version
 $winVer = Safe-Invoke {
     Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" |
@@ -199,7 +199,6 @@ $winVer = Safe-Invoke {
 if ($winVer -ne "Error") {
     $ver = if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId }
     $Report += "- Windows Feature Version: $ver"
-
 }
 
 # CPU Info
@@ -256,27 +255,156 @@ Write-Host "[2/10] Collecting installed software..." -ForegroundColor Yellow
 $Report += "## Installed Software"
 $Report += ""
 
-$apps = Safe-Invoke {
-    Get-ItemProperty `
-        HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*, `
-        HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
-        Select-Object DisplayName, DisplayVersion |
+function Get-InstalledSoftwareInventory {
+    param([switch]$IncludeAllUsers)
+
+    $results = New-Object System.Collections.Generic.List[object]
+
+    function Add-UninstallEntriesFromRoot {
+        param(
+            [Parameter(Mandatory)] [string]$Root,
+            [Parameter(Mandatory)] [string]$Scope
+        )
+
+        foreach ($p in @(
+            "$Root\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "$Root\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )) {
+            try {
+                Get-ItemProperty -Path $p -ErrorAction Stop |
+                    Where-Object { $_.DisplayName } |
+                    ForEach-Object {
+                        $results.Add([pscustomobject]@{
+                            DisplayName     = $_.DisplayName
+                            DisplayVersion  = $_.DisplayVersion
+                            Publisher       = $_.Publisher
+                            InstallLocation = $_.InstallLocation
+                            Scope           = $Scope
+                        }) | Out-Null
+                    }
+            }
+            catch {
+                # Intentionally silent: missing keys are common.
+            }
+        }
+    }
+
+    # Machine-wide
+    Add-UninstallEntriesFromRoot -Root "HKLM:" -Scope "Machine"
+
+    # Current user
+    Add-UninstallEntriesFromRoot -Root "HKCU:" -Scope "CurrentUser"
+
+    if ($IncludeAllUsers) {
+        # 1) Already-loaded user hives
+        $userSids = @()
+        try {
+            $userSids = Get-ChildItem -Path Registry::HKEY_USERS -ErrorAction Stop |
+                Where-Object {
+                    $_.PSChildName -match '^S-1-5-21-\d+-\d+-\d+-\d+$' -and
+                    $_.PSChildName -notlike '*_Classes'
+                } |
+                Select-Object -ExpandProperty PSChildName
+        }
+        catch { }
+
+        foreach ($sid in $userSids) {
+            Add-UninstallEntriesFromRoot -Root ("Registry::HKEY_USERS\{0}" -f $sid) -Scope ("UserHive:{0}" -f $sid)
+        }
+
+        # 2) Offline hives from profile list (requires elevation)
+        $profileList = @()
+        try {
+            $profileList = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' -ErrorAction Stop |
+                Select-Object PSChildName, ProfileImagePath
+        }
+        catch { }
+
+        foreach ($p in $profileList) {
+            $sid = $p.PSChildName
+            if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+
+            $profilePath = $p.ProfileImagePath
+            if (-not $profilePath) { continue }
+
+            $ntUser = Join-Path $profilePath 'NTUSER.DAT'
+            if (-not (Test-Path -LiteralPath $ntUser)) { continue }
+
+            # Use a short safe hive name (avoid SID in hive name)
+            $tempHiveName = "AUDIT_{0}" -f ([Math]::Abs($sid.GetHashCode()))
+            $tempHiveRoot = "Registry::HKEY_USERS\$tempHiveName"
+
+            if (Test-Path -Path $tempHiveRoot) { continue }
+
+            $loaded = $false
+            try {
+                $null = & reg.exe load ("HKU\{0}" -f $tempHiveName) "$ntUser" 2>$null
+                if ($LASTEXITCODE -eq 0) { $loaded = $true }
+            }
+            catch { $loaded = $false }
+
+            if ($loaded) {
+                try {
+                    Add-UninstallEntriesFromRoot -Root $tempHiveRoot -Scope ("OfflineUser:{0}" -f $sid)
+                }
+                finally {
+                    try { $null = & reg.exe unload ("HKU\{0}" -f $tempHiveName) 2>$null } catch { }
+                }
+            }
+        }
+    }
+
+    $results |
         Where-Object { $_.DisplayName } |
-        Sort-Object DisplayName
+        Sort-Object DisplayName, DisplayVersion, Scope -Unique
+}
+
+$apps = Safe-Invoke {
+    Get-InstalledSoftwareInventory -IncludeAllUsers:($IsElevated)
 } "Installed Software"
 
-if ($apps -ne "Error") {
-    foreach ($app in $apps) {
-        $name = $app.DisplayName
-        $ver  = if ($app.DisplayVersion) { $app.DisplayVersion } else { "N/A" }
-        $Report += "- $name"
-        $Report += "  - Version: $ver"
+if ($apps -ne "Error" -and $apps) {
+
+    # Ensure array semantics
+    $appsList = @($apps)
+    $appCount = $appsList.Count
+
+    # Minimal console feedback
+    Write-Host ("Applications found: {0}" -f $appCount) -ForegroundColor DarkGreen
+
+    # Report summary
+    $Report += "- Applications Found: $appCount"
+    $Report += ""
+
+    # Helper: sanitize markdown table cells
+    function _Cell([string]$s) {
+        if ([string]::IsNullOrWhiteSpace($s)) { return "N/A" }
+        $s = $s -replace "`r|`n", " "
+        $s = $s -replace "\|", "/"
+        return ($s -replace "\s{2,}", " ").Trim()
     }
+
+    # Pandoc-friendly table
+    $Report += "| Name | Version | Publisher | Scope |"
+    $Report += "|---|---|---|---|"
+
+    foreach ($app in $appsList | Sort-Object DisplayName, DisplayVersion, Scope) {
+        $name  = _Cell $app.DisplayName
+        $ver   = _Cell $app.DisplayVersion
+        $pub   = _Cell $app.Publisher
+        $scope = _Cell $app.Scope
+
+        $Report += "| $name | $ver | $pub | $scope |"
+    }
+
 }
 else {
-    $Report += "- Could not retrieve installed software list."
+    $Report += "- Applications Found: 0"
+    $Report += ""
+    $Report += "_Could not retrieve installed software list._"
     Write-Host "Could not retrieve installed software list." -ForegroundColor DarkGray
 }
+
 
 $Report += ""
 
@@ -292,22 +420,47 @@ if ($IsElevated) {
         Get-HotFix | Sort-Object InstalledOn -Descending
     } "Windows Patches"
 
-    if ($patches -ne "Error") {
-        foreach ($p in $patches) {
-            $installedDate = if ($p.InstalledOn) { $p.InstalledOn.ToShortDateString() } else { "Unknown" }
-            $Report += "- Hotfix: $($p.HotFixID)"
-            $Report += "  - Installed On: $installedDate"
-            $Report += "  - Description: $($p.Description)"
+    if ($patches -ne "Error" -and $patches) {
+
+        $patchList  = @($patches)
+        $patchCount = $patchList.Count
+
+        # Minimal console feedback
+        Write-Host ("Patches found: {0}" -f $patchCount) -ForegroundColor DarkGreen
+
+        # Report summary
+        $Report += "- Patches Found: $patchCount"
+        $Report += ""
+
+        function _Cell([string]$s) {
+            if ([string]::IsNullOrWhiteSpace($s)) { return "N/A" }
+            $s = $s -replace "`r|`n", " "
+            $s = $s -replace "\|", "/"
+            return ($s -replace "\s{2,}", " ").Trim()
         }
+
+        # Pandoc-friendly table
+        $Report += "| KB | Installed On | Description |"
+        $Report += "|---|---|---|"
+
+        foreach ($p in ($patchList | Sort-Object InstalledOn -Descending)) {
+            $kb   = _Cell $p.HotFixID
+            $date = if ($p.InstalledOn) { _Cell ($p.InstalledOn.ToShortDateString()) } else { "Unknown" }
+            $desc = _Cell $p.Description
+
+            $Report += "| $kb | $date | $desc |"
+        }
+
+    }
+    elseif ($patches -eq "Error") {
+        $Report += "- Could not retrieve installed patches / hotfixes."
+        Write-Host "Could not retrieve installed patches / hotfixes." -ForegroundColor DarkGray
     }
     else {
-        $Report += "- Could not retrieve installed patches / hotfixes."
+        $Report += "- Patches Found: 0"
+        $Report += ""
+        $Report += "_No installed patches / hotfixes found._"
     }
-}
-else {
-    $Report += "- Skipped (requires elevation)."
-    Log "Skipped Get-HotFix (not elevated)"
-    Write-Host "Skipped (requires elevation)." -ForegroundColor DarkGray
 }
 
 $Report += ""
@@ -355,7 +508,17 @@ if ($IsElevated) {
     } "Pending Windows Updates"
 
     if ($pendingUpdates -ne "Error" -and $pendingUpdates) {
-        foreach ($upd in $pendingUpdates) {
+        $puList = @($pendingUpdates)
+        $kbAll = @()
+        foreach ($u in $puList) {
+            if ($u.KBArticleIDs) { $kbAll += $u.KBArticleIDs }
+        }
+        $kbAll = $kbAll | Where-Object { $_ } | Sort-Object -Unique
+        $kbPreview = ($kbAll | Select-Object -First 30) -join ", "
+        Write-Host ("Pending updates: {0}" -f $puList.Count) -ForegroundColor DarkGreen
+        if ($kbPreview) { Write-Host ("Pending KBs: {0}" -f $kbPreview) -ForegroundColor DarkGray }
+
+        foreach ($upd in $puList) {
             $kb = if ($upd.KBArticleIDs) { ($upd.KBArticleIDs -join ", ") } else { "N/A" }
             $Report += "- Update:"
             $Report += "  - Title: $($upd.Title)"
@@ -366,6 +529,7 @@ if ($IsElevated) {
         $Report += "- Could not retrieve pending updates."
     }
     else {
+        Write-Host "Pending updates: 0" -ForegroundColor DarkGreen
         $Report += "- No pending updates found."
     }
 }
@@ -384,6 +548,7 @@ Write-Host "[5/10] Gathering network adapters..." -ForegroundColor Yellow
 $Report += "## Network Adapters"
 $Report += ""
 
+# Report still includes all adapters (as before)
 $nets = Safe-Invoke {
     Get-NetAdapter | Select-Object Name, Status, MacAddress
 } "Network Adapters"
@@ -400,6 +565,24 @@ else {
     Write-Host "Could not retrieve network adapter information." -ForegroundColor DarkGray
 }
 
+# Console: primary adapter(s) only
+$primaryCfg = Safe-Invoke {
+    Get-NetIPConfiguration | Where-Object {
+        $_.NetAdapter.Status -eq 'Up' -and $_.IPv4DefaultGateway -and $_.IPv4Address
+    } | Select-Object -First 3
+} "Primary Network Config"
+
+if ($primaryCfg -ne "Error" -and $primaryCfg) {
+    foreach ($cfg in @($primaryCfg)) {
+        $name = $cfg.InterfaceAlias
+        $ip4  = if ($cfg.IPv4Address) { ($cfg.IPv4Address.IPAddress | Select-Object -First 1) } else { "N/A" }
+        $gw4  = if ($cfg.IPv4DefaultGateway) { $cfg.IPv4DefaultGateway.NextHop } else { "N/A" }
+        $dns  = if ($cfg.DnsServer.ServerAddresses) { ($cfg.DnsServer.ServerAddresses -join ", ") } else { "N/A" }
+        Write-Host ("Primary: {0}  IP {1}  GW {2}" -f $name, $ip4, $gw4) -ForegroundColor DarkGreen
+        Write-Host ("DNS: {0}" -f $dns) -ForegroundColor DarkGray
+    }
+}
+
 $Report += ""
 
 # ============================================================
@@ -414,7 +597,20 @@ $shares = Safe-Invoke {
 } "SMB Shares"
 
 if ($shares -ne "Error") {
-    foreach ($s in $shares) {
+    $shareList = @($shares)
+    # Console: show shares found (keep short; hide default admin shares in console)
+    $nonAdmin = $shareList | Where-Object { $_.Name -notmatch '^\w\$$' -and $_.Name -notin @('ADMIN$', 'C$', 'IPC$') }
+    if ($nonAdmin -and $nonAdmin.Count -gt 0) {
+        Write-Host ("SMB shares found: {0} (excluding default admin shares)" -f $nonAdmin.Count) -ForegroundColor DarkGreen
+        foreach ($s in ($nonAdmin | Select-Object -First 15)) {
+            Write-Host ("- {0} -> {1}" -f $s.Name, $s.Path) -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Write-Host "SMB shares found: 0 (excluding default admin shares)" -ForegroundColor DarkGreen
+    }
+
+    foreach ($s in $shareList) {
         $Report += "- Share: $($s.Name)"
         $Report += "  - Path: $($s.Path)"
     }
@@ -432,19 +628,51 @@ Write-Host "[7/10] Gathering printers..." -ForegroundColor Yellow
 $Report += "## Printers"
 $Report += ""
 
-$printers = Safe-Invoke {
-    Get-Printer
-} "Printers"
+$printers = Safe-Invoke { Get-Printer } "Printers"
 
-if ($printers -ne "Error") {
-    foreach ($p in $printers) {
-        $Report += "- Printer: $($p.Name)"
-        $Report += "  - Driver: $($p.DriverName)"
-    }
+function _Cell([string]$s) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return "N/A" }
+    $s = $s -replace "`r|`n", " "
+    $s = $s -replace "\|", "/"
+    return ($s -replace "\s{2,}", " ").Trim()
 }
-else {
+
+if ($printers -ne "Error" -and $printers) {
+
+    $printerList  = @($printers)
+    $printerCount = $printerList.Count
+
+    # Minimal console feedback
+    Write-Host ("Printers found: {0}" -f $printerCount) -ForegroundColor DarkGreen
+
+    # Report summary
+    $Report += "- Printers Found: $printerCount"
+    $Report += ""
+
+    # Pandoc-friendly table
+    $Report += "| Name | Driver | Port | Shared | Default |"
+    $Report += "|---|---|---|---|---|"
+
+    foreach ($p in ($printerList | Sort-Object Name)) {
+        $name    = _Cell $p.Name
+        $driver  = _Cell $p.DriverName
+        $port    = _Cell $p.PortName
+        $shared  = if ($null -ne $p.Shared)  { $p.Shared }  else { "N/A" }
+        $default = if ($null -ne $p.Default) { $p.Default } else { "N/A" }
+
+        $Report += "| $name | $driver | $port | $shared | $default |"
+    }
+
+}
+elseif ($printers -eq "Error") {
     $Report += "- Could not retrieve printers."
     Write-Host "Could not retrieve printers." -ForegroundColor DarkGray
+}
+else {
+    $Report += "- Printers Found: 0"
+    $Report += ""
+    $Report += "_No printers found._"
+    Write-Host "Printers found: 0" -ForegroundColor DarkYellow
 }
 
 $Report += ""
@@ -470,11 +698,16 @@ if ($IsElevated) {
             $Report += "  - Lock Status: $($vol.LockStatus)"
             $Report += "  - Encryption Method: $($vol.EncryptionMethod)"
             $Report += ""
+
+            # Console warnings only
+            if ($vol.ProtectionStatus -ne 'On' -and $vol.ProtectionStatus -ne 1) {
+                Write-Host ("WARNING: BitLocker protection is not ON for volume {0}" -f $vol.VolumeLetter) -ForegroundColor DarkYellow
+            }
         }
     }
     else {
         $Report += "- Could not retrieve BitLocker information."
-        Write-Host "Could not retrieve BitLocker information." -ForegroundColor DarkGray
+        Write-Host "WARNING: Could not retrieve BitLocker information." -ForegroundColor DarkYellow
         $Report += ""
     }
 
@@ -490,10 +723,13 @@ if ($IsElevated) {
         $Report += "- Version: $($tpm.ManufacturerVersion)"
         $Report += "- Ready: $($tpm.TpmReady)"
         $Report += "- Activated: $($tpm.TpmActivated)"
+
+        if (-not $tpm.TpmPresent) { Write-Host "WARNING: TPM not present" -ForegroundColor DarkYellow }
+        elseif (-not $tpm.TpmReady) { Write-Host "WARNING: TPM present but not ready" -ForegroundColor DarkYellow }
     }
     else {
         $Report += "- Could not retrieve TPM status."
-        Write-Host "Could not retrieve TPM status." -ForegroundColor DarkGray
+        Write-Host "WARNING: Could not retrieve TPM status." -ForegroundColor DarkYellow
     }
 
     $Report += ""
@@ -509,10 +745,11 @@ if ($IsElevated) {
     }
     elseif ($secureBoot -eq $false) {
         $Report += "- Secure Boot: Disabled"
+        Write-Host "WARNING: Secure Boot is disabled" -ForegroundColor DarkYellow
     }
     else {
         $Report += "- Secure Boot: Not Supported or Unknown"
-        Write-Host "Secure Boot: Not supported or unknown." -ForegroundColor DarkGray
+        # Unknown isn't necessarily a warning; keep console quiet.
     }
 
     $Report += ""
@@ -530,11 +767,15 @@ if ($IsElevated) {
             $Report += "  - Default Inbound Action: $($p.DefaultInboundAction)"
             $Report += "  - Default Outbound Action: $($p.DefaultOutboundAction)"
             $Report += ""
+
+            if (-not $p.Enabled) {
+                Write-Host ("WARNING: Firewall profile disabled: {0}" -f $p.Name) -ForegroundColor DarkYellow
+            }
         }
     }
     else {
         $Report += "- Could not retrieve firewall settings."
-        Write-Host "Could not retrieve firewall settings." -ForegroundColor DarkGray
+        Write-Host "WARNING: Could not retrieve firewall settings." -ForegroundColor DarkYellow
         $Report += ""
     }
 
@@ -549,10 +790,14 @@ if ($IsElevated) {
         $Report += "- Antivirus Signature Version: $($def.AntivirusSignatureVersion)"
         $Report += "- Last Quick Scan: $($def.LastQuickScanEndTime)"
         $Report += "- Last Full Scan: $($def.LastFullScanEndTime)"
+
+        if (-not $def.RealTimeProtectionEnabled) {
+            Write-Host "WARNING: Defender real-time protection is disabled" -ForegroundColor DarkYellow
+        }
     }
     else {
         $Report += "- Could not retrieve Defender status."
-        Write-Host "Could not retrieve Defender status." -ForegroundColor DarkGray
+        Write-Host "WARNING: Could not retrieve Defender status." -ForegroundColor DarkYellow
     }
 
     $Report += ""
@@ -568,15 +813,22 @@ if ($IsElevated) {
             $Report += "- $($adm.Name)"
             $Report += "  - Type: $($adm.ObjectClass)"
         }
+
+        # Console warning if non-built-in local admin accounts exist
+        $adminList = @($admins) | Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue
+        $nonBuiltin = $adminList | Where-Object { $_ -and $_ -notmatch '\\Administrator$' -and $_ -notmatch '^BUILTIN\\' }
+        if ($nonBuiltin -and $nonBuiltin.Count -gt 0) {
+            Write-Host ("WARNING: Additional local admins found: {0}" -f (($nonBuiltin | Select-Object -First 10) -join ", ")) -ForegroundColor DarkYellow
+        }
     }
     else {
         $Report += "- Could not retrieve local administrator list."
-        Write-Host "Could not retrieve local administrator list." -ForegroundColor DarkGray
+        Write-Host "WARNING: Could not retrieve local administrator list." -ForegroundColor DarkYellow
     }
 }
 else {
     $Report += "- Skipped (requires elevation)."
-    Log "Skipped Get-WindowsUpdate (not elevated)"
+    Log "Skipped Security Baseline (not elevated)"
     Write-Host "Skipped (requires elevation)." -ForegroundColor DarkGray
 }
 $Report += ""
@@ -605,6 +857,9 @@ if ($aadInfo -ne "Error") {
     $Report += "- Azure AD Joined: $($aadInfo.Joined)"
     $Report += "- Tenant ID: $($aadInfo.TenantId)"
     $Report += "- Tenant Name: $($aadInfo.TenantName)"
+
+    $joinText = if ($aadInfo.Joined) { "YES" } else { "NO" }
+    Write-Host ("Azure AD Joined: {0}  Tenant: {1}" -f $joinText, $aadInfo.TenantName) -ForegroundColor DarkGreen
 }
 else {
     $Report += "- Azure AD Join Status: Not Available / Error"
@@ -617,23 +872,22 @@ $Report += ""
 # [10] OPTIONAL NMAP SCAN (XML ONLY)
 # ============================================================
 Write-Host "[10/10] Nmap scan stage..." -ForegroundColor Yellow
-$Report += "## Nmap Scan"
-$Report += ""
 
+# NOTE:
+# - No console output from Nmap execution
+# - No Markdown/HTML report content for Nmap
+# - Nmap still produces its own XML report at $NmapXmlPath when enabled
 if ($RunNmap -and $IsElevated) {
 
     $nmapExe = "C:\Program Files (x86)\Nmap\nmap.exe"
 
     if (-not (Test-Path $nmapExe)) {
-        Write-Host "Nmap not found. Installing via winget..." -ForegroundColor Yellow
         Log "Nmap not found. Installing via winget."
         $install = Safe-Invoke {
             winget install --id Insecure.Nmap --source winget --accept-package-agreements --accept-source-agreements --silent
         } "Nmap Installation"
-
         if ($install -eq "Error") {
-            $Report += "- Nmap installation failed. Scan skipped."
-            Log "Nmap install failed."
+            Log "Nmap installation failed. Scan skipped."
         }
     }
 
@@ -646,40 +900,30 @@ if ($RunNmap -and $IsElevated) {
 
         if ($ip -ne "Error" -and $ip) {
             $cidr = "$($ip.IPAddress)/$($ip.PrefixLength)"
-            Write-Host "Running Nmap port and OS detection on $cidr ..." -ForegroundColor Yellow
-            Log "Running Nmap scan on $cidr"
+            Log "Running Nmap scan on $cidr (XML: $NmapXmlPath)"
 
-            $Report += "- Nmap scan started."
-            $Report += "  - Target network: $cidr"
-            $Report += "  - XML output: $NmapXmlPath"
-
-            # Nmap XML output only (no text into main report)
             $scanResult = Safe-Invoke {
-                & $nmapExe -sS -O -sV -T4 -oX $NmapXmlPath $cidr
+                & $nmapExe -sS -O -sV -T4 -oX $NmapXmlPath $cidr | Out-Null
             } "Nmap Scan"
 
             if ($scanResult -eq "Error") {
-                $Report += "- Nmap scan failed. See logs for details."
+                Log "Nmap scan failed."
             }
         }
         else {
-            $Report += "- Could not determine local IPv4 network. Nmap scan skipped."
             Log "No suitable IPv4 adapter found for Nmap."
         }
     }
     else {
-        $Report += "- Nmap not available after install attempt. Scan skipped."
         Log "Nmap not found after attempted install."
     }
 }
 elseif ($RunNmap -and -not $IsElevated) {
-    $Report += "- Nmap was requested but skipped because elevation is required."
+    Log "Nmap requested but skipped (not elevated)."
 }
 else {
-    $Report += "- Nmap scan not requested."
+    Log "Nmap not requested."
 }
-
-$Report += ""
 
 # ============================================================
 # Save Markdown Report
