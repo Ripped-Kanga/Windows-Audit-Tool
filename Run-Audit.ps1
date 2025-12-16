@@ -91,7 +91,44 @@ function Start-SelfElevate {
     }
 }
 
+# ---------------------------------- #
+# Windows Update Dependency Check    #
+# ---------------------------------- #
+function Ensure-PSWindowsUpdate {
+    Write-Host "Ensuring PSWindowsUpdate + dependencies..." -ForegroundColor Yellow
+
+    # Make sure TLS 1.2 is enabled (common cause of PSGallery weirdness on older builds)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    # Trust PSGallery (avoids prompts)
+    try {
+        $psg = Get-PSRepository -Name PSGallery -ErrorAction Stop
+        if ($psg.InstallationPolicy -ne 'Trusted') {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+        }
+    } catch {
+        # If PowerShellGet is *really* old, this might fail; continue and rely on -Confirm:$false
+    }
+
+    # Ensure NuGet provider exists
+    if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+        Write-Host "Installing NuGet provider..." -ForegroundColor Yellow
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -Confirm:$false | Out-Null
+        Import-PackageProvider -Name NuGet -Force | Out-Null
+    }
+
+    # Ensure PSWindowsUpdate module is installed
+    if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+        Write-Host "Installing PSWindowsUpdate from PSGallery..." -ForegroundColor Yellow
+        Install-Module -Name PSWindowsUpdate -Force -AllowClobber -Scope CurrentUser -Confirm:$false -SkipPublisherCheck | Out-Null
+    }
+
+    Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+    Write-Host "PSWindowsUpdate ready." -ForegroundColor DarkGreen
+}
+
 Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
+
 
 $IsElevated = Test-IsElevated
 if (-not $IsElevated) {
@@ -469,6 +506,9 @@ $Report += ""
 # [4] PENDING WINDOWS UPDATES
 # ============================================================
 Write-Host "[4/10] Checking for pending Windows updates..." -ForegroundColor Yellow
+
+Ensure-PSWindowsUpdate
+
 $Report += "## Pending Windows Updates"
 $Report += ""
 
