@@ -813,41 +813,230 @@ $Report += ""
 # ============================================================
 Write-Host "[10/10] Nmap scan stage..." -ForegroundColor Yellow
 
+# --- helpers (scoped to this section) ---
+function Log-Tail {
+    param(
+        [string]$Path,
+        [int]$Last = 120,
+        [string]$Prefix = "winget"
+    )
+    try {
+        if (Test-Path $Path) {
+            Get-Content -Path $Path -Tail $Last -ErrorAction Stop |
+                ForEach-Object { Log ("${Prefix}: " + $_) }
+        } else {
+            Log ("${Prefix}: (log file not found: $Path)")
+        }
+    } catch {
+        Log ("${Prefix}: Failed to read log tail: " + $_.Exception.Message)
+    }
+}
+
+function Test-VC2013Runtime {
+    # MSVCR120.dll is Visual C++ 2013 runtime (VC120)
+    return (Test-Path "$env:WINDIR\System32\msvcr120.dll") -or (Test-Path "$env:WINDIR\SysWOW64\msvcr120.dll")
+}
+
+function Invoke-WingetInstallAsUser {
+    param(
+        [Parameter(Mandatory=$true)][string]$WingetId,
+        [string]$WingetLogPath = "C:\Temp\winget-install.log"
+    )
+
+    try {
+        if (-not (Test-Path "C:\Temp")) { New-Item -Path "C:\Temp" -ItemType Directory -Force | Out-Null }
+
+        $interactiveUser = (Get-CimInstance Win32_ComputerSystem).UserName
+        if (-not $interactiveUser) {
+            Log "No interactive user session detected. Can't run winget in user context."
+            return $false
+        }
+
+        $dir = Split-Path -Parent $WingetLogPath
+        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+
+        Log "Starting winget install as interactive user: $interactiveUser"
+        Log "Package: $WingetId"
+        Log "winget output: $WingetLogPath"
+        Log "Note: UAC prompt may appear once the installer launches."
+
+        $taskName = "Audit-WinGet-" + ([guid]::NewGuid().ToString("N"))
+        $tempPs1  = "C:\Temp\$taskName.ps1"
+
+        # Write a tiny PS script to avoid schtasks /TR quoting issues
+        $script = @"
+`$ErrorActionPreference = 'Continue'
+try {
+  `$args = @(
+    'install','-e','--id','$WingetId',
+    '--source','winget',
+    '--accept-package-agreements','--accept-source-agreements',
+    '--silent','--disable-interactivity'
+  )
+  & winget @args 2>&1 | Out-File -FilePath '$WingetLogPath' -Encoding utf8
+  exit `$LASTEXITCODE
+} catch {
+  (`$_.Exception.Message) | Out-File -FilePath '$WingetLogPath' -Append -Encoding utf8
+  exit 1
+}
+"@
+        Set-Content -Path $tempPs1 -Value $script -Encoding UTF8
+
+        # Avoid /SD (locale issues). schtasks wants an /ST even though we'll /Run immediately.
+        $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+        $tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$tempPs1`""
+
+        $createOut = & schtasks.exe /Create `
+            /TN $taskName /TR $tr `
+            /SC ONCE /ST $startTime `
+            /RU $interactiveUser /RL LIMITED /F 2>&1
+        Log ("schtasks-create: " + ($createOut -join " "))
+
+        $runOut = & schtasks.exe /Run /TN $taskName 2>&1
+        Log ("schtasks-run: " + ($runOut -join " "))
+
+        # Clean up task definition + temp script shortly after start (running instance continues)
+        Start-Sleep -Seconds 2
+        $delOut = & schtasks.exe /Delete /TN $taskName /F 2>&1
+        Log ("schtasks-delete: " + ($delOut -join " "))
+
+        Remove-Item -Path $tempPs1 -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        Log ("Invoke-WingetInstallAsUser failed: " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Wait-ForCondition {
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$Condition,
+        [int]$TimeoutSeconds = 900,
+        [int]$PollSeconds = 3
+    )
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if (& $Condition) { $sw.Stop(); return $true }
+        Start-Sleep -Seconds $PollSeconds
+    }
+    $sw.Stop()
+    return $false
+}
+
+# --- main ---
 if ($RunNmap -and $IsElevated) {
 
-    $nmapExe = "C:\Program Files (x86)\Nmap\nmap.exe"
+    if (-not (Test-Path "C:\Temp")) { New-Item -Path "C:\Temp" -ItemType Directory -Force | Out-Null }
 
-    if (-not (Test-Path $nmapExe)) {
-        Log "Nmap not found. Installing via winget."
+    # Nmap install paths (either can happen)
+    $nmapExeX86 = "C:\Program Files (x86)\Nmap\nmap.exe"
+    $nmapExeX64 = "C:\Program Files\Nmap\nmap.exe"
+
+    # Helpful diagnostics
+    Safe-Invoke {
+        & winget --info 2>&1 | ForEach-Object { Log ("winget-info: " + $_) }
+    } "winget --info"
+
+    # ---- VC++ 2013 Runtime (MSVCR120.dll) ----
+    if (-not (Test-VC2013Runtime)) {
+        Log "VC++ 2013 runtime (MSVCR120.dll) not detected. Installing prerequisites via winget..."
+
+        $vcX86Log = "C:\Temp\winget-vcredist2013-x86.log"
+        $vcX64Log = "C:\Temp\winget-vcredist2013-x64.log"
+
+        # Install x86 then x64 (many apps still need x86 on x64 Windows)
+        $vc1 = Safe-Invoke {
+            if (-not (Invoke-WingetInstallAsUser -WingetId "Microsoft.VCRedist.2013.x86" -WingetLogPath $vcX86Log)) {
+                throw "Failed to launch VC++ 2013 x86 install."
+            }
+            "OK"
+        } "VC++ 2013 x86 install"
+
+        $vc2 = Safe-Invoke {
+            if (-not (Invoke-WingetInstallAsUser -WingetId "Microsoft.VCRedist.2013.x64" -WingetLogPath $vcX64Log)) {
+                throw "Failed to launch VC++ 2013 x64 install."
+            }
+            "OK"
+        } "VC++ 2013 x64 install"
+
+        # Wait until the runtime appears
+        $vcOk = Wait-ForCondition -TimeoutSeconds 900 -PollSeconds 3 -Condition { Test-VC2013Runtime }
+        if (-not $vcOk) {
+            Log "Timed out waiting for VC++ 2013 runtime to appear."
+            Log "Last VC++ x86 winget output:"
+            Log-Tail -Path $vcX86Log -Last 160 -Prefix "winget-vc2013-x86"
+            Log "Last VC++ x64 winget output:"
+            Log-Tail -Path $vcX64Log -Last 160 -Prefix "winget-vc2013-x64"
+            Log "Prereq install timed out. Nmap scan skipped."
+        } else {
+            Log "VC++ 2013 runtime detected."
+        }
+    } else {
+        Log "VC++ 2013 runtime detected."
+    }
+
+    # ---- Nmap install ----
+    if (-not (Test-Path $nmapExeX86) -and -not (Test-Path $nmapExeX64)) {
+        Log "Nmap not found. Installing via winget (user context; UAC may appear)."
+
+        $nmapLog = "C:\Temp\winget-nmap-install.log"
+
         $install = Safe-Invoke {
-            winget install --id Insecure.Nmap --source winget --accept-package-agreements --accept-source-agreements --silent
+            if (-not (Invoke-WingetInstallAsUser -WingetId "Insecure.Nmap" -WingetLogPath $nmapLog)) {
+                throw "Could not start winget in user context."
+            }
+
+            $ok = Wait-ForCondition -TimeoutSeconds 1200 -PollSeconds 3 -Condition {
+                (Test-Path $nmapExeX86) -or (Test-Path $nmapExeX64)
+            }
+
+            if (-not $ok) {
+                Log "Timed out waiting for Nmap to appear."
+                Log "Last Nmap winget output:"
+                Log-Tail -Path $nmapLog -Last 200 -Prefix "winget-nmap"
+                throw "Nmap did not install within timeout."
+            }
+
+            "OK"
         } "Nmap Installation"
+
         if ($install -eq "Error") {
             Log "Nmap installation failed. Scan skipped."
         }
     }
 
-    if (Test-Path $nmapExe) {
-        $ip = Safe-Invoke {
-            Get-NetIPAddress |
-                Where-Object { $_.AddressFamily -eq "IPv4" -and $_.PrefixOrigin -ne "WellKnown" } |
-                Select-Object -First 1
-        } "Detect IPv4 network"
+    # Resolve final nmap path
+    $nmapExe = if (Test-Path $nmapExeX64) { $nmapExeX64 } elseif (Test-Path $nmapExeX86) { $nmapExeX86 } else { $null }
 
-        if ($ip -ne "Error" -and $ip) {
-            $cidr = "$($ip.IPAddress)/$($ip.PrefixLength)"
-            Log "Running Nmap scan on $cidr (XML: $NmapXmlPath)"
+    if ($nmapExe) {
 
-            $scanResult = Safe-Invoke {
-                & $nmapExe -sS -O -sV -T4 -oX $NmapXmlPath $cidr | Out-Null
-            } "Nmap Scan"
-
-            if ($scanResult -eq "Error") {
-                Log "Nmap scan failed."
-            }
+        # If runtime still missing, don't even try to run nmap (prevents the MSVCR120 popup)
+        if (-not (Test-VC2013Runtime)) {
+            Log "VC++ 2013 runtime still not detected; skipping Nmap execution to avoid MSVCR120.dll error."
         }
         else {
-            Log "No suitable IPv4 adapter found for Nmap."
+            $ip = Safe-Invoke {
+                Get-NetIPAddress |
+                    Where-Object { $_.AddressFamily -eq "IPv4" -and $_.PrefixOrigin -ne "WellKnown" } |
+                    Select-Object -First 1
+            } "Detect IPv4 network"
+
+            if ($ip -ne "Error" -and $ip) {
+                $cidr = "$($ip.IPAddress)/$($ip.PrefixLength)"
+                Log "Running Nmap scan on $cidr (XML: $NmapXmlPath)"
+
+                $scanResult = Safe-Invoke {
+                    & $nmapExe -sS -O -sV -T4 -oX $NmapXmlPath $cidr | Out-Null
+                } "Nmap Scan"
+
+                if ($scanResult -eq "Error") {
+                    Log "Nmap scan failed."
+                }
+            }
+            else {
+                Log "No suitable IPv4 adapter found for Nmap."
+            }
         }
     }
     else {
