@@ -1,10 +1,10 @@
 <#
     Run-Audit.ps1
-    System Audit Script with progress output, security baseline, and optional Nmap
-    Markdown output formatted to be pandoc-friendly for DOCX conversion.
+    System Audit Script with progress output + security baseline.
 
-    NOTE (2025-12): Markdown tables are generated without any literal pipe characters
-    in the script source for table strings. Table rows are built using [char]124.
+    Output:
+      - HTML report written to C:\Temp\<COMPUTER>-Audit.html
+      - Operational log written to C:\Windows\Temp\AuditLog.txt
 #>
 
 $ErrorActionPreference = "Stop"
@@ -17,10 +17,8 @@ if (-not $ComputerName -or $ComputerName -eq "") {
     $ComputerName = "UnknownComputer"
 }
 
-$ReportPath     = "C:\Temp\${ComputerName}-Audit.md"
 $HtmlReportPath = "C:\Temp\${ComputerName}-Audit.html"
 $LogPath        = "C:\Windows\Temp\AuditLog.txt"
-$NmapXmlPath    = "C:\Temp\${ComputerName}-Nmap.xml"
 
 # Ensure directories exist
 New-Item -ItemType Directory -Path "C:\Temp" -Force | Out-Null
@@ -98,34 +96,56 @@ function Start-SelfElevate {
 }
 
 # ------------------------- #
-# Markdown Helpers          #
+# Console Output Helpers    #
 # ------------------------- #
-$mdPipe = [char]124
-
-function Md-Cell {
-    param([object]$Value)
-
-    $s = if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { "N/A" } else { [string]$Value }
-
-    $s = $s -replace "`r", " "
-    $s = $s -replace "`n", " "
-    $s = $s.Replace([string]$mdPipe, "/")
-    $s = ($s -replace '\s{2,}', ' ').Trim()
-
-    return $s
+function Write-Step {
+    param(
+        [Parameter(Mandatory=$true)][int]$Index,
+        [Parameter(Mandatory=$true)][int]$Total,
+        [Parameter(Mandatory=$true)][string]$Title
+    )
+    Write-Host ("[{0}/{1}] {2}" -f $Index, $Total, $Title) -ForegroundColor Yellow
+    Log ("STEP {0}/{1}: {2}" -f $Index, $Total, $Title)
 }
 
-function Md-Row {
-    param([string[]]$Cells)
-    $sep = " " + [string]$mdPipe + " "
-    return ([string]$mdPipe + " " + (($Cells | ForEach-Object { $_ }) -join $sep) + " " + [string]$mdPipe)
+function Write-Mode {
+    param([bool]$IsElevated)
+    $modeText = if ($IsElevated) { "Yes" } else { "No" }
+    $color    = if ($IsElevated) { "Green" } else { "DarkYellow" }
+    Write-Host ("[0] Elevated: {0}" -f $modeText) -ForegroundColor $color
+    Log ("Elevated: {0}" -f $modeText)
 }
 
-function Md-HeaderSep {
-    param([int]$Count)
-    $parts = @()
-    for ($i=0; $i -lt $Count; $i++) { $parts += "---" }
-    return ([string]$mdPipe + ($parts -join [string]$mdPipe) + [string]$mdPipe)
+function Write-Action {
+    param(
+        [Parameter(Mandatory=$true)][string]$What,
+        [ValidateSet('run','skip','ok','warn','bad','info')][string]$Kind = 'info'
+    )
+    $color = switch ($Kind) {
+        'run'  { 'Cyan' }
+        'skip' { 'DarkYellow' }
+        'ok'   { 'Green' }
+        'warn' { 'Yellow' }
+        'bad'  { 'Red' }
+        default { 'Gray' }
+    }
+    Write-Host ("    - {0}" -f $What) -ForegroundColor $color
+    Log ("ACTION: {0}" -f $What)
+}
+
+function Write-PrivilegedGate {
+    param(
+        [Parameter(Mandatory=$true)][bool]$IsElevated,
+        [Parameter(Mandatory=$true)][string]$What
+    )
+    if ($IsElevated) {
+        Write-Action -What ("Running: {0}" -f $What) -Kind run
+        return $true
+    } else {
+        Write-Action -What ("Skipped (not elevated): {0}" -f $What) -Kind skip
+        Log ("Skipped (not elevated): {0}" -f $What)
+        return $false
+    }
 }
 
 # ------------------------- #
@@ -193,147 +213,9 @@ function Get-PendingWindowsUpdatesWUA {
     return @($meta) + $updates
 }
 
-Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
-Log "Audit started for $ComputerName"
-
-$IsElevated = Test-IsElevated
-if (-not $IsElevated) {
-    Start-SelfElevate
-    $IsElevated = Test-IsElevated
-}
-
-if ($IsElevated) {
-    try {
-        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop
-        Write-Host "[0] Process execution policy set to Bypass for this session." -ForegroundColor Green
-        Log "Process execution policy set to Bypass"
-    }
-    catch {
-        Write-Host "[0] Failed to set process execution policy. Continuing anyway." -ForegroundColor DarkYellow
-        Log "Failed to set process execution policy: $_"
-    }
-
-    Write-Host "[0] Running as Administrator." -ForegroundColor Green
-    Log "Running elevated"
-}
-else {
-    Write-Host "[0] Running as standard user. Some checks will be skipped." -ForegroundColor DarkYellow
-    Log "Running non-elevated"
-}
-
 # ------------------------- #
-# Ask about Nmap            #
+# Installed software        #
 # ------------------------- #
-$RunNmap = $false
-if ($IsElevated) {
-    $response = Read-Host "Do you want to run an Nmap scan? (Y/N)"
-    if ($response.Trim().ToUpper() -eq "Y") {
-        $RunNmap = $true
-        Write-Host "[0] Nmap scanning enabled." -ForegroundColor Cyan
-        Log "Nmap enabled"
-    }
-    else {
-        Write-Host "[0] Nmap scan disabled by user." -ForegroundColor DarkYellow
-        Log "Nmap disabled by user"
-    }
-}
-else {
-    Write-Host "[0] Nmap scan disabled (session not elevated)." -ForegroundColor DarkYellow
-    Log "Nmap disabled due to non-elevated session"
-}
-
-# ------------------------- #
-# Begin Markdown Report     #
-# ------------------------- #
-$Report = @()
-
-$Report += "# System Audit Report"
-$Report += ""
-$Report += "- Computer: $ComputerName"
-$Report += "- Generated: $(Get-Date)"
-$Report += ""
-$Report += "---"
-$Report += ""
-
-# ============================================================
-# [1] SYSTEM INFORMATION
-# ============================================================
-Write-Host "[1/10] Collecting system information..." -ForegroundColor Yellow
-$Report += "## System Information"
-$Report += ""
-
-$compName = Safe-Invoke { $env:COMPUTERNAME } "Computer Name"
-$Report += ("- Computer Name: {0}" -f (Md-Cell $compName))
-Write-Host ("Computer Name: {0}" -f $compName) -ForegroundColor DarkGreen
-
-$os = Safe-Invoke { Get-CimInstance Win32_OperatingSystem } "Operating System"
-if ($os -ne "Error") {
-    $Report += "- Operating System:"
-    $Report += ("  - Name: {0}" -f (Md-Cell $os.Caption))
-    $Report += ("  - Version: {0}" -f (Md-Cell $os.Version))
-    $Report += ("  - Build Number: {0}" -f (Md-Cell $os.BuildNumber))
-    $Report += ("  - Architecture: {0}" -f (Md-Cell $os.OSArchitecture))
-
-    Write-Host "<Operating System>" -ForegroundColor DarkMagenta
-    Write-Host ("Name: {0}" -f $os.Caption) -ForegroundColor DarkGreen
-    Write-Host ("Version: {0}" -f $os.Version) -ForegroundColor DarkGreen
-    Write-Host ("Build Number: {0}" -f $os.BuildNumber) -ForegroundColor DarkGreen
-    Write-Host ("Architecture: {0}" -f $os.OSArchitecture) -ForegroundColor DarkGreen
-}
-
-$winVer = Safe-Invoke {
-    Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" |
-        Select-Object -Property ReleaseId, DisplayVersion
-} "Feature Version"
-if ($winVer -ne "Error") {
-    $ver = if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId }
-    $Report += ("- Windows Feature Version: {0}" -f (Md-Cell $ver))
-}
-
-$cpu = Safe-Invoke {
-    Get-CimInstance Win32_Processor |
-        Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors
-} "CPU Info"
-if ($cpu -ne "Error") {
-    $Report += "- Processor:"
-    $Report += ("  - Name: {0}" -f (Md-Cell $cpu.Name))
-    $Report += ("  - Cores: {0}" -f (Md-Cell $cpu.NumberOfCores))
-    $Report += ("  - Logical Processors: {0}" -f (Md-Cell $cpu.NumberOfLogicalProcessors))
-}
-
-$mem = Safe-Invoke { Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory } "Memory Info"
-if ($mem -ne "Error") {
-    $ramGB = [math]::Round($mem.TotalPhysicalMemory / 1GB, 2)
-    $Report += "- Memory:"
-    $Report += ("  - Installed RAM: {0} GB" -f (Md-Cell $ramGB))
-}
-
-$disks = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
-if ($disks -ne "Error" -and $disks) {
-    $Report += "- Physical Disks:"
-    foreach ($d in @($disks)) {
-        $sizeGB = [math]::Round($d.Size / 1GB, 2)
-        $Report += ("  - Model: {0}" -f (Md-Cell $d.Model))
-        $Report += ("    - Size: {0} GB" -f (Md-Cell $sizeGB))
-    }
-}
-
-$boot = Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime"
-if ($boot -ne "Error") {
-    $uptime = New-TimeSpan -Start $boot
-    $Report += "- Uptime:"
-    $Report += ("  - {0} days, {1} hours, {2} minutes" -f (Md-Cell $uptime.Days), (Md-Cell $uptime.Hours), (Md-Cell $uptime.Minutes))
-}
-
-$Report += ""
-
-# ============================================================
-# [2] INSTALLED SOFTWARE
-# ============================================================
-Write-Host "[2/10] Collecting installed software..." -ForegroundColor Yellow
-$Report += "## Installed Software"
-$Report += ""
-
 function Get-InstalledSoftwareInventory {
     param([switch]$IncludeAllUsers)
 
@@ -426,97 +308,338 @@ function Get-InstalledSoftwareInventory {
         Sort-Object DisplayName, DisplayVersion, Scope -Unique
 }
 
+# ------------------------- #
+# HTML helpers              #
+# ------------------------- #
+$Html = New-Object System.Text.StringBuilder
+$Toc = New-Object System.Collections.Generic.List[object]
+$SectionIdCounts = @{}
+
+function New-SectionId {
+    param([string]$Title)
+    $base = ($Title.ToLowerInvariant() -replace '[^a-z0-9]+','-').Trim('-')
+    if ([string]::IsNullOrWhiteSpace($base)) { $base = 'section' }
+
+    if (-not $SectionIdCounts.ContainsKey($base)) {
+        $SectionIdCounts[$base] = 1
+        return $base
+    }
+
+    $SectionIdCounts[$base] = [int]$SectionIdCounts[$base] + 1
+    return ("{0}-{1}" -f $base, $SectionIdCounts[$base])
+}
+
+function Html-Enc {
+    param([object]$Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return "N/A" }
+    $s = [string]$Value
+    $s = $s -replace "`r", " "
+    $s = $s -replace "`n", " "
+    $s = ($s -replace '\s{2,}', ' ').Trim()
+    return [System.Net.WebUtility]::HtmlEncode($s)
+}
+
+function Html-Add {
+    param([string]$Line)
+    [void]$Html.AppendLine($Line)
+}
+
+function Html-StartSection {
+    param([string]$Title)
+    $id = New-SectionId -Title $Title
+    $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id }) | Out-Null
+    Html-Add "<div class='section'>"
+    Html-Add ("<h2 id='{0}'>{1}</h2>" -f (Html-Enc $id), (Html-Enc $Title))
+}
+
+function Html-EndSection { Html-Add "</div>" }
+
+function Html-AddNote {
+    param(
+        [string]$Text,
+        [ValidateSet('info','good','warn','bad')][string]$Kind = 'info'
+    )
+    $klass = switch ($Kind) {
+        'good' { 'badge good' }
+        'warn' { 'badge warn' }
+        'bad'  { 'badge bad' }
+        default { 'badge' }
+    }
+    Html-Add ("<p><span class='{0}'>{1}</span></p>" -f $klass, (Html-Enc $Text))
+}
+
+function Html-AddKV {
+    param([hashtable]$Pairs)
+    if (-not $Pairs -or $Pairs.Count -eq 0) { return }
+    Html-Add "<div class='kv'>"
+    foreach ($k in $Pairs.Keys) {
+        Html-Add ("<div class='key'>{0}</div><div>{1}</div>" -f (Html-Enc $k), (Html-Enc $Pairs[$k]))
+    }
+    Html-Add "</div>"
+}
+
+function Html-StartDetails {
+    param([string]$Summary, [switch]$Open)
+    $openAttr = if ($Open) { " open" } else { "" }
+    Html-Add ("<details{0}><summary>{1}</summary>" -f $openAttr, (Html-Enc $Summary))
+}
+
+function Html-EndDetails { Html-Add "</details>" }
+
+function Html-AddTable {
+    param(
+        [Parameter(Mandatory=$true)][object[]]$Items,
+        [Parameter(Mandatory=$true)][array]$Columns,
+        [scriptblock]$RowClass
+    )
+
+    if (-not $Items -or $Items.Count -eq 0) {
+        Html-Add "<p class='small'>No data.</p>"
+        return
+    }
+
+    Html-Add "<table><thead><tr>"
+    foreach ($c in $Columns) { Html-Add ("<th>{0}</th>" -f (Html-Enc $c.Header)) }
+    Html-Add "</tr></thead><tbody>"
+
+    foreach ($row in $Items) {
+        $klass = ""
+        if ($RowClass) {
+            try {
+                $k = & $RowClass $row
+                if ($k) { $klass = " class='" + (Html-Enc $k) + "'" }
+            } catch { }
+        }
+
+        Html-Add ("<tr{0}>" -f $klass)
+
+        foreach ($c in $Columns) {
+            $raw = $false
+            if ($c.ContainsKey('Raw')) { $raw = [bool]$c.Raw }
+
+            $value = $null
+            if ($c.ContainsKey('Value')) {
+                $value = & $c.Value $row
+            } elseif ($c.ContainsKey('Property')) {
+                $value = $row.($c.Property)
+            }
+
+            if ($raw) {
+                $cell = if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { "N/A" } else { [string]$value }
+                Html-Add ("<td>{0}</td>" -f $cell)
+            } else {
+                Html-Add ("<td>{0}</td>" -f (Html-Enc $value))
+            }
+        }
+
+        Html-Add "</tr>"
+    }
+
+    Html-Add "</tbody></table>"
+}
+
+# ------------------------- #
+# Start                     #
+# ------------------------- #
+Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
+Log "Audit started for $ComputerName"
+
+$IsElevated = Test-IsElevated
+if (-not $IsElevated) {
+    Start-SelfElevate
+    $IsElevated = Test-IsElevated
+}
+
+if ($IsElevated) {
+    try {
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop
+        Write-Action -What "Process execution policy set to Bypass for this session." -Kind ok
+        Log "Process execution policy set to Bypass"
+    }
+    catch {
+        Write-Action -What "Failed to set process execution policy. Continuing anyway." -Kind warn
+        Log "Failed to set process execution policy: $_"
+    }
+}
+
+Write-Mode -IsElevated:$IsElevated
+
+# ============================================================
+# [1] SYSTEM INFORMATION
+# ============================================================
+Write-Step -Index 1 -Total 9 -Title "Collecting system information..."
+Write-Action -What "Running: System Information (CIM/Registry)" -Kind run
+Html-StartSection "System Information"
+
+$kv = [ordered]@{}
+
+$compName = Safe-Invoke { $env:COMPUTERNAME } "Computer Name"
+$kv["Computer Name"] = $compName
+Write-Action -What ("Computer Name: {0}" -f $compName) -Kind ok
+
+$os = Safe-Invoke { Get-CimInstance Win32_OperatingSystem } "Operating System"
+if ($os -ne "Error") {
+    $kv["Operating System"] = $os.Caption
+    $kv["OS Version"]       = $os.Version
+    $kv["Build Number"]     = $os.BuildNumber
+    $kv["Architecture"]     = $os.OSArchitecture
+
+    Write-Action -What ("OS: {0} (v{1}, build {2}, {3})" -f $os.Caption, $os.Version, $os.BuildNumber, $os.OSArchitecture) -Kind ok
+} else {
+    Write-Action -What "Operating System: Error" -Kind warn
+}
+
+$winVer = Safe-Invoke {
+    Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" |
+        Select-Object -Property ReleaseId, DisplayVersion
+} "Feature Version"
+
+if ($winVer -ne "Error") {
+    $ver = if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId }
+    $kv["Windows Feature Version"] = $ver
+}
+
+$cpu = Safe-Invoke {
+    Get-CimInstance Win32_Processor |
+        Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors
+} "CPU Info"
+
+if ($cpu -ne "Error") {
+    $kv["Processor"]          = $cpu.Name
+    $kv["Cores"]              = $cpu.NumberOfCores
+    $kv["Logical Processors"] = $cpu.NumberOfLogicalProcessors
+}
+
+$mem = Safe-Invoke { Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory } "Memory Info"
+if ($mem -ne "Error") {
+    $ramGB = [math]::Round($mem.TotalPhysicalMemory / 1GB, 2)
+    $kv["Installed RAM (GB)"] = $ramGB
+}
+
+$boot = Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime"
+if ($boot -ne "Error") {
+    $uptime = New-TimeSpan -Start $boot
+    $kv["Uptime"] = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
+}
+
+Html-AddKV -Pairs $kv
+
+$disks = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
+if ($disks -ne "Error" -and $disks) {
+    $diskList = @($disks) | ForEach-Object {
+        [pscustomobject]@{
+            Model  = $_.Model
+            SizeGB = [math]::Round($_.Size / 1GB, 2)
+        }
+    }
+    Html-StartDetails -Summary ("Physical Disks ({0})" -f $diskList.Count)
+    Html-AddTable -Items $diskList -Columns @(
+        @{ Header="Model"; Property="Model" },
+        @{ Header="Size (GB)"; Property="SizeGB" }
+    )
+    Html-EndDetails
+}
+
+Html-EndSection
+
+# ============================================================
+# [2] INSTALLED SOFTWARE
+# ============================================================
+Write-Step -Index 2 -Total 9 -Title "Collecting installed software..."
+Write-Action -What ("Running: Installed Software (Scope: {0})" -f ($(if($IsElevated){"All users + offline hives"} else {"Machine + CurrentUser"}))) -Kind run
+Html-StartSection "Installed Software"
+
 $apps = Safe-Invoke { Get-InstalledSoftwareInventory -IncludeAllUsers:($IsElevated) } "Installed Software"
 
 if ($apps -ne "Error" -and $apps) {
-    $appsList = @($apps)
+    $appsList = @($apps) | Sort-Object DisplayName, DisplayVersion, Scope
     $appCount = $appsList.Count
 
-    Write-Host ("Applications found: {0}" -f $appCount) -ForegroundColor DarkGreen
+    Write-Action -What ("Applications found: {0}" -f $appCount) -Kind ok
+    Html-AddNote -Text ("Applications found: {0}" -f $appCount) -Kind info
 
-    $Report += ("- Applications Found: {0}" -f $appCount)
-    $Report += ""
+    $open = $false
+    if ($appCount -le 200) { $open = $true }
 
-    $Report += (Md-Row @("Name", "Version", "Publisher", "Scope"))
-    $Report += (Md-HeaderSep 4)
-
-    foreach ($app in ($appsList | Sort-Object DisplayName, DisplayVersion, Scope)) {
-        $Report += (Md-Row @(
-            (Md-Cell $app.DisplayName),
-            (Md-Cell $app.DisplayVersion),
-            (Md-Cell $app.Publisher),
-            (Md-Cell $app.Scope)
-        ))
-    }
+    Html-StartDetails -Summary ("Applications ({0})" -f $appCount) -Open:($open)
+    Html-AddTable -Items $appsList -Columns @(
+        @{ Header="Name";      Property="DisplayName" },
+        @{ Header="Version";   Property="DisplayVersion" },
+        @{ Header="Publisher"; Property="Publisher" },
+        @{ Header="Scope";     Property="Scope" }
+    )
+    Html-EndDetails
 }
 else {
-    $Report += "- Applications Found: 0"
-    $Report += ""
-    $Report += "_Could not retrieve installed software list._"
-    Write-Host "Could not retrieve installed software list." -ForegroundColor DarkGray
+    Write-Action -What "Installed software inventory failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve installed software list." -Kind warn
 }
 
-$Report += ""
+Html-EndSection
 
 # ============================================================
 # [3] WINDOWS PATCHES / HOTFIXES
 # ============================================================
-Write-Host "[3/10] Collecting installed Windows patches..." -ForegroundColor Yellow
-$Report += "## Windows Patches / Hotfixes"
-$Report += ""
+Write-Step -Index 3 -Total 9 -Title "Collecting installed Windows patches..."
+Html-StartSection "Windows Patches / Hotfixes"
 
-if ($IsElevated) {
+if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Installed patches/hotfixes (Get-HotFix)") {
     $patches = Safe-Invoke { Get-HotFix | Sort-Object InstalledOn -Descending } "Windows Patches"
 
     if ($patches -ne "Error" -and $patches) {
-        $patchList  = @($patches)
+        $patchList  = @($patches) | Sort-Object InstalledOn -Descending
         $patchCount = $patchList.Count
 
-        Write-Host ("Patches found: {0}" -f $patchCount) -ForegroundColor DarkGreen
+        Write-Action -What ("Patches found: {0}" -f $patchCount) -Kind ok
+        Html-AddNote -Text ("Patches found: {0}" -f $patchCount) -Kind info
 
-        $Report += ("- Patches Found: {0}" -f $patchCount)
-        $Report += ""
+        $open = $false
+        if ($patchCount -le 200) { $open = $true }
 
-        $Report += (Md-Row @("KB", "Installed On", "Description"))
-        $Report += (Md-HeaderSep 3)
+        Html-StartDetails -Summary ("Hotfixes ({0})" -f $patchCount) -Open:($open)
 
-        foreach ($p in ($patchList | Sort-Object InstalledOn -Descending)) {
-            $kb   = Md-Cell $p.HotFixID
-            $date = if ($p.InstalledOn) { Md-Cell ($p.InstalledOn.ToShortDateString()) } else { "Unknown" }
-            $desc = Md-Cell $p.Description
-
-            $Report += (Md-Row @($kb, $date, $desc))
+        $patchRows = $patchList | ForEach-Object {
+            [pscustomobject]@{
+                KB          = $_.HotFixID
+                InstalledOn = if ($_.InstalledOn) { $_.InstalledOn.ToShortDateString() } else { "Unknown" }
+                Description = $_.Description
+            }
         }
 
+        Html-AddTable -Items $patchRows -Columns @(
+            @{ Header="KB";           Property="KB" },
+            @{ Header="Installed On"; Property="InstalledOn" },
+            @{ Header="Description";  Property="Description" }
+        )
+        Html-EndDetails
     }
     elseif ($patches -eq "Error") {
-        $Report += "- Could not retrieve installed patches / hotfixes."
-        Write-Host "Could not retrieve installed patches / hotfixes." -ForegroundColor DarkGray
+        Write-Action -What "Hotfix inventory failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve installed patches / hotfixes." -Kind warn
     }
     else {
-        $Report += "- Patches Found: 0"
-        $Report += ""
-        $Report += "_No installed patches / hotfixes found._"
+        Write-Action -What "No installed hotfixes returned." -Kind info
+        Html-AddNote -Text "No installed patches / hotfixes found." -Kind info
     }
 }
 else {
-    $Report += "- Skipped (requires elevation)."
+    Html-AddNote -Text "Skipped (requires elevation)." -Kind warn
 }
 
-$Report += ""
+Html-EndSection
 
 # ============================================================
 # [4] PENDING WINDOWS UPDATES (WUA API)
 # ============================================================
-Write-Host "[4/10] Checking pending Windows Updates..." -ForegroundColor Yellow
-$Report += "## Pending Windows Updates"
-$Report += ""
+Write-Step -Index 4 -Total 9 -Title "Checking pending Windows Updates..."
+Write-Action -What "Running: Pending updates (WUA API)" -Kind run
+Html-StartSection "Pending Windows Updates"
 
 $pendingUpdates = Safe-Invoke { Get-PendingWindowsUpdatesWUA } "Pending Windows Updates (WUA API)"
 
 if ($pendingUpdates -eq "Error") {
-    Write-Host "Pending updates check failed (WUA API)." -ForegroundColor Red
-    $Report += "- Could not query pending updates (WUA API)."
+    Write-Action -What "Pending updates query failed." -Kind bad
+    Html-AddNote -Text "Could not query pending updates (WUA API)." -Kind bad
 }
 else {
     $list = @($pendingUpdates)
@@ -524,57 +647,72 @@ else {
     $real = $list | Where-Object { $_.Title -ne "<META>" }
 
     if ($meta) {
-        $Report += ("- WUA Search: {0}" -f (Md-Cell $meta.Categories))
-        $Report += ""
+        Html-Add ("<p class='small'><span class='code'>WUA Search:</span> {0}</p>" -f (Html-Enc $meta.Categories))
     }
 
     if (-not $real -or @($real).Count -eq 0) {
-        Write-Host "No pending updates found." -ForegroundColor DarkGreen
-        $Report += "- No pending updates found."
+        Write-Action -What "No pending updates found." -Kind ok
+        Html-AddNote -Text "No pending updates found." -Kind good
     }
     else {
         $count = @($real).Count
-        Write-Host ("Pending updates: {0}" -f $count) -ForegroundColor Yellow
-        $Report += ("- Pending updates: **{0}**" -f (Md-Cell $count))
-        $Report += ""
+        Write-Action -What ("Pending updates: {0}" -f $count) -Kind warn
+        Html-AddNote -Text ("Pending updates: {0}" -f $count) -Kind warn
 
-        $Report += (Md-Row @("KB", "Title", "Categories", "Downloaded", "Mandatory", "Reboot"))
-        $Report += (Md-HeaderSep 6)
-
-        foreach ($u in @($real)) {
-            $Report += (Md-Row @(
-                (Md-Cell $u.KB),
-                (Md-Cell $u.Title),
-                (Md-Cell $u.Categories),
-                (Md-Cell $u.Downloaded),
-                (Md-Cell $u.Mandatory),
-                (Md-Cell $u.RebootRequired)
-            ))
+        $updateRows = @($real) | ForEach-Object {
+            [pscustomobject]@{
+                KB            = $_.KB
+                Title         = $_.Title
+                Categories    = $_.Categories
+                Downloaded    = $_.Downloaded
+                Mandatory     = $_.Mandatory
+                RebootRequired= $_.RebootRequired
+            }
         }
+
+        Html-StartDetails -Summary ("Updates ({0})" -f $count) -Open
+        Html-AddTable -Items $updateRows -Columns @(
+            @{ Header="KB";         Property="KB" },
+            @{ Header="Title";      Property="Title" },
+            @{ Header="Categories"; Property="Categories" },
+            @{ Header="Downloaded"; Property="Downloaded" },
+            @{ Header="Mandatory";  Property="Mandatory" },
+            @{ Header="Reboot";     Property="RebootRequired" }
+        ) -RowClass {
+            param($r)
+            if ($r.RebootRequired -eq $true -or $r.Mandatory -eq $true) { return 'sev-bad' }
+            return 'sev-warn'
+        }
+        Html-EndDetails
     }
 }
 
-$Report += ""
+Html-EndSection
 
 # ============================================================
 # [5] NETWORK ADAPTERS
 # ============================================================
-Write-Host "[5/10] Gathering network adapters..." -ForegroundColor Yellow
-$Report += "## Network Adapters"
-$Report += ""
+Write-Step -Index 5 -Total 9 -Title "Gathering network information..."
+Write-Action -What "Running: Network adapters + primary config" -Kind run
+Html-StartSection "Network"
 
 $nets = Safe-Invoke { Get-NetAdapter | Select-Object Name, Status, MacAddress } "Network Adapters"
 
 if ($nets -ne "Error" -and $nets) {
-    foreach ($n in @($nets)) {
-        $Report += ("- Adapter: {0}" -f (Md-Cell $n.Name))
-        $Report += ("  - Status: {0}" -f (Md-Cell $n.Status))
-        $Report += ("  - MAC Address: {0}" -f (Md-Cell $n.MacAddress))
-    }
+    $netList = @($nets) | Sort-Object Name
+    Write-Action -What ("Adapters found: {0}" -f $netList.Count) -Kind ok
+
+    Html-StartDetails -Summary ("Network Adapters ({0})" -f $netList.Count) -Open
+    Html-AddTable -Items $netList -Columns @(
+        @{ Header="Name";        Property="Name" },
+        @{ Header="Status";      Property="Status" },
+        @{ Header="MAC Address"; Property="MacAddress" }
+    )
+    Html-EndDetails
 }
 else {
-    $Report += "- Could not retrieve network adapter information."
-    Write-Host "Could not retrieve network adapter information." -ForegroundColor DarkGray
+    Write-Action -What "Network adapter query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve network adapter information." -Kind warn
 }
 
 $primaryCfg = Safe-Invoke {
@@ -589,203 +727,243 @@ if ($primaryCfg -ne "Error" -and $primaryCfg) {
         $ip4  = if ($cfg.IPv4Address) { ($cfg.IPv4Address.IPAddress | Select-Object -First 1) } else { "N/A" }
         $gw4  = if ($cfg.IPv4DefaultGateway) { $cfg.IPv4DefaultGateway.NextHop } else { "N/A" }
         $dns  = if ($cfg.DnsServer.ServerAddresses) { ($cfg.DnsServer.ServerAddresses -join ", ") } else { "N/A" }
-        Write-Host ("Primary: {0}  IP {1}  GW {2}" -f $name, $ip4, $gw4) -ForegroundColor DarkGreen
-        Write-Host ("DNS: {0}" -f $dns) -ForegroundColor DarkGray
+
+        Write-Action -What ("Primary: {0} | IPv4 {1} | GW {2}" -f $name, $ip4, $gw4) -Kind info
+
+        Html-Add ("<h3>{0}</h3>" -f (Html-Enc ("Primary Configuration: " + $name)))
+        Html-AddKV -Pairs ([ordered]@{
+            "IPv4"    = $ip4
+            "Gateway" = $gw4
+            "DNS"     = $dns
+        })
     }
 }
 
-$Report += ""
+Html-EndSection
 
 # ============================================================
 # [6] SMB SHARES
 # ============================================================
-Write-Host "[6/10] Gathering SMB shares..." -ForegroundColor Yellow
-$Report += "## SMB Shares"
-$Report += ""
+Write-Step -Index 6 -Total 9 -Title "Gathering SMB shares..."
+Write-Action -What "Running: SMB shares (Get-SmbShare)" -Kind run
+Html-StartSection "SMB Shares"
 
 $shares = Safe-Invoke { Get-SmbShare | Select-Object Name, Path } "SMB Shares"
 
 if ($shares -ne "Error" -and $shares) {
-    $shareList = @($shares)
+    $shareList = @($shares) | Sort-Object Name
     $nonAdmin = $shareList | Where-Object { $_.Name -notmatch '^\w\$$' -and $_.Name -notin @('ADMIN$', 'C$', 'IPC$') }
 
     if ($nonAdmin -and $nonAdmin.Count -gt 0) {
-        Write-Host ("SMB shares found: {0} (excluding default admin shares)" -f $nonAdmin.Count) -ForegroundColor DarkGreen
-        foreach ($s in ($nonAdmin | Select-Object -First 15)) {
-            Write-Host ("- {0} -> {1}" -f $s.Name, $s.Path) -ForegroundColor DarkGray
-        }
+        Write-Action -What ("Non-admin SMB shares found: {0}" -f $nonAdmin.Count) -Kind warn
+        Html-AddNote -Text ("Non-admin SMB shares found: {0}" -f $nonAdmin.Count) -Kind warn
     }
     else {
-        Write-Host "SMB shares found: 0 (excluding default admin shares)" -ForegroundColor DarkGreen
+        Write-Action -What "No non-admin SMB shares found." -Kind ok
+        Html-AddNote -Text "No non-admin SMB shares found." -Kind good
     }
 
-    foreach ($s in $shareList) {
-        $Report += ("- Share: {0}" -f (Md-Cell $s.Name))
-        $Report += ("  - Path: {0}" -f (Md-Cell $s.Path))
+    Html-StartDetails -Summary ("All Shares ({0})" -f $shareList.Count)
+    Html-AddTable -Items $shareList -Columns @(
+        @{ Header="Share"; Property="Name" },
+        @{ Header="Path";  Property="Path" }
+    ) -RowClass {
+        param($r)
+        $name = [string]$r.Name
+        if ($name -match '^\w\$$' -or $name -in @('ADMIN$','C$','IPC$')) { return '' }
+        return 'sev-warn'
     }
+    Html-EndDetails
 }
 else {
-    $Report += "- Could not retrieve SMB share information."
+    Write-Action -What "SMB share query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve SMB share information." -Kind warn
 }
 
-$Report += ""
+Html-EndSection
 
 # ============================================================
 # [7] PRINTERS
 # ============================================================
-Write-Host "[7/10] Gathering printers..." -ForegroundColor Yellow
-$Report += "## Printers"
-$Report += ""
+Write-Step -Index 7 -Total 9 -Title "Gathering printers..."
+Write-Action -What "Running: Printers (Get-Printer)" -Kind run
+Html-StartSection "Printers"
 
 $printers = Safe-Invoke { Get-Printer } "Printers"
 
 if ($printers -ne "Error" -and $printers) {
-    $printerList  = @($printers)
+    $printerList  = @($printers) | Sort-Object Name
     $printerCount = $printerList.Count
 
-    Write-Host ("Printers found: {0}" -f $printerCount) -ForegroundColor DarkGreen
+    Write-Action -What ("Printers found: {0}" -f $printerCount) -Kind ok
+    Html-AddNote -Text ("Printers found: {0}" -f $printerCount) -Kind info
 
-    $Report += ("- Printers Found: {0}" -f (Md-Cell $printerCount))
-    $Report += ""
-
-    $Report += (Md-Row @("Name", "Driver", "Port", "Shared", "Default"))
-    $Report += (Md-HeaderSep 5)
-
-    foreach ($p in ($printerList | Sort-Object Name)) {
-        $Report += (Md-Row @(
-            (Md-Cell $p.Name),
-            (Md-Cell $p.DriverName),
-            (Md-Cell $p.PortName),
-            (Md-Cell $p.Shared),
-            (Md-Cell $p.Default)
-        ))
-    }
+    Html-StartDetails -Summary ("Printers ({0})" -f $printerCount) -Open
+    Html-AddTable -Items $printerList -Columns @(
+        @{ Header="Name";    Property="Name" },
+        @{ Header="Driver";  Property="DriverName" },
+        @{ Header="Port";    Property="PortName" },
+        @{ Header="Shared";  Property="Shared" },
+        @{ Header="Default"; Property="Default" }
+    )
+    Html-EndDetails
 }
 elseif ($printers -eq "Error") {
-    $Report += "- Could not retrieve printers."
+    Write-Action -What "Printer query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve printers." -Kind warn
 }
 else {
-    $Report += "- Printers Found: 0"
-    $Report += ""
-    $Report += "_No printers found._"
+    Write-Action -What "No printers found." -Kind info
+    Html-AddNote -Text "No printers found." -Kind info
 }
 
-$Report += ""
+Html-EndSection
 
 # ============================================================
 # [8] SECURITY BASELINE CHECKS
 # ============================================================
-Write-Host "[8/10] Performing security baseline checks..." -ForegroundColor Yellow
-if ($IsElevated) {
-    $Report += "## Security Baseline Checks"
-    $Report += ""
+Write-Step -Index 8 -Total 9 -Title "Performing security baseline checks..."
+Html-StartSection "Security Baseline Checks"
 
-    $Report += "### BitLocker"
-    $Report += ""
+if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLocker/TPM/SecureBoot/Firewall/Defender/Admins)") {
 
+    # --- BitLocker ---
+    Html-Add "<h3>BitLocker</h3>"
     $bitlocker = Safe-Invoke { Get-BitLockerVolume } "BitLocker Status"
     if ($bitlocker -ne "Error" -and $bitlocker) {
-        foreach ($vol in @($bitlocker)) {
-            $Report += ("- Volume: {0}" -f (Md-Cell $vol.VolumeLetter))
-            $Report += ("  - Protection Status: {0}" -f (Md-Cell $vol.ProtectionStatus))
-            $Report += ("  - Lock Status: {0}" -f (Md-Cell $vol.LockStatus))
-            $Report += ("  - Encryption Method: {0}" -f (Md-Cell $vol.EncryptionMethod))
-            $Report += ""
-
-            if ($vol.ProtectionStatus -ne 'On' -and $vol.ProtectionStatus -ne 1) {
-                Write-Host ("WARNING: BitLocker protection is not ON for volume {0}" -f $vol.VolumeLetter) -ForegroundColor DarkYellow
+        $blRows = @($bitlocker) | ForEach-Object {
+            $protOn = ($_.ProtectionStatus -eq 'On' -or $_.ProtectionStatus -eq 1)
+            [pscustomobject]@{
+                Volume           = $_.VolumeLetter
+                Protection       = if ($protOn) { "<span class='badge good'>On</span>" } else { "<span class='badge warn'>Off</span>" }
+                LockStatus       = $_.LockStatus
+                EncryptionMethod = $_.EncryptionMethod
+                _RowClass        = if ($protOn) { 'sev-good' } else { 'sev-warn' }
             }
         }
+
+        Html-AddTable -Items $blRows -Columns @(
+            @{ Header="Volume";            Property="Volume" },
+            @{ Header="Protection";        Property="Protection"; Raw=$true },
+            @{ Header="Lock Status";       Property="LockStatus" },
+            @{ Header="Encryption Method"; Property="EncryptionMethod" }
+        ) -RowClass { param($r) $r._RowClass }
+
+        $off = @($bitlocker) | Where-Object { $_.ProtectionStatus -ne 'On' -and $_.ProtectionStatus -ne 1 }
+        if ($off.Count -gt 0) {
+            Write-Action -What ("BitLocker: {0} volume(s) not protected" -f $off.Count) -Kind warn
+        } else {
+            Write-Action -What "BitLocker: Protection ON for all detected volumes" -Kind ok
+        }
     }
     else {
-        $Report += "- Could not retrieve BitLocker information."
-        $Report += ""
+        Write-Action -What "BitLocker query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve BitLocker information." -Kind warn
     }
 
-    $Report += "### TPM"
-    $Report += ""
-
+    # --- TPM ---
+    Html-Add "<h3>TPM</h3>"
     $tpm = Safe-Invoke { Get-Tpm } "TPM Status"
     if ($tpm -ne "Error" -and $tpm) {
-        $Report += ("- TPM Present: {0}" -f (Md-Cell $tpm.TpmPresent))
-        $Report += ("- Manufacturer: {0}" -f (Md-Cell $tpm.ManufacturerIdTxt))
-        $Report += ("- Version: {0}" -f (Md-Cell $tpm.ManufacturerVersion))
-        $Report += ("- Ready: {0}" -f (Md-Cell $tpm.TpmReady))
-        $Report += ("- Activated: {0}" -f (Md-Cell $tpm.TpmActivated))
+        Html-AddKV -Pairs ([ordered]@{
+            "TPM Present"   = $tpm.TpmPresent
+            "Manufacturer"  = $tpm.ManufacturerIdTxt
+            "Version"       = $tpm.ManufacturerVersion
+            "Ready"         = $tpm.TpmReady
+            "Activated"     = $tpm.TpmActivated
+        })
     }
     else {
-        $Report += "- Could not retrieve TPM status."
+        Write-Action -What "TPM query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve TPM status." -Kind warn
     }
 
-    $Report += ""
-    $Report += "### Secure Boot"
-    $Report += ""
-
+    # --- Secure Boot ---
+    Html-Add "<h3>Secure Boot</h3>"
     $secureBoot = Safe-Invoke { Confirm-SecureBootUEFI } "Secure Boot Check"
-    if ($secureBoot -eq $true) { $Report += "- Secure Boot: Enabled" }
-    elseif ($secureBoot -eq $false) { $Report += "- Secure Boot: Disabled" }
-    else { $Report += "- Secure Boot: Not Supported or Unknown" }
+    if ($secureBoot -eq $true) {
+        Html-AddNote -Text "Secure Boot: Enabled" -Kind good
+    }
+    elseif ($secureBoot -eq $false) {
+        Html-AddNote -Text "Secure Boot: Disabled" -Kind warn
+    }
+    else {
+        Html-AddNote -Text "Secure Boot: Not supported or unknown" -Kind info
+    }
 
-    $Report += ""
-    $Report += "### Windows Firewall"
-    $Report += ""
-
+    # --- Firewall ---
+    Html-Add "<h3>Windows Firewall</h3>"
     $fw = Safe-Invoke { Get-NetFirewallProfile } "Firewall Status"
     if ($fw -ne "Error" -and $fw) {
-        foreach ($p in @($fw)) {
-            $Report += ("- Profile: {0}" -f (Md-Cell $p.Name))
-            $Report += ("  - Enabled: {0}" -f (Md-Cell $p.Enabled))
-            $Report += ("  - Default Inbound Action: {0}" -f (Md-Cell $p.DefaultInboundAction))
-            $Report += ("  - Default Outbound Action: {0}" -f (Md-Cell $p.DefaultOutboundAction))
-            $Report += ""
+        $fwRows = @($fw) | ForEach-Object {
+            $enabled = $_.Enabled -eq $true
+            [pscustomobject]@{
+                Profile = $_.Name
+                Enabled = if ($enabled) { "<span class='badge good'>Enabled</span>" } else { "<span class='badge warn'>Disabled</span>" }
+                Inbound = $_.DefaultInboundAction
+                Outbound = $_.DefaultOutboundAction
+            }
         }
+        Html-AddTable -Items $fwRows -Columns @(
+            @{ Header="Profile";                Property="Profile" },
+            @{ Header="Enabled";                Property="Enabled"; Raw=$true },
+            @{ Header="Default Inbound Action";  Property="Inbound" },
+            @{ Header="Default Outbound Action"; Property="Outbound" }
+        )
     }
     else {
-        $Report += "- Could not retrieve firewall settings."
-        $Report += ""
+        Write-Action -What "Firewall profile query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve firewall settings." -Kind warn
     }
 
-    $Report += "### Windows Defender"
-    $Report += ""
-
+    # --- Defender ---
+    Html-Add "<h3>Windows Defender</h3>"
     $def = Safe-Invoke { Get-MpComputerStatus } "Defender Status"
     if ($def -ne "Error" -and $def) {
-        $Report += ("- Real-Time Protection: {0}" -f (Md-Cell $def.RealTimeProtectionEnabled))
-        $Report += ("- Antivirus Signature Version: {0}" -f (Md-Cell $def.AntivirusSignatureVersion))
-        $Report += ("- Last Quick Scan: {0}" -f (Md-Cell $def.LastQuickScanEndTime))
-        $Report += ("- Last Full Scan: {0}" -f (Md-Cell $def.LastFullScanEndTime))
+        Html-AddKV -Pairs ([ordered]@{
+            "Real-time protection"         = $def.RealTimeProtectionEnabled
+            "Antivirus signature version"  = $def.AntivirusSignatureVersion
+            "Last quick scan"              = $def.LastQuickScanEndTime
+            "Last full scan"               = $def.LastFullScanEndTime
+        })
     }
     else {
-        $Report += "- Could not retrieve Defender status."
+        Write-Action -What "Defender status query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
     }
 
-    $Report += ""
-    $Report += "### Local Administrators"
-    $Report += ""
-
+    # --- Local Administrators ---
+    Html-Add "<h3>Local Administrators</h3>"
     $admins = Safe-Invoke { Get-LocalGroupMember -Group 'Administrators' } "Local Admin Group"
     if ($admins -ne "Error" -and $admins) {
-        foreach ($adm in @($admins)) {
-            $Report += ("- {0}" -f (Md-Cell $adm.Name))
-            $Report += ("  - Type: {0}" -f (Md-Cell $adm.ObjectClass))
+        $admRows = @($admins) | Sort-Object Name | ForEach-Object {
+            [pscustomobject]@{
+                Name = $_.Name
+                Type = $_.ObjectClass
+            }
         }
+        Html-AddTable -Items $admRows -Columns @(
+            @{ Header="Name"; Property="Name" },
+            @{ Header="Type"; Property="Type" }
+        )
     }
     else {
-        $Report += "- Could not retrieve local administrator list."
+        Write-Action -What "Local Administrators query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve local administrator list." -Kind warn
     }
 }
 else {
-    $Report += "- Skipped (requires elevation)."
-    Log "Skipped Security Baseline (not elevated)"
+    Html-AddNote -Text "Skipped (requires elevation)." -Kind warn
 }
-$Report += ""
+
+Html-EndSection
 
 # ============================================================
 # [9] AZURE AD JOIN STATUS
 # ============================================================
-Write-Host "[9/10] Checking Azure AD join status..." -ForegroundColor Yellow
-$Report += "## Azure AD Join Status"
-$Report += ""
+Write-Step -Index 9 -Total 9 -Title "Checking Azure AD join status..."
+Write-Action -What "Running: dsregcmd /status parse" -Kind run
+Html-StartSection "Azure AD Join Status"
 
 $aadInfo = Safe-Invoke {
     $ds     = dsregcmd.exe /status
@@ -801,295 +979,122 @@ $aadInfo = Safe-Invoke {
 } "Azure AD Join Status"
 
 if ($aadInfo -ne "Error" -and $aadInfo) {
-    $Report += ("- Azure AD Joined: {0}" -f (Md-Cell $aadInfo.Joined))
-    $Report += ("- Tenant ID: {0}" -f (Md-Cell $aadInfo.TenantId))
-    $Report += ("- Tenant Name: {0}" -f (Md-Cell $aadInfo.TenantName))
-}
+    Html-AddKV -Pairs ([ordered]@{
+        "Azure AD Joined" = $aadInfo.Joined
+        "Tenant ID"       = $aadInfo.TenantId
+        "Tenant Name"     = $aadInfo.TenantName
+    })
 
-$Report += ""
-
-# ============================================================
-# [10] OPTIONAL NMAP SCAN (XML ONLY)
-# ============================================================
-Write-Host "[10/10] Nmap scan stage..." -ForegroundColor Yellow
-
-# --- helpers (scoped to this section) ---
-function Log-Tail {
-    param(
-        [string]$Path,
-        [int]$Last = 120,
-        [string]$Prefix = "winget"
-    )
-    try {
-        if (Test-Path $Path) {
-            Get-Content -Path $Path -Tail $Last -ErrorAction Stop |
-                ForEach-Object { Log ("${Prefix}: " + $_) }
-        } else {
-            Log ("${Prefix}: (log file not found: $Path)")
-        }
-    } catch {
-        Log ("${Prefix}: Failed to read log tail: " + $_.Exception.Message)
-    }
-}
-
-function Test-VC2013Runtime {
-    # MSVCR120.dll is Visual C++ 2013 runtime (VC120)
-    return (Test-Path "$env:WINDIR\System32\msvcr120.dll") -or (Test-Path "$env:WINDIR\SysWOW64\msvcr120.dll")
-}
-
-function Invoke-WingetInstallAsUser {
-    param(
-        [Parameter(Mandatory=$true)][string]$WingetId,
-        [string]$WingetLogPath = "C:\Temp\winget-install.log"
-    )
-
-    try {
-        if (-not (Test-Path "C:\Temp")) { New-Item -Path "C:\Temp" -ItemType Directory -Force | Out-Null }
-
-        $interactiveUser = (Get-CimInstance Win32_ComputerSystem).UserName
-        if (-not $interactiveUser) {
-            Log "No interactive user session detected. Can't run winget in user context."
-            return $false
-        }
-
-        $dir = Split-Path -Parent $WingetLogPath
-        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
-
-        Log "Starting winget install as interactive user: $interactiveUser"
-        Log "Package: $WingetId"
-        Log "winget output: $WingetLogPath"
-        Log "Note: UAC prompt may appear once the installer launches."
-
-        $taskName = "Audit-WinGet-" + ([guid]::NewGuid().ToString("N"))
-        $tempPs1  = "C:\Temp\$taskName.ps1"
-
-        # Write a tiny PS script to avoid schtasks /TR quoting issues
-        $script = @"
-`$ErrorActionPreference = 'Continue'
-try {
-  `$args = @(
-    'install','-e','--id','$WingetId',
-    '--source','winget',
-    '--accept-package-agreements','--accept-source-agreements',
-    '--silent','--disable-interactivity'
-  )
-  & winget @args 2>&1 | Out-File -FilePath '$WingetLogPath' -Encoding utf8
-  exit `$LASTEXITCODE
-} catch {
-  (`$_.Exception.Message) | Out-File -FilePath '$WingetLogPath' -Append -Encoding utf8
-  exit 1
-}
-"@
-        Set-Content -Path $tempPs1 -Value $script -Encoding UTF8
-
-        # Avoid /SD (locale issues). schtasks wants an /ST even though we'll /Run immediately.
-        $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
-        $tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$tempPs1`""
-
-        $createOut = & schtasks.exe /Create `
-            /TN $taskName /TR $tr `
-            /SC ONCE /ST $startTime `
-            /RU $interactiveUser /RL LIMITED /F 2>&1
-        Log ("schtasks-create: " + ($createOut -join " "))
-
-        $runOut = & schtasks.exe /Run /TN $taskName 2>&1
-        Log ("schtasks-run: " + ($runOut -join " "))
-
-        # Clean up task definition + temp script shortly after start (running instance continues)
-        Start-Sleep -Seconds 2
-        $delOut = & schtasks.exe /Delete /TN $taskName /F 2>&1
-        Log ("schtasks-delete: " + ($delOut -join " "))
-
-        Remove-Item -Path $tempPs1 -Force -ErrorAction SilentlyContinue
-        return $true
-    }
-    catch {
-        Log ("Invoke-WingetInstallAsUser failed: " + $_.Exception.Message)
-        return $false
-    }
-}
-
-function Wait-ForCondition {
-    param(
-        [Parameter(Mandatory=$true)][scriptblock]$Condition,
-        [int]$TimeoutSeconds = 900,
-        [int]$PollSeconds = 3
-    )
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        if (& $Condition) { $sw.Stop(); return $true }
-        Start-Sleep -Seconds $PollSeconds
-    }
-    $sw.Stop()
-    return $false
-}
-
-# --- main ---
-if ($RunNmap -and $IsElevated) {
-
-    if (-not (Test-Path "C:\Temp")) { New-Item -Path "C:\Temp" -ItemType Directory -Force | Out-Null }
-
-    # Nmap install paths (either can happen)
-    $nmapExeX86 = "C:\Program Files (x86)\Nmap\nmap.exe"
-    $nmapExeX64 = "C:\Program Files\Nmap\nmap.exe"
-
-    # Helpful diagnostics
-    Safe-Invoke {
-        & winget --info 2>&1 | ForEach-Object { Log ("winget-info: " + $_) }
-    } "winget --info"
-
-    # ---- VC++ 2013 Runtime (MSVCR120.dll) ----
-    if (-not (Test-VC2013Runtime)) {
-        Log "VC++ 2013 runtime (MSVCR120.dll) not detected. Installing prerequisites via winget..."
-
-        $vcX86Log = "C:\Temp\winget-vcredist2013-x86.log"
-        $vcX64Log = "C:\Temp\winget-vcredist2013-x64.log"
-
-        # Install x86 then x64 (many apps still need x86 on x64 Windows)
-        $vc1 = Safe-Invoke {
-            if (-not (Invoke-WingetInstallAsUser -WingetId "Microsoft.VCRedist.2013.x86" -WingetLogPath $vcX86Log)) {
-                throw "Failed to launch VC++ 2013 x86 install."
-            }
-            "OK"
-        } "VC++ 2013 x86 install"
-
-        $vc2 = Safe-Invoke {
-            if (-not (Invoke-WingetInstallAsUser -WingetId "Microsoft.VCRedist.2013.x64" -WingetLogPath $vcX64Log)) {
-                throw "Failed to launch VC++ 2013 x64 install."
-            }
-            "OK"
-        } "VC++ 2013 x64 install"
-
-        # Wait until the runtime appears
-        $vcOk = Wait-ForCondition -TimeoutSeconds 900 -PollSeconds 3 -Condition { Test-VC2013Runtime }
-        if (-not $vcOk) {
-            Log "Timed out waiting for VC++ 2013 runtime to appear."
-            Log "Last VC++ x86 winget output:"
-            Log-Tail -Path $vcX86Log -Last 160 -Prefix "winget-vc2013-x86"
-            Log "Last VC++ x64 winget output:"
-            Log-Tail -Path $vcX64Log -Last 160 -Prefix "winget-vc2013-x64"
-            Log "Prereq install timed out. Nmap scan skipped."
-        } else {
-            Log "VC++ 2013 runtime detected."
-        }
-    } else {
-        Log "VC++ 2013 runtime detected."
-    }
-
-    # ---- Nmap install ----
-    if (-not (Test-Path $nmapExeX86) -and -not (Test-Path $nmapExeX64)) {
-        Log "Nmap not found. Installing via winget (user context; UAC may appear)."
-
-        $nmapLog = "C:\Temp\winget-nmap-install.log"
-
-        $install = Safe-Invoke {
-            if (-not (Invoke-WingetInstallAsUser -WingetId "Insecure.Nmap" -WingetLogPath $nmapLog)) {
-                throw "Could not start winget in user context."
-            }
-
-            $ok = Wait-ForCondition -TimeoutSeconds 1200 -PollSeconds 3 -Condition {
-                (Test-Path $nmapExeX86) -or (Test-Path $nmapExeX64)
-            }
-
-            if (-not $ok) {
-                Log "Timed out waiting for Nmap to appear."
-                Log "Last Nmap winget output:"
-                Log-Tail -Path $nmapLog -Last 200 -Prefix "winget-nmap"
-                throw "Nmap did not install within timeout."
-            }
-
-            "OK"
-        } "Nmap Installation"
-
-        if ($install -eq "Error") {
-            Log "Nmap installation failed. Scan skipped."
-        }
-    }
-
-    # Resolve final nmap path
-    $nmapExe = if (Test-Path $nmapExeX64) { $nmapExeX64 } elseif (Test-Path $nmapExeX86) { $nmapExeX86 } else { $null }
-
-    if ($nmapExe) {
-
-        # If runtime still missing, don't even try to run nmap (prevents the MSVCR120 popup)
-        if (-not (Test-VC2013Runtime)) {
-            Log "VC++ 2013 runtime still not detected; skipping Nmap execution to avoid MSVCR120.dll error."
-        }
-        else {
-            $ip = Safe-Invoke {
-                Get-NetIPAddress |
-                    Where-Object { $_.AddressFamily -eq "IPv4" -and $_.PrefixOrigin -ne "WellKnown" } |
-                    Select-Object -First 1
-            } "Detect IPv4 network"
-
-            if ($ip -ne "Error" -and $ip) {
-                $cidr = "$($ip.IPAddress)/$($ip.PrefixLength)"
-                Log "Running Nmap scan on $cidr (XML: $NmapXmlPath)"
-
-                $scanResult = Safe-Invoke {
-                    & $nmapExe -sS -O -sV -T4 -oX $NmapXmlPath $cidr | Out-Null
-                } "Nmap Scan"
-
-                if ($scanResult -eq "Error") {
-                    Log "Nmap scan failed."
-                }
-            }
-            else {
-                Log "No suitable IPv4 adapter found for Nmap."
-            }
-        }
-    }
-    else {
-        Log "Nmap not found after attempted install."
-    }
-}
-elseif ($RunNmap -and -not $IsElevated) {
-    Log "Nmap requested but skipped (not elevated)."
+    Write-Action -What ("Azure AD Joined: {0}" -f $(if($aadInfo.Joined){"Yes"} else {"No"})) -Kind info
 }
 else {
-    Log "Nmap not requested."
+    Write-Action -What "Azure AD join status query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve Azure AD join status." -Kind warn
 }
 
-# ============================================================
-# Save Markdown Report
-# ============================================================
-Write-Host "[Final] Saving Markdown report: $ReportPath" -ForegroundColor Cyan
-try {
-    $Report -join "`r`n" | Out-File -FilePath $ReportPath -Force -Encoding utf8
-    Write-Host "Markdown report saved to $ReportPath" -ForegroundColor Green
-    Log "Markdown report written to $ReportPath"
-}
-catch {
-    Write-Host "Failed to write Markdown report: $_" -ForegroundColor Red
-    Log "Failed to write Markdown report: $_"
-}
+Html-EndSection
 
 # ============================================================
 # Save HTML Report
 # ============================================================
 Write-Host "[Final] Saving HTML report: $HtmlReportPath" -ForegroundColor Cyan
 try {
+    $generated = Get-Date
+    $elevText = if ($IsElevated) { "Yes" } else { "No" }
+
+    # Build Table of Contents (from Html-StartSection calls)
+    $tocHtml = ""
+    if ($Toc -and $Toc.Count -gt 0) {
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("<div class='toc'>")
+        [void]$sb.AppendLine("<h2>Contents</h2>")
+        [void]$sb.AppendLine("<ol>")
+        foreach ($t in $Toc) {
+            $id = Html-Enc $t.Id
+            $tt = Html-Enc $t.Title
+            [void]$sb.AppendLine(("<li><a href='#{0}'>{1}</a></li>" -f $id, $tt))
+        }
+        [void]$sb.AppendLine("</ol>")
+        [void]$sb.AppendLine("</div>")
+        $tocHtml = $sb.ToString()
+    }
+
 $htmlContent = @"
-<html>
+<!doctype html>
+<html lang="en">
 <head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>System Audit Report - $ComputerName</title>
 <style>
-body { font-family: Consolas, monospace; background-color:#f4f4f4; padding:20px; }
-h1, h2, h3 { color: #2E5C6E; }
-pre { background-color:#fff; padding:10px; border:1px solid #ccc; overflow-x:auto; }
-hr { border:0; border-top:1px solid #ccc; margin:10px 0; }
+:root{
+  --bg:#f6f8fb; --card:#ffffff; --text:#1f2937; --muted:#6b7280;
+  --accent:#2E5C6E; --border:#d1d5db;
+}
+*{ box-sizing:border-box; }
+body{ font-family: Segoe UI, Arial, sans-serif; background:var(--bg); color:var(--text); margin:0; padding:24px; }
+.container{ max-width: 1100px; margin:0 auto; }
+.header{
+  background:var(--card); border:1px solid var(--border); border-radius:12px;
+  padding:18px 20px; box-shadow:0 1px 2px rgba(0,0,0,.04);
+}
+h1{ margin:0 0 6px; color:var(--accent); font-size: 28px; }
+.meta{ color:var(--muted); font-size: 13px; line-height:1.4; }
+.section{
+  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:12px;
+  padding:16px 18px; box-shadow:0 1px 2px rgba(0,0,0,.04);
+}
+.section h2{ margin:0 0 10px; color:var(--accent); border-bottom:1px solid var(--border); padding-bottom:8px; font-size: 20px; }
+.section h3{ margin:16px 0 8px; color:#334155; font-size: 16px; }
+.toc{
+  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:12px;
+  padding:16px 18px; box-shadow:0 1px 2px rgba(0,0,0,.04);
+}
+.toc h2{ margin:0 0 10px; color:var(--accent); border-bottom:1px solid var(--border); padding-bottom:8px; font-size: 20px; }
+.toc ol{ margin:0; padding-left: 18px; columns: 2; column-gap: 28px; }
+.toc li{ break-inside: avoid; padding: 2px 0; }
+.toc a{ color: var(--accent); text-decoration: none; }
+.toc a:hover{ text-decoration: underline; }
+.kv{ display:grid; grid-template-columns: 240px 1fr; gap:6px 12px; font-size: 14px; }
+.kv div.key{ color:var(--muted); }
+.small{ font-size:12px; color:var(--muted); }
+.code{ font-family: Consolas, 'Courier New', monospace; }
+details{ margin-top:10px; }
+summary{ cursor:pointer; user-select:none; font-weight:600; color:#334155; padding:6px 0; }
+table{ width:100%; border-collapse: collapse; margin-top:10px; font-size: 13px; }
+th,td{ border:1px solid var(--border); padding:8px 10px; vertical-align: top; }
+th{ background:#eef3f7; text-align:left; position:sticky; top:0; z-index:1; }
+tr:nth-child(even) td{ background:#fafbfd; }
+tr.sev-good td{ background:#ecfdf5 !important; }
+tr.sev-warn td{ background:#fffbeb !important; }
+tr.sev-bad td{ background:#fef2f2 !important; }
+.badge{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#f9fafb; }
+.badge.good{ background:#ecfdf5; border-color:#a7f3d0; }
+.badge.warn{ background:#fffbeb; border-color:#fde68a; }
+.badge.bad{ background:#fef2f2; border-color:#fecaca; }
+.footer{ margin-top:16px; color:var(--muted); font-size:12px; }
 </style>
 </head>
 <body>
-<h1>System Audit Report - $ComputerName</h1>
-<p>Generated: $(Get-Date)</p>
-<hr>
-<pre>
-$($Report -join "`r`n")
-</pre>
+<div class="container">
+  <div class="header">
+    <h1>System Audit Report - $ComputerName</h1>
+    <div class="meta">Generated: $generated • Elevated: $elevText</div>
+    <div class="meta">Report: <span class="code">$HtmlReportPath</span> • Log: <span class="code">$LogPath</span></div>
+  </div>
+
+$tocHtml
+
+$($Html.ToString())
+
+  <div class="footer">
+    <div>Note: Large tables may take a moment to render in the browser.</div>
+  </div>
+</div>
 </body>
 </html>
 "@
+
     $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
     Write-Host "HTML report saved to $HtmlReportPath" -ForegroundColor Green
     Log "HTML report written to $HtmlReportPath"
