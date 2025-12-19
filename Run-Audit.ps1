@@ -579,51 +579,55 @@ Html-EndSection
 
 # ============================================================
 # [3] WINDOWS PATCHES / HOTFIXES
+#   Recommendation applied:
+#   - Try Get-HotFix in BOTH elevated and non-elevated sessions.
+#   - Only suggest elevation if it fails while non-elevated.
 # ============================================================
 Write-Step -Index 3 -Total 9 -Title "Collecting installed Windows patches..."
+Write-Action -What "Running: Installed patches/hotfixes (Get-HotFix)" -Kind run
 Html-StartSection "Windows Patches / Hotfixes"
 
-if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Installed patches/hotfixes (Get-HotFix)") {
-    $patches = Safe-Invoke { Get-HotFix | Sort-Object InstalledOn -Descending } "Windows Patches"
+$patches = Safe-Invoke { Get-HotFix | Sort-Object InstalledOn -Descending } "Windows Patches"
 
-    if ($patches -ne "Error" -and $patches) {
-        $patchList  = @($patches) | Sort-Object InstalledOn -Descending
-        $patchCount = $patchList.Count
+if ($patches -ne "Error" -and $patches) {
+    $patchList  = @($patches) | Sort-Object InstalledOn -Descending
+    $patchCount = $patchList.Count
 
-        Write-Action -What ("Patches found: {0}" -f $patchCount) -Kind ok
-        Html-AddNote -Text ("Patches found: {0}" -f $patchCount) -Kind info
+    Write-Action -What ("Patches found: {0}" -f $patchCount) -Kind ok
+    Html-AddNote -Text ("Patches found: {0}" -f $patchCount) -Kind info
 
-        $open = $false
-        if ($patchCount -le 200) { $open = $true }
+    $open = $false
+    if ($patchCount -le 200) { $open = $true }
 
-        Html-StartDetails -Summary ("Hotfixes ({0})" -f $patchCount) -Open:($open)
+    Html-StartDetails -Summary ("Hotfixes ({0})" -f $patchCount) -Open:($open)
 
-        $patchRows = $patchList | ForEach-Object {
-            [pscustomobject]@{
-                KB          = $_.HotFixID
-                InstalledOn = if ($_.InstalledOn) { $_.InstalledOn.ToShortDateString() } else { "Unknown" }
-                Description = $_.Description
-            }
+    $patchRows = $patchList | ForEach-Object {
+        [pscustomobject]@{
+            KB          = $_.HotFixID
+            InstalledOn = if ($_.InstalledOn) { $_.InstalledOn.ToShortDateString() } else { "Unknown" }
+            Description = $_.Description
         }
+    }
 
-        Html-AddTable -Items $patchRows -Columns @(
-            @{ Header="KB";           Property="KB" },
-            @{ Header="Installed On"; Property="InstalledOn" },
-            @{ Header="Description";  Property="Description" }
-        )
-        Html-EndDetails
-    }
-    elseif ($patches -eq "Error") {
-        Write-Action -What "Hotfix inventory failed." -Kind warn
-        Html-AddNote -Text "Could not retrieve installed patches / hotfixes." -Kind warn
-    }
-    else {
-        Write-Action -What "No installed hotfixes returned." -Kind info
-        Html-AddNote -Text "No installed patches / hotfixes found." -Kind info
+    Html-AddTable -Items $patchRows -Columns @(
+        @{ Header="KB";           Property="KB" },
+        @{ Header="Installed On"; Property="InstalledOn" },
+        @{ Header="Description";  Property="Description" }
+    )
+    Html-EndDetails
+}
+elseif ($patches -eq "Error") {
+    if (-not $IsElevated) {
+        Write-Action -What "Hotfix inventory failed (non-elevated). Try running as Administrator." -Kind warn
+        Html-AddNote -Text "Could not retrieve hotfixes in a non-elevated session. Try running as Administrator." -Kind warn
+    } else {
+        Write-Action -What "Hotfix inventory failed (even when elevated). Likely WMI/permissions issue." -Kind warn
+        Html-AddNote -Text "Could not retrieve hotfixes (even when elevated). This may indicate WMI health/permissions issues." -Kind warn
     }
 }
 else {
-    Html-AddNote -Text "Skipped (requires elevation)." -Kind warn
+    Write-Action -What "No installed hotfixes returned." -Kind info
+    Html-AddNote -Text "No installed patches / hotfixes found." -Kind info
 }
 
 Html-EndSection
@@ -661,12 +665,12 @@ else {
 
         $updateRows = @($real) | ForEach-Object {
             [pscustomobject]@{
-                KB            = $_.KB
-                Title         = $_.Title
-                Categories    = $_.Categories
-                Downloaded    = $_.Downloaded
-                Mandatory     = $_.Mandatory
-                RebootRequired= $_.RebootRequired
+                KB             = $_.KB
+                Title          = $_.Title
+                Categories     = $_.Categories
+                Downloaded     = $_.Downloaded
+                Mandatory      = $_.Mandatory
+                RebootRequired = $_.RebootRequired
             }
         }
 
@@ -905,8 +909,8 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             }
         }
         Html-AddTable -Items $fwRows -Columns @(
-            @{ Header="Profile";                Property="Profile" },
-            @{ Header="Enabled";                Property="Enabled"; Raw=$true },
+            @{ Header="Profile";                 Property="Profile" },
+            @{ Header="Enabled";                 Property="Enabled"; Raw=$true },
             @{ Header="Default Inbound Action";  Property="Inbound" },
             @{ Header="Default Outbound Action"; Property="Outbound" }
         )
