@@ -36,6 +36,37 @@ function Log {
 }
 
 # ------------------------- #
+# Enhanced Error Logging    #
+# ------------------------- #
+function Log-ExceptionDetail {
+    param(
+        [Parameter(Mandatory=$true)][string]$Context,
+        [Parameter(Mandatory=$true)]$ErrorRecord
+    )
+    try {
+        $ex = $ErrorRecord.Exception
+        Log ("{0} failed: {1}" -f $Context, ($ErrorRecord.ToString()))
+        if ($ex) {
+            Log ("{0} exception type: {1}" -f $Context, ($ex.GetType().FullName))
+            if ($ex.Message) { Log ("{0} exception message: {1}" -f $Context, $ex.Message) }
+        }
+        if ($ErrorRecord.InvocationInfo) {
+            $inv = $ErrorRecord.InvocationInfo
+            if ($inv.PositionMessage) { Log ("{0} position: {1}" -f $Context, ($inv.PositionMessage -replace '\r?\n',' ')) }
+            if ($inv.ScriptName) { Log ("{0} script: {1}" -f $Context, $inv.ScriptName) }
+            if ($inv.Line) { Log ("{0} line: {1}" -f $Context, ($inv.Line.Trim())) }
+        }
+        if ($ErrorRecord.ScriptStackTrace) {
+            Log ("{0} stack: {1}" -f $Context, ($ErrorRecord.ScriptStackTrace -replace '\r?\n',' | '))
+        }
+    } catch {
+        # swallow
+    }
+}
+
+
+
+# ------------------------- #
 # Safe Invocation Wrapper   #
 # ------------------------- #
 function Safe-Invoke {
@@ -47,7 +78,7 @@ function Safe-Invoke {
         return & $Code
     }
     catch {
-        Log "$Name failed: $_"
+        Log-ExceptionDetail -Context $Name -ErrorRecord $_
         return "Error"
     }
 }
@@ -217,14 +248,151 @@ function Get-PendingWindowsUpdatesWUA {
 # Installed software        #
 # ------------------------- #
 function Get-InstalledSoftwareInventory {
+    <#
+      Installed software inventory (robust + trimmed) merging:
+        - Uninstall registry keys (HKLM 64/32 + HKCU)
+        - Loaded user hives (HKU) + offline NTUSER.DAT (when elevated)
+        - Microsoft Store / AppX packages (current user; all users when elevated)
+        - Winget list (best-effort, if present)
+
+      Enhancements:
+        - Normalizes all fields to strings to avoid type-mismatch crashes
+        - Filters noisy "junk" entries (framework/system AppX, winget usage output, component explosions)
+        - Enhanced logging on failure (includes sample object/property types)
+    #>
+
+    [CmdletBinding()]
     param([switch]$IncludeAllUsers)
 
     $results = New-Object System.Collections.Generic.List[object]
 
+    function Normalize-Text {
+        param([object]$Value)
+        try {
+            if ($null -eq $Value) { return "" }
+            $s = [string]$Value
+            $s = ($s -replace '\s+', ' ').Trim()
+            return $s
+        } catch {
+            return ""
+        }
+    }
+
+    function Test-IsGuidLikeName {
+        param([string]$Name)
+        if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+        return ($Name -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(_|$)')
+    }
+
+    function Test-IsNoisyAppx {
+        param([string]$Name, [string]$Publisher)
+        if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+        if (Test-IsGuidLikeName $Name) { return $true }
+
+        $noisyPatterns = @(
+            '^Microsoft\.VCLibs(\.|$)',
+            '^Microsoft\.UI\.Xaml(\.|$)',
+            '^Microsoft\.NET\.Native\.(Framework|Runtime)(\.|$)',
+            '^Microsoft\.WindowsAppRuntime(\.|$)',
+            '^Microsoft\.WinAppRuntime(\.|$)',
+            '^MicrosoftCorporationII\.WinAppRuntime(\.|$)',
+
+            '^Microsoft\.Windows\.Apprep\.',
+            '^Microsoft\.Windows\.OOBE',
+            '^Microsoft\.Windows\.AssignedAccess',
+            '^Microsoft\.Windows\.CapturePicker',
+            '^Microsoft\.Windows\.CloudExperienceHost',
+            '^Microsoft\.Windows\.ContentDeliveryManager',
+            '^Microsoft\.Windows\.PeopleExperienceHost',
+            '^Microsoft\.Windows\.ShellExperienceHost',
+            '^Microsoft\.Windows\.StartMenuExperienceHost',
+            '^Microsoft\.Win32WebViewHost',
+
+            '^Microsoft\.AAD\.BrokerPlugin',
+            '^Microsoft\.AccountsControl',
+            '^Microsoft\.CredDialogHost',
+            '^Microsoft\.AsyncTextService',
+            '^Microsoft\.Services\.Store\.',
+            '^Microsoft\.ECApp',
+
+            '^MicrosoftWindows\.Client\.',
+            '^MicrosoftWindows\.LKG\.',
+            '^WindowsWorkload\.',
+
+            '^windows\.immersivecontrolpanel$',
+            '^Windows\.PrintDialog$',
+            '^Windows\.CBSPreview$'
+        )
+
+        foreach ($p in $noisyPatterns) {
+            if ($Name -match $p) { return $true }
+        }
+
+        if ($Publisher -match '^CN=Microsoft Windows' -and $Name -match '_(cw5n1h2txyewy|8wekyb3d8bbwe)$') {
+            return $true
+        }
+
+        return $false
+    }
+
+    function Test-IsWingetGarbageLine {
+        param([string]$Name)
+        if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+        return ($Name -match '^(usage:|More help can be found|The following |Argument name was not recognized)')
+    }
+
+    function Test-IsComponentExplosion {
+        param([string]$Name)
+        if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+
+        # Reduce noise, but keep major "real" apps
+        if ($Name -match '^Microsoft Visual C\+\+ (20\d{2}|v14)' -and $Name -match '(Minimum|Additional)') { return $true }
+        if ($Name -match '^Microsoft \.NET (Runtime|Host|Host FX Resolver)' -and $Name -match '\(x64\)') { return $true }
+        if ($Name -match '^Python 3\.\d+\.\d+' -and $Name -match '(Core Interpreter|Documentation|Development Libraries|Standard Library|Test Suite|Tcl/Tk Support|pip Bootstrap|Executables|Add to Path)') { return $true }
+
+        return $false
+    }
+
+    function Add-Result {
+        param(
+            [object]$Name,
+            [object]$Version,
+            [object]$Publisher,
+            [object]$InstallLocation,
+            [string]$Scope,
+            [string]$Source
+        )
+        try {
+            $n = Normalize-Text $Name
+            if ([string]::IsNullOrWhiteSpace($n)) { return }
+
+            $v = Normalize-Text $Version
+            $p = Normalize-Text $Publisher
+            $il = Normalize-Text $InstallLocation
+
+            # Trim junk
+            if ($Source -match '^AppX' -and (Test-IsNoisyAppx -Name $n -Publisher $p)) { return }
+            if ($Source -eq 'Winget' -and (Test-IsWingetGarbageLine -Name $n)) { return }
+            if (Test-IsComponentExplosion -Name $n) { return }
+
+            $results.Add([pscustomobject]@{
+                DisplayName     = $n
+                DisplayVersion  = $v
+                Publisher       = $p
+                InstallLocation = $il
+                Scope           = $Scope
+                Source          = $Source
+            }) | Out-Null
+        } catch {
+            Log-ExceptionDetail -Context "Installed Software Add-Result" -ErrorRecord $_
+        }
+    }
+
     function Add-UninstallEntriesFromRoot {
         param(
             [Parameter(Mandatory)] [string]$Root,
-            [Parameter(Mandatory)] [string]$Scope
+            [Parameter(Mandatory)] [string]$Scope,
+            [Parameter(Mandatory)] [string]$Source
         )
 
         foreach ($p in @(
@@ -233,26 +401,23 @@ function Get-InstalledSoftwareInventory {
         )) {
             try {
                 Get-ItemProperty -Path $p -ErrorAction Stop |
-                    Where-Object { $_.DisplayName } |
+                    Where-Object { $_.DisplayName -and ([string]$_.DisplayName).Trim() -ne "" } |
                     ForEach-Object {
-                        $results.Add([pscustomobject]@{
-                            DisplayName     = $_.DisplayName
-                            DisplayVersion  = $_.DisplayVersion
-                            Publisher       = $_.Publisher
-                            InstallLocation = $_.InstallLocation
-                            Scope           = $Scope
-                        }) | Out-Null
+                        Add-Result -Name $_.DisplayName -Version $_.DisplayVersion -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope $Scope -Source $Source
                     }
+            } catch {
+                Log-ExceptionDetail -Context ("Installed Software registry read: {0}" -f $p) -ErrorRecord $_
             }
-            catch { }
         }
     }
 
-    Add-UninstallEntriesFromRoot -Root "HKLM:" -Scope "Machine"
-    Add-UninstallEntriesFromRoot -Root "HKCU:" -Scope "CurrentUser"
+    # --- Registry (classic installs) ---
+    Add-UninstallEntriesFromRoot -Root "HKLM:" -Scope "Machine"     -Source "UninstallHKLM"
+    Add-UninstallEntriesFromRoot -Root "HKCU:" -Scope "CurrentUser" -Source "UninstallHKCU"
 
+    # --- Loaded user hives (HKU) + offline hives (NTUSER.DAT) when elevated ---
     if ($IncludeAllUsers) {
-        $userSids = @()
+        # Loaded HKU hives
         try {
             $userSids = Get-ChildItem -Path Registry::HKEY_USERS -ErrorAction Stop |
                 Where-Object {
@@ -260,53 +425,290 @@ function Get-InstalledSoftwareInventory {
                     $_.PSChildName -notlike '*_Classes'
                 } |
                 Select-Object -ExpandProperty PSChildName
-        } catch { }
 
-        foreach ($sid in $userSids) {
-            Add-UninstallEntriesFromRoot -Root ("Registry::HKEY_USERS\{0}" -f $sid) -Scope ("UserHive:{0}" -f $sid)
+            foreach ($sid in @($userSids)) {
+                Add-UninstallEntriesFromRoot -Root ("Registry::HKEY_USERS\{0}" -f $sid) -Scope ("UserHive:{0}" -f $sid) -Source "UninstallHKU"
+            }
+        } catch {
+            Log-ExceptionDetail -Context "Installed Software HKU enumerate" -ErrorRecord $_
         }
 
-        $profileList = @()
+        # Offline user profiles (load NTUSER.DAT)
         try {
             $profileList = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' -ErrorAction Stop |
                 Select-Object PSChildName, ProfileImagePath
-        } catch { }
 
-        foreach ($p in $profileList) {
-            $sid = $p.PSChildName
-            if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+            foreach ($p in @($profileList)) {
+                $sid = [string]$p.PSChildName
+                if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
 
-            $profilePath = $p.ProfileImagePath
-            if (-not $profilePath) { continue }
+                $profilePath = [string]$p.ProfileImagePath
+                if ([string]::IsNullOrWhiteSpace($profilePath)) { continue }
 
-            $ntUser = Join-Path $profilePath 'NTUSER.DAT'
-            if (-not (Test-Path -LiteralPath $ntUser)) { continue }
+                $ntUser = Join-Path $profilePath 'NTUSER.DAT'
+                if (-not (Test-Path -LiteralPath $ntUser)) { continue }
 
-            $tempHiveName = "AUDIT_{0}" -f ([Math]::Abs($sid.GetHashCode()))
-            $tempHiveRoot = "Registry::HKEY_USERS\$tempHiveName"
-            if (Test-Path -Path $tempHiveRoot) { continue }
+                $tempHiveName = "AUDIT_{0}" -f ([Math]::Abs($sid.GetHashCode()))
+                $tempHiveRoot = "Registry::HKEY_USERS\$tempHiveName"
+                if (Test-Path -Path $tempHiveRoot) { continue }
 
-            $loaded = $false
-            try {
-                $null = & reg.exe load ("HKU\{0}" -f $tempHiveName) "$ntUser" 2>$null
-                if ($LASTEXITCODE -eq 0) { $loaded = $true }
-            } catch { $loaded = $false }
-
-            if ($loaded) {
+                $loaded = $false
                 try {
-                    Add-UninstallEntriesFromRoot -Root $tempHiveRoot -Scope ("OfflineUser:{0}" -f $sid)
-                }
-                finally {
-                    try { $null = & reg.exe unload ("HKU\{0}" -f $tempHiveName) 2>$null } catch { }
+                    $null = & reg.exe load ("HKU\{0}" -f $tempHiveName) "$ntUser" 2>$null
+                    if ($LASTEXITCODE -eq 0) { $loaded = $true }
+                } catch { $loaded = $false }
+
+                if ($loaded) {
+                    try {
+                        Add-UninstallEntriesFromRoot -Root $tempHiveRoot -Scope ("OfflineUser:{0}" -f $sid) -Source "UninstallHKU-Offline"
+                    }
+                    finally {
+                        try { $null = & reg.exe unload ("HKU\{0}" -f $tempHiveName) 2>$null } catch { }
+                    }
                 }
             }
+        } catch {
+            Log-ExceptionDetail -Context "Installed Software offline hives" -ErrorRecord $_
         }
     }
 
-    $results |
-        Where-Object { $_.DisplayName } |
-        Sort-Object DisplayName, DisplayVersion, Scope -Unique
+    # --- Microsoft Store / AppX packages ---
+    try {
+        Get-AppxPackage -ErrorAction SilentlyContinue | ForEach-Object {
+            $name = if ($_.PackageFamilyName) { $_.PackageFamilyName } else { $_.Name }
+            Add-Result -Name $name -Version ($_.Version.ToString()) -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope "CurrentUser" -Source "AppX"
+        }
+    } catch {
+        Log-ExceptionDetail -Context "Installed Software AppX current user" -ErrorRecord $_
+    }
+
+    if ($IncludeAllUsers) {
+        try {
+            Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | ForEach-Object {
+                $name = if ($_.PackageFamilyName) { $_.PackageFamilyName } else { $_.Name }
+                Add-Result -Name $name -Version ($_.Version.ToString()) -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope "AllUsers" -Source "AppX-AllUsers"
+            }
+        } catch {
+            Log-ExceptionDetail -Context "Installed Software AppX all users" -ErrorRecord $_
+        }
+    }
+
+    # --- Winget (best-effort; version-safe) ---
+    try {
+        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($winget) {
+            # Don't pass flags that older winget builds reject
+            $raw = & $winget.Source "list" "--disable-interactivity" "--accept-source-agreements" 2>&1
+            $lines = @($raw) | ForEach-Object { [string]$_ } | Where-Object { $_ -and $_.Trim() -ne "" }
+
+            # If this looks like help/usage output, skip entirely
+            if ($lines -match '^usage:\s+winget\s+list') {
+                Log "Winget list returned usage/help output; skipping winget inventory."
+            } else {
+                # Attempt to parse the aligned table if present; otherwise treat as name-only lines.
+                $sepHit = ($lines | Select-String -Pattern '^-{3,}\s+-{3,}' -SimpleMatch:$false | Select-Object -First 1)
+                $dataLines = @()
+                if ($sepHit -and $sepHit.LineNumber -and $sepHit.LineNumber -lt $lines.Count) {
+                    $dataLines = $lines[($sepHit.LineNumber)..($lines.Count-1)]
+                } elseif ($lines.Count -gt 2) {
+                    $dataLines = $lines[2..($lines.Count-1)]
+                }
+
+                foreach ($l in @($dataLines)) {
+                    try {
+                        $t = $l.TrimEnd()
+                        if (-not $t -or $t -match '^-{3,}$') { continue }
+                        if (Test-IsWingetGarbageLine -Name $t) { continue }
+
+                        $parts = $t -split '\s{2,}'
+                        if ($parts.Count -ge 1) {
+                            $name = $parts[0]
+                            $ver  = if ($parts.Count -ge 3) { $parts[2] } else { "" }
+                            Add-Result -Name $name -Version $ver -Publisher "" -InstallLocation "" -Scope "Machine/User" -Source "Winget"
+                        }
+                    } catch {
+                        Log-ExceptionDetail -Context "Winget parse line" -ErrorRecord $_
+                    }
+                }
+            }
+        }
+    } catch {
+        Log-ExceptionDetail -Context "Installed Software Winget" -ErrorRecord $_
+    }
+
+    # --- De-dupe & aggregate sources (string-key grouping to avoid type mismatches) ---
+    try {
+        $norm = @($results) | ForEach-Object {
+            # Ensure all fields are strings
+            $_.DisplayName    = Normalize-Text $_.DisplayName
+            $_.DisplayVersion = Normalize-Text $_.DisplayVersion
+            $_.Publisher      = Normalize-Text $_.Publisher
+            $_.InstallLocation= Normalize-Text $_.InstallLocation
+            $_.Scope          = Normalize-Text $_.Scope
+            $_.Source         = Normalize-Text $_.Source
+            $_
+        } | Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne "" }
+
+        $groups = $norm | Group-Object -Property @{ Expression = {
+            "{0}`0{1}`0{2}`0{3}" -f ($_.DisplayName.ToLowerInvariant()),
+                                ($_.DisplayVersion.ToLowerInvariant()),
+                                ($_.Publisher.ToLowerInvariant()),
+                                ($_.Scope.ToLowerInvariant())
+        }}
+
+        $out = foreach ($g in $groups) {
+            $first = $g.Group | Select-Object -First 1
+            $sources = ($g.Group | ForEach-Object { $_.Source } | Where-Object { $_ } | Sort-Object -Unique) -join ";"
+            $first | Add-Member -NotePropertyName Sources -NotePropertyValue $sources -Force
+            $first
+        }
+
+        return ($out | Sort-Object DisplayName, DisplayVersion, Scope)
+    } catch {
+        Log-ExceptionDetail -Context "Installed Software grouping/trim" -ErrorRecord $_
+        try {
+            $sample = @($results | Select-Object -First 20)
+            Log ("Installed Software sample (first 20): {0}" -f (($sample | ForEach-Object { $_.DisplayName }) -join " | "))
+
+            foreach ($s in $sample) {
+                try {
+                    $props = $s.PSObject.Properties | ForEach-Object { "{0}={1}" -f $_.Name, (if ($_.Value) { $_.Value.GetType().Name } else { "null" }) }
+                    Log ("Installed Software row types: {0}" -f ($props -join ", "))
+                } catch { }
+            }
+        } catch { }
+
+        return ($results | Sort-Object DisplayName, DisplayVersion, Scope -Unique)
+    }
 }
+
+# ------------------------- #
+# Software de-duplication   #
+# ------------------------- #
+function Remove-SoftwareDuplicates {
+    <#
+      Cleans software inventory duplicates with two rules:
+
+      1) Prefer a REAL version over "N/A"/blank for the same DisplayName.
+         - If a name has at least one real version entry, drop the rows for that name where version is N/A/blank/unknown.
+
+      2) De-duplicate on DisplayName + DisplayVersion.
+         - If two entries have the same name and same version, keep only one.
+         - If the versions differ, keep them both (distinct installs).
+
+      When duplicates are collapsed, this function merges:
+        - Scope   (unique values joined with ';')
+        - Sources (unique values joined with ';')
+      And prefers the row with richer Publisher/InstallLocation fields.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][object[]]$Items
+    )
+
+    if (-not $Items -or $Items.Count -eq 0) { return @() }
+
+    function Norm([object]$v) {
+        try {
+            if ($null -eq $v) { return "" }
+            $s = [string]$v
+            $s = ($s -replace '\s+', ' ').Trim()
+            return $s
+        } catch { return "" }
+    }
+
+    function NormName([object]$n) {
+        (Norm $n).ToLowerInvariant()
+    }
+
+    function NormVersion([object]$v) {
+        $vv = Norm $v
+        if ([string]::IsNullOrWhiteSpace($vv)) { return "N/A" }
+        if ($vv -match '^(N/A|NA|UNKNOWN|NOT AVAILABLE)$') { return "N/A" }
+        return $vv
+    }
+
+    function Join-Unique([string[]]$vals) {
+        (($vals | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() } | Sort-Object -Unique) -join ';')
+    }
+
+    # ---------------------------
+    # Pass 1: Drop N/A versions when a real version exists for that name
+    # ---------------------------
+    $filtered = foreach ($g in ($Items | Group-Object -Property @{ Expression = { NormName $_.DisplayName } })) {
+        $rows = @($g.Group)
+        $hasReal = $false
+        foreach ($r in $rows) {
+            if ((NormVersion $r.DisplayVersion) -ne "N/A") { $hasReal = $true; break }
+        }
+
+        if ($hasReal) {
+            $rows | Where-Object { (NormVersion $_.DisplayVersion) -ne "N/A" }
+        } else {
+            $rows
+        }
+    }
+
+    # ---------------------------
+    # Pass 2: De-dupe on Name + Version (keep distinct versions), merge Scope/Sources
+    # ---------------------------
+    $groups = $filtered | Group-Object -Property @{ Expression = {
+        $n = (NormName $_.DisplayName)
+        $v = (NormVersion $_.DisplayVersion).ToLowerInvariant()
+        "$n`0$v"
+    }}
+
+    $out = foreach ($g in $groups) {
+        $rows = @($g.Group)
+        if ($rows.Count -eq 1) {
+            # Normalize version display if it is blank-ish
+            $rows[0].DisplayName    = Norm $rows[0].DisplayName
+            $rows[0].DisplayVersion = NormVersion $rows[0].DisplayVersion
+            if (-not ($rows[0].PSObject.Properties.Name -contains 'Sources') -and ($rows[0].PSObject.Properties.Name -contains 'Source')) {
+                $rows[0] | Add-Member -NotePropertyName Sources -NotePropertyValue (Norm $rows[0].Source) -Force
+            }
+            $rows[0]
+            continue
+        }
+
+        # Prefer a row with more useful metadata.
+        $best = $rows | Sort-Object -Descending -Property @{ Expression = {
+            $score = 0
+            if (-not [string]::IsNullOrWhiteSpace((Norm $_.Publisher))) { $score += 2 }
+            if (-not [string]::IsNullOrWhiteSpace((Norm $_.InstallLocation))) { $score += 1 }
+            if ($_.PSObject.Properties.Name -contains 'Sources') { $score += (Norm $_.Sources).Length } elseif ($_.PSObject.Properties.Name -contains 'Source') { $score += (Norm $_.Source).Length }
+            $score
+        }} | Select-Object -First 1
+
+        # Merge scopes/sources across duplicates
+        $scopes = $rows | ForEach-Object { Norm $_.Scope } | Where-Object { $_ } | Sort-Object -Unique
+
+        $sources = $rows | ForEach-Object {
+            if ($_.PSObject.Properties.Name -contains 'Sources') { Norm $_.Sources }
+            elseif ($_.PSObject.Properties.Name -contains 'Source') { Norm $_.Source }
+            else { "" }
+        } | Where-Object { $_ } | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique
+
+        if ($scopes.Count -gt 0) {
+            $best.Scope = Join-Unique $scopes
+        }
+
+        if (-not ($best.PSObject.Properties.Name -contains 'Sources')) {
+            $best | Add-Member -NotePropertyName Sources -NotePropertyValue "" -Force
+        }
+        if ($sources.Count -gt 0) {
+            $best.Sources = Join-Unique $sources
+        }
+
+        $best.DisplayName    = Norm $best.DisplayName
+        $best.DisplayVersion = NormVersion $best.DisplayVersion
+
+        $best
+    }
+
+    return @($out)
+}
+
 
 # ------------------------- #
 # HTML helpers              #
@@ -546,14 +948,27 @@ Html-EndSection
 # [2] INSTALLED SOFTWARE
 # ============================================================
 Write-Step -Index 2 -Total 9 -Title "Collecting installed software..."
-Write-Action -What ("Running: Installed Software (Scope: {0})" -f ($(if($IsElevated){"All users + offline hives"} else {"Machine + CurrentUser"}))) -Kind run
+Write-Action -What ("Running: Installed Software (Scope: {0})" -f ($(if($IsElevated){"HKLM/HKCU + HKU/offline + AppX(all users) + Winget(best-effort)"} else {"HKLM/HKCU + AppX(current user) + Winget(best-effort)"}))) -Kind run
 Html-StartSection "Installed Software"
 
 $apps = Safe-Invoke { Get-InstalledSoftwareInventory -IncludeAllUsers:($IsElevated) } "Installed Software"
 
 if ($apps -ne "Error" -and $apps) {
-    $appsList = @($apps) | Sort-Object DisplayName, DisplayVersion, Scope
-    $appCount = $appsList.Count
+    $appsListRaw = @($apps)
+    $rawCount = $appsListRaw.Count
+
+    # Remove duplicates (same Name + same Version) while keeping distinct versions.
+    $appsList = Remove-SoftwareDuplicates -Items $appsListRaw
+    $dedupCount = @($appsList).Count
+
+    if ($dedupCount -ne $rawCount) {
+        Write-Action -What ("Applications de-duplicated: {0} -> {1}" -f $rawCount, $dedupCount) -Kind info
+    } else {
+        Write-Action -What ("Applications de-duplicated: no duplicates found ({0})" -f $dedupCount) -Kind info
+    }
+
+    $appsList = @($appsList) | Sort-Object DisplayName, DisplayVersion, Scope
+    $appCount = @($appsList).Count
 
     Write-Action -What ("Applications found: {0}" -f $appCount) -Kind ok
     Html-AddNote -Text ("Applications found: {0}" -f $appCount) -Kind info
@@ -566,7 +981,8 @@ if ($apps -ne "Error" -and $apps) {
         @{ Header="Name";      Property="DisplayName" },
         @{ Header="Version";   Property="DisplayVersion" },
         @{ Header="Publisher"; Property="Publisher" },
-        @{ Header="Scope";     Property="Scope" }
+        @{ Header="Scope";     Property="Scope" },
+        @{ Header="Sources";   Property="Sources" }
     )
     Html-EndDetails
 }
