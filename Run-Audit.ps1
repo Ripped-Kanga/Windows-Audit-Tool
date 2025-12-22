@@ -1352,6 +1352,72 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
     }
 
+
+    # --- Anti-Virus Products ---
+    Html-Add "<h3>Anti-Virus Products</h3>"
+    $av = Safe-Invoke {
+        Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct |
+            Select-Object displayName, productState
+    } "AntiVirus Products"
+
+    if ($av -ne "Error" -and $av) {
+        $avList = @($av)
+        Write-Action -What ("Anti-Virus products detected: {0}" -f $avList.Count) -Kind info
+
+        $avRows = $avList | ForEach-Object {
+            [UInt32]$state = $_.productState
+
+            # Decode productState groups (reverse-engineered but widely used):
+            # - ProductState   : 0xF000 (On=0x1000, Snoozed=0x2000, Expired=0x3000, Off=0x0000)
+            # - SignatureStatus: 0x00F0 (UpToDate=0x00, OutOfDate=0x10)
+            $psBits  = $state -band 0xF000
+            $sigBits = $state -band 0x00F0
+
+            $engine = switch ($psBits) {
+                0x1000 { "On" }
+                0x2000 { "Snoozed" }
+                0x3000 { "Expired" }
+                default { "Off" }
+            }
+
+            $sig = switch ($sigBits) {
+                0x0000 { "UpToDate" }
+                0x0010 { "OutOfDate" }
+                default { "Unknown" }
+            }
+
+            $statusBadge = switch ($engine) {
+                "On"      { "<span class='badge good'>Enabled</span>" }
+                "Snoozed" { "<span class='badge warn'>Snoozed</span>" }
+                "Expired" { "<span class='badge bad'>Expired</span>" }
+                default   { "<span class='badge bad'>Off</span>" }
+            }
+
+            [pscustomobject]@{
+                Product    = $_.displayName
+                Status     = $statusBadge
+                Engine     = $engine
+                Signatures = if ($sig -eq "UpToDate") { "<span class='badge good'>Up-to-date</span>" }
+                             elseif ($sig -eq "OutOfDate") { "<span class='badge warn'>Out-of-date</span>" }
+                             else { "<span class='badge warn'>Unknown</span>" }
+                State      = ("0x{0:X6}" -f [int]$state)
+            }
+        }
+
+
+        Html-AddTable -Items $avRows -Columns @(
+            @{ Header="Product";    Property="Product" },
+            @{ Header="Status";     Property="Status"; Raw=$true },
+            @{ Header="Engine";     Property="Engine" },
+            @{ Header="Signatures"; Property="Signatures"; Raw=$true },
+            @{ Header="State";      Property="State" }
+        )
+    }
+    else {
+        Write-Action -What "Anti-Virus product query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve Anti-Virus products (Security Center)." -Kind warn
+    }
+
     # --- Local Administrators ---
     Html-Add "<h3>Local Administrators</h3>"
     $admins = Safe-Invoke { Get-LocalGroupMember -Group 'Administrators' } "Local Admin Group"
