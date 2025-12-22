@@ -1254,7 +1254,7 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         $blRows = @($bitlocker) | ForEach-Object {
             $protOn = ($_.ProtectionStatus -eq 'On' -or $_.ProtectionStatus -eq 1)
             [pscustomobject]@{
-                Volume           = $_.VolumeLetter
+                Volume           = $_.MountPoint
                 Protection       = if ($protOn) { "<span class='badge good'>On</span>" } else { "<span class='badge warn'>Off</span>" }
                 LockStatus       = $_.LockStatus
                 EncryptionMethod = $_.EncryptionMethod
