@@ -79,7 +79,7 @@ All HTML is accumulated in `$Html` (a `System.Text.StringBuilder`). A parallel `
 
 ### 5. Main Execution Sequence (lines ~840–1481)
 
-The script runs 9 sequential audit sections, each introduced with `Write-Step`:
+The script runs 10 sequential audit sections, each introduced with `Write-Step`:
 
 | # | Section | Key APIs |
 |---|---|---|
@@ -92,8 +92,9 @@ The script runs 9 sequential audit sections, each introduced with `Write-Step`:
 | 7 | Printers | `Get-Printer` |
 | 8 | Security Baseline | `Get-BitLockerVolume`, `Get-Tpm`, `Confirm-SecureBootUEFI`, `Get-NetFirewallProfile`, `Get-MpComputerStatus`, WMI `AntiVirusProduct`, `net localgroup Administrators` — **admin-only** |
 | 9 | Azure AD Join Status | `dsregcmd.exe /status` output parsing |
+| 10 | Essential Eight Assessment | `Get-AppLockerPolicy`, `Get-MpPreference` (CFA/NP/ASR), `Get-WindowsOptionalFeature`, `Get-PnpDevice`, `Get-CimInstance Win32_ShadowCopy`, `Get-ScheduledTask`, registry (UAC, Office macros, WH4B, WU policy) |
 
-### 6. Report Generation (lines ~1483–1598)
+### 6. Report Generation (lines ~1700–1820)
 
 After all sections run, the script assembles the final HTML document:
 - Builds the TOC from the `$Toc` list
@@ -223,6 +224,6 @@ These are non-negotiable design decisions. Do not work around them:
 
 7. **The `.exe` is a build artifact.** Never edit `Run-Audit.exe` directly. Only update it by recompiling from `Run-Audit.ps1` with PS2EXE.
 
-8. **Maintain the `[1/9]`…`[9/9]` step count.** If you add a new section, update the `$Total` value in all `Write-Step` calls and add a matching entry in the audit sections table above.
+8. **Maintain the `[1/10]`…`[10/10]` step count.** If you add a new section, update the `$Total` value in all `Write-Step` calls and add a matching entry in the audit sections table above.
 
 9. **Use `Html-Enc` for all user-derived data.** Never interpolate raw system values directly into HTML strings — always pass through `Html-Enc` to prevent HTML injection from unexpected characters in computer names, software names, etc.
