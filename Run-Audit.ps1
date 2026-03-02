@@ -1361,8 +1361,28 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
     } "AntiVirus Products"
 
     if ($av -ne "Error" -and $av) {
-        $avList = @($av)
-        Write-Action -What ("Anti-Virus products detected: {0}" -f $avList.Count) -Kind info
+        # Deduplicate by displayName — enterprise suites (e.g. Sophos Intercept X) register
+        # multiple sub-components under the same product name in SecurityCenter2.
+        # Keep the entry that reports "On" status; fall back to first occurrence.
+        $avSeen    = @{}
+        $avDeduped = [System.Collections.Generic.List[object]]::new()
+        foreach ($avEntry in @($av)) {
+            $avName = $avEntry.displayName
+            if (-not $avSeen.ContainsKey($avName)) {
+                $avSeen[$avName] = $avEntry
+                $avDeduped.Add($avEntry)
+            } else {
+                # Prefer the "On" state (0x1000) over any other entry for the same name
+                $isOn = ([UInt32]$avEntry.productState -band 0xF000) -eq 0x1000
+                if ($isOn) {
+                    $avSeen[$avName] = $avEntry
+                    $idx = $avDeduped.FindIndex([Predicate[object]]{ param($r) $r.displayName -eq $avName })
+                    if ($idx -ge 0) { $avDeduped[$idx] = $avEntry }
+                }
+            }
+        }
+        $avList = @($avDeduped)
+        Write-Action -What ("Anti-Virus products detected: {0} (after deduplication)" -f $avList.Count) -Kind info
 
         $avRows = $avList | ForEach-Object {
             [UInt32]$state = $_.productState
