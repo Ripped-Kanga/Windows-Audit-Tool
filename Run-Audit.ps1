@@ -869,7 +869,7 @@ Write-Mode -IsElevated:$IsElevated
 # ============================================================
 # [1] SYSTEM INFORMATION
 # ============================================================
-Write-Step -Index 1 -Total 9 -Title "Collecting system information..."
+Write-Step -Index 1 -Total 10 -Title "Collecting system information..."
 Write-Action -What "Running: System Information (CIM/Registry)" -Kind run
 Html-StartSection "System Information"
 
@@ -947,7 +947,7 @@ Html-EndSection
 # ============================================================
 # [2] INSTALLED SOFTWARE
 # ============================================================
-Write-Step -Index 2 -Total 9 -Title "Collecting installed software..."
+Write-Step -Index 2 -Total 10 -Title "Collecting installed software..."
 Write-Action -What ("Running: Installed Software (Scope: {0})" -f ($(if($IsElevated){"HKLM/HKCU + HKU/offline + AppX(all users) + Winget(best-effort)"} else {"HKLM/HKCU + AppX(current user) + Winget(best-effort)"}))) -Kind run
 Html-StartSection "Installed Software"
 
@@ -999,7 +999,7 @@ Html-EndSection
 #   - Try Get-HotFix in BOTH elevated and non-elevated sessions.
 #   - Only suggest elevation if it fails while non-elevated.
 # ============================================================
-Write-Step -Index 3 -Total 9 -Title "Collecting installed Windows patches..."
+Write-Step -Index 3 -Total 10 -Title "Collecting installed Windows patches..."
 Write-Action -What "Running: Installed patches/hotfixes (Get-HotFix)" -Kind run
 Html-StartSection "Windows Patches / Hotfixes"
 
@@ -1051,7 +1051,7 @@ Html-EndSection
 # ============================================================
 # [4] PENDING WINDOWS UPDATES (WUA API)
 # ============================================================
-Write-Step -Index 4 -Total 9 -Title "Checking pending Windows Updates..."
+Write-Step -Index 4 -Total 10 -Title "Checking pending Windows Updates..."
 Write-Action -What "Running: Pending updates (WUA API)" -Kind run
 Html-StartSection "Pending Windows Updates"
 
@@ -1112,7 +1112,7 @@ Html-EndSection
 # ============================================================
 # [5] NETWORK ADAPTERS
 # ============================================================
-Write-Step -Index 5 -Total 9 -Title "Gathering network information..."
+Write-Step -Index 5 -Total 10 -Title "Gathering network information..."
 Write-Action -What "Running: Network adapters + primary config" -Kind run
 Html-StartSection "Network"
 
@@ -1164,7 +1164,7 @@ Html-EndSection
 # ============================================================
 # [6] SMB SHARES
 # ============================================================
-Write-Step -Index 6 -Total 9 -Title "Gathering SMB shares..."
+Write-Step -Index 6 -Total 10 -Title "Gathering SMB shares..."
 Write-Action -What "Running: SMB shares (Get-SmbShare)" -Kind run
 Html-StartSection "SMB Shares"
 
@@ -1205,7 +1205,7 @@ Html-EndSection
 # ============================================================
 # [7] PRINTERS
 # ============================================================
-Write-Step -Index 7 -Total 9 -Title "Gathering printers..."
+Write-Step -Index 7 -Total 10 -Title "Gathering printers..."
 Write-Action -What "Running: Printers (Get-Printer)" -Kind run
 Html-StartSection "Printers"
 
@@ -1242,7 +1242,7 @@ Html-EndSection
 # ============================================================
 # [8] SECURITY BASELINE CHECKS
 # ============================================================
-Write-Step -Index 8 -Total 9 -Title "Performing security baseline checks..."
+Write-Step -Index 8 -Total 10 -Title "Performing security baseline checks..."
 Html-StartSection "Security Baseline Checks"
 
 if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLocker/TPM/SecureBoot/Firewall/Defender/Admins)") {
@@ -1447,7 +1447,7 @@ Html-EndSection
 # ============================================================
 # [9] AZURE AD JOIN STATUS
 # ============================================================
-Write-Step -Index 9 -Total 9 -Title "Checking Azure AD join status..."
+Write-Step -Index 9 -Total 10 -Title "Checking Azure AD join status..."
 Write-Action -What "Running: dsregcmd /status parse" -Kind run
 Html-StartSection "Azure AD Join Status"
 
@@ -1477,6 +1477,367 @@ else {
     Write-Action -What "Azure AD join status query failed." -Kind warn
     Html-AddNote -Text "Could not retrieve Azure AD join status." -Kind warn
 }
+
+Html-EndSection
+
+# ============================================================
+# [10] ESSENTIAL EIGHT ASSESSMENT
+# ============================================================
+Write-Step -Index 10 -Total 10 -Title "Performing Essential Eight assessment..."
+Write-Action -What "Running: ASD Essential Eight Maturity Model checks" -Kind run
+Html-StartSection "Essential Eight Assessment"
+Html-AddNote -Text "Assessment based on the ASD Essential Eight Maturity Model. This tool performs read-only detection only; results reflect observed endpoint configuration and cannot substitute for a formal E8 assessment." -Kind info
+
+# ---- E8-1: Application Control ----
+Html-Add "<h3>1. Application Control</h3>"
+
+$appLocker = Safe-Invoke {
+    $policy = Get-AppLockerPolicy -Effective -ErrorAction Stop
+    $ruleCount = ($policy.RuleCollections | Measure-Object).Count
+    [pscustomobject]@{
+        Configured = ($ruleCount -gt 0)
+        RuleCount  = $ruleCount
+        Detail     = if ($ruleCount -gt 0) { "AppLocker policy active ($ruleCount rule collection(s))" } else { "No AppLocker policy detected" }
+    }
+} "AppLocker Policy"
+
+$wdac = Safe-Invoke {
+    $ciConfig = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config' -ErrorAction SilentlyContinue
+    $ciPolicy = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'  -ErrorAction SilentlyContinue
+    $found = ($null -ne $ciConfig) -or ($null -ne $ciPolicy)
+    [pscustomobject]@{
+        Configured = $found
+        Detail     = if ($found) { "WDAC Code Integrity policy registry key present" } else { "No WDAC policy registry key detected" }
+    }
+} "WDAC Detection"
+
+$appLockOk = ($appLocker -ne "Error") -and $appLocker -and $appLocker.Configured
+$wdacOk    = ($wdac      -ne "Error") -and $wdac      -and $wdac.Configured
+$acStatus  = if ($appLockOk -or $wdacOk) { "Detected" } else { "Not detected" }
+$acClass   = if ($appLockOk -or $wdacOk) { "sev-good" } else { "sev-bad" }
+
+Html-Add "<table class='kv-table'><tbody>"
+Html-Add ("<tr class='{0}'><th>AppLocker</th><td>{1}</td></tr>" -f $acClass, (Html-Enc $(if ($appLocker -ne "Error" -and $appLocker) { $appLocker.Detail } else { "Query failed" })))
+Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f $acClass, (Html-Enc $(if ($wdac -ne "Error" -and $wdac) { $wdac.Detail } else { "Query failed" })))
+Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $(if ($appLockOk -or $wdacOk) { "good" } else { "bad" }), $acStatus)
+Html-Add "</tbody></table>"
+Write-Action -What ("Application Control: {0}" -f $acStatus) -Kind $(if ($appLockOk -or $wdacOk) { "ok" } else { "warn" })
+
+# ---- E8-2: Patch Applications ----
+Html-Add "<h3>2. Patch Applications</h3>"
+Html-AddNote -Text "Full application inventory is in Section 2 (Installed Software). Full hotfix list is in Section 3 (Patches)." -Kind info
+
+$lastHotfix = Safe-Invoke {
+    $hf = @(Get-HotFix | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    if ($hf.Count -gt 0) {
+        $days = ([datetime]::Now - [datetime]$hf[0].InstalledOn).Days
+        [pscustomobject]@{ HotFixID = $hf[0].HotFixID; InstalledOn = ($hf[0].InstalledOn).ToString("yyyy-MM-dd"); DaysAgo = $days }
+    } else {
+        [pscustomobject]@{ HotFixID = "N/A"; InstalledOn = "N/A"; DaysAgo = $null }
+    }
+} "Last Hotfix Date"
+
+$wuAU = Safe-Invoke {
+    $au = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -ErrorAction SilentlyContinue
+    if ($au -and $au.AUOptions) {
+        $desc = switch ($au.AUOptions) {
+            2 { "Notify before download" }
+            3 { "Auto-download, notify before install" }
+            4 { "Auto-download and schedule install" }
+            5 { "Allow local admin to choose" }
+            default { "Option $($au.AUOptions)" }
+        }
+        [pscustomobject]@{ AUOptions = $au.AUOptions; Description = $desc; NoAutoUpdate = $au.NoAutoUpdate }
+    } else {
+        [pscustomobject]@{ AUOptions = $null; Description = "Not configured via policy (uses defaults)"; NoAutoUpdate = $null }
+    }
+} "WU Auto-Update Policy"
+
+$patchDays = if ($lastHotfix -ne "Error" -and $lastHotfix -and $null -ne $lastHotfix.DaysAgo) { $lastHotfix.DaysAgo } else { $null }
+$patchClass = if ($null -eq $patchDays) { "sev-warn" } elseif ($patchDays -le 14) { "sev-good" } elseif ($patchDays -le 30) { "sev-warn" } else { "sev-bad" }
+
+Html-Add "<table class='kv-table'><tbody>"
+if ($lastHotfix -ne "Error" -and $lastHotfix) {
+    Html-Add ("<tr class='{0}'><th>Most Recent Hotfix</th><td>{1}</td></tr>" -f $patchClass, (Html-Enc $lastHotfix.HotFixID))
+    Html-Add ("<tr class='{0}'><th>Installed On</th><td>{1}</td></tr>"      -f $patchClass, (Html-Enc $lastHotfix.InstalledOn))
+    Html-Add ("<tr class='{0}'><th>Days Since Last Patch</th><td>{1}</td></tr>" -f $patchClass, (Html-Enc $(if ($null -ne $patchDays) { "$patchDays days" } else { "Unknown" })))
+} else {
+    Html-Add "<tr class='sev-warn'><th>Most Recent Hotfix</th><td>Could not retrieve</td></tr>"
+}
+if ($wuAU -ne "Error" -and $wuAU) {
+    Html-Add ("<tr><th>Windows Update Policy</th><td>{0}</td></tr>" -f (Html-Enc $wuAU.Description))
+}
+Html-Add "</tbody></table>"
+Write-Action -What ("Patch currency: {0}" -f $(if ($null -ne $patchDays) { "$patchDays days since last hotfix" } else { "date unavailable" })) -Kind $(if ($patchClass -eq "sev-good") { "ok" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" })
+
+# ---- E8-3: Restrict Microsoft Office Macros ----
+Html-Add "<h3>3. Restrict Microsoft Office Macros</h3>"
+
+$officeApps    = @('Word', 'Excel', 'PowerPoint', 'Outlook', 'Access')
+$officeResults = [System.Collections.Generic.List[object]]::new()
+
+foreach ($app in $officeApps) {
+    $polPath  = "HKLM:\Software\Policies\Microsoft\Office\16.0\$app\Security"
+    $userPath = "HKCU:\Software\Microsoft\Office\16.0\$app\Security"
+
+    $polVal  = Safe-Invoke { (Get-ItemProperty -Path $polPath  -Name VBAWarnings -ErrorAction SilentlyContinue).VBAWarnings } "Office Macro Policy $app"
+    $userVal = Safe-Invoke { (Get-ItemProperty -Path $userPath -Name VbaWarnings -ErrorAction SilentlyContinue).VbaWarnings } "Office Macro User $app"
+
+    $effective = $null
+    $source    = "Not configured"
+    if ($polVal -ne "Error" -and $null -ne $polVal) {
+        $effective = $polVal; $source = "Group Policy"
+    } elseif ($userVal -ne "Error" -and $null -ne $userVal) {
+        $effective = $userVal; $source = "User setting"
+    }
+
+    if ($null -ne $effective) {
+        $label = switch ($effective) {
+            1 { "Enable all macros (insecure)" }
+            2 { "Disable with notification" }
+            3 { "Signed macros only" }
+            4 { "Disable all macros" }
+            default { "Unknown value ($effective)" }
+        }
+        $officeResults.Add([pscustomobject]@{
+            Application = $app
+            Setting     = $effective
+            Description = $label
+            Source      = $source
+        })
+    }
+}
+
+if ($officeResults.Count -gt 0) {
+    Html-AddTable -Rows $officeResults -Columns @(
+        @{ Header = "Application"; Property = "Application" }
+        @{ Header = "Macro Setting"; Property = "Description" }
+        @{ Header = "Source"; Property = "Source" }
+    ) -RowClass {
+        param($r)
+        switch ($r.Setting) {
+            1 { "sev-bad"  }
+            2 { "sev-warn" }
+            3 { "sev-good" }
+            4 { "sev-good" }
+            default { "sev-warn" }
+        }
+    }
+    Write-Action -What ("Office macro settings found for {0} application(s)" -f $officeResults.Count) -Kind info
+} else {
+    Html-AddNote -Text "No Microsoft Office 2016/2019/365 macro settings detected. Office may not be installed, or no macro policy has been configured." -Kind info
+    Write-Action -What "No Office macro settings detected" -Kind info
+}
+
+# ---- E8-4: User Application Hardening ----
+Html-Add "<h3>4. User Application Hardening</h3>"
+
+$cfa = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).EnableControlledFolderAccess } "Controlled Folder Access"
+# 0=Disabled, 1=Enabled, 2=Audit Mode
+$cfaLabel = switch ($cfa) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($cfa -eq "Error") { "Query failed" } else { "Unknown ($cfa)" } } }
+$cfaClass = switch ($cfa) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
+
+$np = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).EnableNetworkProtection } "Network Protection"
+# 0=Disabled, 1=Enabled, 2=Audit Mode
+$npLabel = switch ($np) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($np -eq "Error") { "Query failed" } else { "Unknown ($np)" } } }
+$npClass = switch ($np) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
+
+$asrIds = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).AttackSurfaceReductionRules_Ids } "ASR Rule IDs"
+$asrCount = if ($asrIds -ne "Error" -and $asrIds) { @($asrIds).Count } else { 0 }
+$asrClass = if ($asrCount -gt 0) { "sev-good" } else { "sev-warn" }
+
+# PS v2: elevation-gated; fall back to unknown when not admin
+$psv2Class = "sev-warn"; $psv2Label = "Could not determine (run as administrator for full check)"
+if ($IsElevated) {
+    $psv2 = Safe-Invoke {
+        $f = Get-WindowsOptionalFeature -Online -FeatureName 'MicrosoftWindowsPowerShellV2Root' -ErrorAction SilentlyContinue
+        if ($f) { $f.State } else { "NotPresent" }
+    } "PowerShell v2 Feature"
+    if ($psv2 -ne "Error") {
+        $psv2Label = if ($psv2 -eq "Disabled" -or $psv2 -eq "NotPresent") { "Disabled / Not installed (good)" } else { "Enabled ($psv2)" }
+        $psv2Class = if ($psv2 -eq "Disabled" -or $psv2 -eq "NotPresent") { "sev-good" } else { "sev-bad" }
+    }
+}
+
+# IE: check registry for IE executable or capability
+$iePresent = Safe-Invoke {
+    $ieExe = Test-Path "$env:ProgramFiles\Internet Explorer\iexplore.exe" -ErrorAction SilentlyContinue
+    $ieExe32 = Test-Path "${env:ProgramFiles(x86)}\Internet Explorer\iexplore.exe" -ErrorAction SilentlyContinue
+    $ieExe -or $ieExe32
+} "Internet Explorer Detection"
+$ieLabel = if ($iePresent -eq "Error") { "Query failed" } elseif ($iePresent) { "Present (should be disabled/removed)" } else { "Not detected (good)" }
+$ieClass  = if ($iePresent -eq "Error" -or $iePresent) { "sev-warn" } else { "sev-good" }
+
+Html-Add "<table class='kv-table'><tbody>"
+Html-Add ("<tr class='{0}'><th>Controlled Folder Access</th><td>{1}</td></tr>"     -f $cfaClass,  (Html-Enc $cfaLabel))
+Html-Add ("<tr class='{0}'><th>Network Protection</th><td>{1}</td></tr>"           -f $npClass,   (Html-Enc $npLabel))
+Html-Add ("<tr class='{0}'><th>ASR Rules Configured</th><td>{1}</td></tr>"         -f $asrClass,  (Html-Enc "$asrCount rule(s) found"))
+Html-Add ("<tr class='{0}'><th>PowerShell v2</th><td>{1}</td></tr>"                -f $psv2Class, (Html-Enc $psv2Label))
+Html-Add ("<tr class='{0}'><th>Internet Explorer</th><td>{1}</td></tr>"            -f $ieClass,   (Html-Enc $ieLabel))
+Html-Add "</tbody></table>"
+Write-Action -What "User application hardening checks complete" -Kind info
+
+# ---- E8-5: Restrict Administrative Privileges ----
+Html-Add "<h3>5. Restrict Administrative Privileges</h3>"
+Html-AddNote -Text "Full local administrator group membership is in Section 8 (Security Baseline)." -Kind info
+
+$uacLua = Safe-Invoke {
+    (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction Stop).EnableLUA
+} "UAC EnableLUA"
+$uacLuaLabel = if ($uacLua -eq "Error") { "Query failed" } elseif ($uacLua -eq 1) { "Enabled" } elseif ($uacLua -eq 0) { "Disabled" } else { "Unknown ($uacLua)" }
+$uacLuaClass = if ($uacLua -eq 1) { "sev-good" } elseif ($uacLua -eq 0) { "sev-bad" } else { "sev-warn" }
+
+$uacBehavior = Safe-Invoke {
+    (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name ConsentPromptBehaviorAdmin -ErrorAction Stop).ConsentPromptBehaviorAdmin
+} "UAC ConsentPromptBehaviorAdmin"
+$uacBehaviorLabel = switch ($uacBehavior) {
+    0 { "Elevate without prompting (insecure)" }
+    1 { "Prompt for credentials on secure desktop" }
+    2 { "Prompt for consent on secure desktop" }
+    3 { "Prompt for credentials" }
+    4 { "Prompt for consent" }
+    5 { "Prompt for consent for non-Windows binaries (default)" }
+    default { if ($uacBehavior -eq "Error") { "Query failed" } else { "Unknown ($uacBehavior)" } }
+}
+$uacBehaviorClass = switch ($uacBehavior) {
+    { $_ -in @(1,2,5) } { "sev-good" }
+    { $_ -in @(3,4)   } { "sev-warn" }
+    0                    { "sev-bad"  }
+    default              { "sev-warn" }
+}
+
+$adminMembers = Safe-Invoke { @(Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) } "Local Admin Members"
+$adminCount   = if ($adminMembers -ne "Error" -and $adminMembers) { $adminMembers.Count } else { $null }
+$adminClass   = if ($null -eq $adminCount) { "sev-warn" } elseif ($adminCount -le 2) { "sev-good" } elseif ($adminCount -le 4) { "sev-warn" } else { "sev-bad" }
+
+Html-Add "<table class='kv-table'><tbody>"
+Html-Add ("<tr class='{0}'><th>UAC Enabled (EnableLUA)</th><td>{1}</td></tr>"                   -f $uacLuaClass,      (Html-Enc $uacLuaLabel))
+Html-Add ("<tr class='{0}'><th>UAC Admin Consent Prompt</th><td>{1}</td></tr>"                  -f $uacBehaviorClass, (Html-Enc $uacBehaviorLabel))
+Html-Add ("<tr class='{0}'><th>Local Administrator Count</th><td>{1}</td></tr>"                 -f $adminClass,       (Html-Enc $(if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" })))
+Html-Add "</tbody></table>"
+Write-Action -What ("UAC: {0} | Admin members: {1}" -f $uacLuaLabel, $(if ($null -ne $adminCount) { $adminCount } else { "unknown" })) -Kind info
+
+# ---- E8-6: Patch Operating Systems ----
+Html-Add "<h3>6. Patch Operating Systems</h3>"
+Html-AddNote -Text "Pending Windows Updates are detailed in Section 4." -Kind info
+
+$osBuild = Safe-Invoke {
+    $rv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    [pscustomobject]@{
+        ProductName    = $rv.ProductName
+        DisplayVersion = if ($rv.DisplayVersion) { $rv.DisplayVersion } else { $rv.ReleaseId }
+        CurrentBuild   = $rv.CurrentBuild
+        UBR            = $rv.UBR
+    }
+} "OS Build Info"
+
+$wuSvc = Safe-Invoke {
+    $s = Get-Service -Name wuauserv -ErrorAction Stop
+    [pscustomobject]@{ Status = $s.Status; StartType = $s.StartType }
+} "Windows Update Service"
+
+$wuSvcClass = if ($wuSvc -ne "Error" -and $wuSvc -and $wuSvc.Status -eq "Running") { "sev-good" } else { "sev-warn" }
+
+Html-Add "<table class='kv-table'><tbody>"
+if ($osBuild -ne "Error" -and $osBuild) {
+    Html-Add ("<tr><th>OS</th><td>{0}</td></tr>"             -f (Html-Enc $osBuild.ProductName))
+    Html-Add ("<tr><th>Feature Version</th><td>{0}</td></tr>" -f (Html-Enc $osBuild.DisplayVersion))
+    Html-Add ("<tr><th>Build Number</th><td>{0}.{1}</td></tr>" -f (Html-Enc $osBuild.CurrentBuild), (Html-Enc $osBuild.UBR))
+}
+if ($lastHotfix -ne "Error" -and $lastHotfix -and $lastHotfix.HotFixID -ne "N/A") {
+    Html-Add ("<tr class='{0}'><th>Most Recent Patch</th><td>{1} (installed {2}, {3} days ago)</td></tr>" -f $patchClass, (Html-Enc $lastHotfix.HotFixID), (Html-Enc $lastHotfix.InstalledOn), (Html-Enc $lastHotfix.DaysAgo))
+} else {
+    Html-Add "<tr class='sev-warn'><th>Most Recent Patch</th><td>Could not determine</td></tr>"
+}
+if ($wuSvc -ne "Error" -and $wuSvc) {
+    Html-Add ("<tr class='{0}'><th>Windows Update Service</th><td>{1} (startup: {2})</td></tr>" -f $wuSvcClass, (Html-Enc $wuSvc.Status), (Html-Enc $wuSvc.StartType))
+}
+Html-Add "</tbody></table>"
+Write-Action -What ("OS: {0} | WU Service: {1}" -f $(if ($osBuild -ne "Error" -and $osBuild) { "$($osBuild.ProductName) $($osBuild.DisplayVersion)" } else { "unknown" }), $(if ($wuSvc -ne "Error" -and $wuSvc) { $wuSvc.Status } else { "unknown" })) -Kind info
+
+# ---- E8-7: Multi-Factor Authentication ----
+Html-Add "<h3>7. Multi-Factor Authentication</h3>"
+Html-AddNote -Text "Endpoint MFA signals only. Whether MFA is actually enforced by an identity provider (Entra ID, AD FS, etc.) cannot be verified from the endpoint alone." -Kind info
+
+$wh4bPolicy = Safe-Invoke {
+    $p = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork' -ErrorAction SilentlyContinue
+    if ($p -and $null -ne $p.Enabled) { $p.Enabled } else { $null }
+} "Windows Hello for Business Policy"
+$wh4bLabel = if ($wh4bPolicy -eq "Error") { "Query failed" } elseif ($wh4bPolicy -eq 1) { "Enabled via policy" } elseif ($wh4bPolicy -eq 0) { "Disabled via policy" } else { "Not configured via policy" }
+$wh4bClass = if ($wh4bPolicy -eq 1) { "sev-good" } elseif ($wh4bPolicy -eq 0) { "sev-bad" } else { "sev-warn" }
+
+# Detect Windows Hello PIN provider (presence suggests Hello is set up for at least one user)
+$helloDetected = Safe-Invoke {
+    $ngcPath = "$env:WINDIR\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc"
+    Test-Path $ngcPath -ErrorAction SilentlyContinue
+} "Windows Hello NGC Path"
+$helloLabel = if ($helloDetected -eq "Error") { "Query failed" } elseif ($helloDetected) { "NGC store present (Windows Hello likely configured)" } else { "NGC store not found" }
+$helloClass = if ($helloDetected -eq $true) { "sev-good" } else { "sev-warn" }
+
+$smartcards = Safe-Invoke {
+    @(Get-PnpDevice -Class SmartCardReader -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' })
+} "Smartcard Readers"
+$scCount = if ($smartcards -ne "Error" -and $smartcards) { $smartcards.Count } else { 0 }
+$scLabel = if ($smartcards -eq "Error") { "Query failed" } elseif ($scCount -gt 0) { "$scCount reader(s) detected: $(($smartcards | Select-Object -ExpandProperty FriendlyName) -join '; ')" } else { "No smartcard readers detected" }
+$scClass = if ($scCount -gt 0) { "sev-good" } else { "sev-warn" }
+
+$cachedCreds = Safe-Invoke {
+    (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name CachedLogonsCount -ErrorAction SilentlyContinue).CachedLogonsCount
+} "Cached Logon Count"
+$cachedLabel = if ($cachedCreds -eq "Error") { "Query failed" } elseif ($null -ne $cachedCreds) { "$cachedCreds cached credential(s) stored" } else { "Not set (Windows default applies)" }
+$cachedClass = if ($cachedCreds -eq "Error" -or $null -eq $cachedCreds) { "sev-warn" } elseif ([int]$cachedCreds -eq 0) { "sev-good" } elseif ([int]$cachedCreds -le 2) { "sev-warn" } else { "sev-bad" }
+
+Html-Add "<table class='kv-table'><tbody>"
+Html-Add ("<tr class='{0}'><th>Windows Hello for Business Policy</th><td>{1}</td></tr>" -f $wh4bClass,    (Html-Enc $wh4bLabel))
+Html-Add ("<tr class='{0}'><th>Windows Hello (NGC store)</th><td>{1}</td></tr>"          -f $helloClass,   (Html-Enc $helloLabel))
+Html-Add ("<tr class='{0}'><th>Smartcard Readers</th><td>{1}</td></tr>"                  -f $scClass,      (Html-Enc $scLabel))
+Html-Add ("<tr class='{0}'><th>Cached Domain Credentials</th><td>{1}</td></tr>"          -f $cachedClass,  (Html-Enc $cachedLabel))
+Html-Add "</tbody></table>"
+Write-Action -What ("MFA signals: WH4B policy=$wh4bLabel | Smartcards=$scCount") -Kind info
+
+# ---- E8-8: Regular Backups ----
+Html-Add "<h3>8. Regular Backups</h3>"
+
+$shadowCopies = Safe-Invoke { @(Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction Stop) } "VSS Shadow Copies"
+$scCopies     = if ($shadowCopies -ne "Error" -and $shadowCopies) { $shadowCopies } else { @() }
+$scClass8     = if ($scCopies.Count -gt 0) { "sev-good" } else { "sev-warn" }
+
+$newestShadow = if ($scCopies.Count -gt 0) {
+    ($scCopies | Sort-Object InstallDate -Descending | Select-Object -First 1).InstallDate
+} else { $null }
+
+$fileHistory = Safe-Invoke {
+    $fhKey = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileHistory' -ErrorAction SilentlyContinue
+    if ($fhKey -and $null -ne $fhKey.Enabled) { $fhKey.Enabled } else { $null }
+} "File History"
+$fhLabel = if ($fileHistory -eq "Error") { "Query failed" } elseif ($fileHistory -eq 1) { "Enabled" } elseif ($fileHistory -eq 0) { "Disabled" } else { "Not configured" }
+$fhClass = if ($fileHistory -eq 1) { "sev-good" } else { "sev-warn" }
+
+$backupTasks = Safe-Invoke {
+    @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Backup\' -ErrorAction SilentlyContinue |
+        Select-Object TaskName, State, @{ N = "LastRunTime"; E = { $_.LastRunTime } })
+} "Backup Scheduled Tasks"
+
+$oneDriveRunning = Safe-Invoke {
+    $null -ne (Get-Process -Name OneDrive -ErrorAction SilentlyContinue)
+} "OneDrive Process"
+$odLabel = if ($oneDriveRunning -eq "Error") { "Query failed" } elseif ($oneDriveRunning) { "Running" } else { "Not running" }
+$odClass = if ($oneDriveRunning -eq $true) { "sev-good" } else { "sev-warn" }
+
+Html-Add "<table class='kv-table'><tbody>"
+Html-Add ("<tr class='{0}'><th>VSS Shadow Copies</th><td>{1}</td></tr>" -f $scClass8, (Html-Enc "$($scCopies.Count) snapshot(s) found$(if ($newestShadow) { '; newest: ' + $newestShadow } else { '' })"))
+Html-Add ("<tr class='{0}'><th>File History</th><td>{1}</td></tr>"      -f $fhClass,  (Html-Enc $fhLabel))
+Html-Add ("<tr class='{0}'><th>OneDrive</th><td>{1}</td></tr>"           -f $odClass,  (Html-Enc $odLabel))
+Html-Add "</tbody></table>"
+
+if ($backupTasks -ne "Error" -and $backupTasks -and @($backupTasks).Count -gt 0) {
+    Html-AddTable -Rows $backupTasks -Columns @(
+        @{ Header = "Task";      Property = "TaskName"    }
+        @{ Header = "State";     Property = "State"       }
+        @{ Header = "Last Run";  Property = "LastRunTime" }
+    )
+}
+Write-Action -What ("Backups: VSS copies=$($scCopies.Count) | File History=$fhLabel | OneDrive=$odLabel") -Kind $(if ($scCopies.Count -gt 0) { "ok" } else { "warn" })
 
 Html-EndSection
 
