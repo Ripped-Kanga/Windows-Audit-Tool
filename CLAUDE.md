@@ -173,9 +173,15 @@ The script **must be run on a real Windows 10+ machine** — it uses live Window
 
 # Option 2: From an elevated PowerShell prompt
 powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1
+
+# Option 3: Unattended deployment via RMM/MDM (Atera, Intune, etc.)
+# Script must already be running elevated — UAC prompt and final pause are suppressed.
+powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent
+# Or via the compiled binary:
+.\Run-Audit.exe -Silent
 ```
 
-The script auto-requests elevation via UAC if not already admin. If the user declines, it continues in limited mode (security baseline section is skipped).
+The script auto-requests elevation via UAC if not already admin. If the user declines, it continues in limited mode (security baseline section is skipped). When `-Silent` is passed the UAC step is skipped entirely and the process exits cleanly without waiting for input.
 
 **Check outputs:**
 - HTML report: `C:\Temp\<ComputerName>-Audit.html`
@@ -212,7 +218,7 @@ These are non-negotiable design decisions. Do not work around them:
 
 1. **No external dependencies.** The script uses only built-in Windows cmdlets and standard COM APIs. Do not add `Install-Module`, `Import-Module`, or any external tool dependency.
 
-2. **No parameters or switches.** The tool is zero-config by design. Do not add `-Verbose`, `-OutputPath`, `-SkipSection`, or similar parameters.
+2. **One permitted parameter: `-Silent`.** The tool is zero-config by design. The sole exception is the `-Silent` switch, which suppresses the UAC elevation prompt and the final interactive pause for unattended deployment via RMM/MDM tools (Atera, Intune, etc.). Do not add any other parameters such as `-Verbose`, `-OutputPath`, or `-SkipSection`.
 
 3. **Preserve graceful degradation.** Every data-gathering call must use `Safe-Invoke` and handle the `"Error"` return gracefully. A broken section must never stop the audit.
 
