@@ -15,7 +15,16 @@ A self-contained PowerShell script that audits a single Windows machine and prod
 powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1
 ```
 
-The script will request administrator privileges via UAC automatically. If elevation is declined it continues in limited mode, skipping admin-only checks and noting what was skipped in the report.
+**Option 3 — Unattended via RMM/MDM (Atera, Intune, etc.):**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent
+# or
+.\Run-Audit.exe -Silent
+```
+
+The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. Use this when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
+
+The script will request administrator privileges via UAC automatically in interactive mode. If elevation is declined it continues in limited mode, skipping admin-only checks and noting what was skipped in the report.
 
 **Outputs:**
 | File | Path |
