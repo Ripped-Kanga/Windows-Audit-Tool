@@ -7,6 +7,13 @@
       - Operational log written to C:\Windows\Temp\AuditLog.txt
 #>
 
+param(
+    # Suppress UAC elevation prompt and final interactive pause.
+    # Intended for unattended deployment via RMM/MDM tools (Atera, Intune, etc.)
+    # where the script is always launched in an already-elevated context.
+    [switch]$Silent
+)
+
 $ErrorActionPreference = "Stop"
 
 # ------------------------- #
@@ -847,7 +854,7 @@ Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cy
 Log "Audit started for $ComputerName"
 
 $IsElevated = Test-IsElevated
-if (-not $IsElevated) {
+if (-not $IsElevated -and -not $Silent) {
     Start-SelfElevate
     $IsElevated = Test-IsElevated
 }
@@ -1974,6 +1981,8 @@ catch {
 Write-Host "=== Audit Completed for $ComputerName ===" -ForegroundColor Green
 Log "Audit completed for $ComputerName"
 
-Write-Host ""
-Write-Host "Audit complete. Press ENTER to exit..." -ForegroundColor Cyan
-[void][System.Console]::ReadLine()
+if (-not $Silent) {
+    Write-Host ""
+    Write-Host "Audit complete. Press ENTER to exit..." -ForegroundColor Cyan
+    [void][System.Console]::ReadLine()
+}
