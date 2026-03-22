@@ -28,7 +28,12 @@ $HtmlReportPath = "C:\Temp\${ComputerName}-Audit.html"
 $LogPath        = "C:\Windows\Temp\AuditLog.txt"
 
 # Ensure directories exist
-New-Item -ItemType Directory -Path "C:\Temp" -Force | Out-Null
+try {
+    New-Item -ItemType Directory -Path "C:\Temp" -Force -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host "FATAL: Could not create C:\Temp — $_" -ForegroundColor Red
+    exit 2
+}
 
 # ------------------------- #
 # Logging Helper            #
@@ -109,16 +114,18 @@ function Start-SelfElevate {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
 
+    $silentArg = if ($Silent) { " -Silent" } else { "" }
+
     if ($PSCommandPath) {
         # Running as a .ps1 script – relaunch via powershell.exe
         $psi.FileName  = "powershell.exe"
-        $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
     }
     else {
         # Likely running as a PS2EXE-compiled executable
         $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
         $psi.FileName  = $exePath
-        $psi.Arguments = ""
+        $psi.Arguments = $silentArg.TrimStart()
     }
 
     $psi.Verb = "runas"
@@ -208,7 +215,17 @@ function Get-PendingWindowsUpdatesWUA {
     $criteria = "IsInstalled=0 and IsHidden=0"
     $result   = $searcher.Search($criteria)
 
-    $updates = @()
+    $updates = [System.Collections.Generic.List[object]]::new()
+
+    $updates.Add([pscustomobject]@{
+        Title          = "<META>"
+        KB             = "N/A"
+        Categories     = ("ResultCode={0}; Criteria={1}; Count={2}" -f $result.ResultCode, $criteria, $result.Updates.Count)
+        Downloaded     = $false
+        Mandatory      = $false
+        RebootRequired = $false
+        EulaAccepted   = $true
+    })
 
     for ($i = 0; $i -lt $result.Updates.Count; $i++) {
         $u = $result.Updates.Item($i)
@@ -227,7 +244,7 @@ function Get-PendingWindowsUpdatesWUA {
             }
         } catch {}
 
-        $updates += [pscustomobject]@{
+        $updates.Add([pscustomobject]@{
             Title          = $u.Title
             KB             = $kb
             Categories     = $cats
@@ -235,20 +252,10 @@ function Get-PendingWindowsUpdatesWUA {
             Mandatory      = $u.IsMandatory
             RebootRequired = $u.RebootRequired
             EulaAccepted   = $u.EulaAccepted
-        }
+        })
     }
 
-    $meta = [pscustomobject]@{
-        Title          = "<META>"
-        KB             = "N/A"
-        Categories     = ("ResultCode={0}; Criteria={1}; Count={2}" -f $result.ResultCode, $criteria, $result.Updates.Count)
-        Downloaded     = $false
-        Mandatory      = $false
-        RebootRequired = $false
-        EulaAccepted   = $true
-    }
-
-    return @($meta) + $updates
+    return @($updates)
 }
 
 # ------------------------- #
@@ -850,6 +857,8 @@ function Html-AddTable {
 # ------------------------- #
 # Start                     #
 # ------------------------- #
+try {
+
 Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
 Log "Audit started for $ComputerName"
 
@@ -925,8 +934,8 @@ if ($mem -ne "Error") {
     $kv["Installed RAM (GB)"] = $ramGB
 }
 
-$boot = Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime"
-if ($boot -ne "Error") {
+$boot = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
+if ($boot -ne "Error" -and $boot) {
     $uptime = New-TimeSpan -Start $boot
     $kv["Uptime"] = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
 }
@@ -1555,7 +1564,12 @@ Html-Add "<h3>2. Patch Applications</h3>"
 Html-AddNote -Text "Full application inventory is in Section 2 (Installed Software). Full hotfix list is in Section 3 (Patches)." -Kind info
 
 $lastHotfix = Safe-Invoke {
-    $hf = @(Get-HotFix | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    # Reuse $patches from Section 3 when available, otherwise query fresh
+    $hf = if ($patches -ne "Error" -and $patches) {
+        @($patches | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    } else {
+        @(Get-HotFix | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    }
     if ($hf.Count -gt 0) {
         $days = ([datetime]::Now - [datetime]$hf[0].InstalledOn).Days
         [pscustomobject]@{ HotFixID = $hf[0].HotFixID; InstalledOn = ($hf[0].InstalledOn).ToString("yyyy-MM-dd"); DaysAgo = $days }
@@ -1636,9 +1650,9 @@ foreach ($app in $officeApps) {
 }
 
 if ($officeResults.Count -gt 0) {
-    Html-AddTable -Rows $officeResults -Columns @(
-        @{ Header = "Application"; Property = "Application" }
-        @{ Header = "Macro Setting"; Property = "Description" }
+    Html-AddTable -Items $officeResults -Columns @(
+        @{ Header = "Application"; Property = "Application" },
+        @{ Header = "Macro Setting"; Property = "Description" },
         @{ Header = "Source"; Property = "Source" }
     ) -RowClass {
         param($r)
@@ -1659,17 +1673,19 @@ if ($officeResults.Count -gt 0) {
 # ---- E8-4: User Application Hardening ----
 Html-Add "<h3>4. User Application Hardening</h3>"
 
-$cfa = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).EnableControlledFolderAccess } "Controlled Folder Access"
+$mpPref = Safe-Invoke { Get-MpPreference -ErrorAction Stop } "Defender Preferences"
+
+$cfa = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.EnableControlledFolderAccess } else { "Error" }
 # 0=Disabled, 1=Enabled, 2=Audit Mode
 $cfaLabel = switch ($cfa) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($cfa -eq "Error") { "Query failed" } else { "Unknown ($cfa)" } } }
 $cfaClass = switch ($cfa) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
 
-$np = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).EnableNetworkProtection } "Network Protection"
+$np = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.EnableNetworkProtection } else { "Error" }
 # 0=Disabled, 1=Enabled, 2=Audit Mode
 $npLabel = switch ($np) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($np -eq "Error") { "Query failed" } else { "Unknown ($np)" } } }
 $npClass = switch ($np) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
 
-$asrIds = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).AttackSurfaceReductionRules_Ids } "ASR Rule IDs"
+$asrIds = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.AttackSurfaceReductionRules_Ids } else { "Error" }
 $asrCount = if ($asrIds -ne "Error" -and $asrIds) { @($asrIds).Count } else { 0 }
 $asrClass = if ($asrCount -gt 0) { "sev-good" } else { "sev-warn" }
 
@@ -1733,7 +1749,8 @@ $uacBehaviorClass = switch ($uacBehavior) {
     default              { "sev-warn" }
 }
 
-$adminMembers = Safe-Invoke { @(Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) } "Local Admin Members"
+# Reuse $admins from Section 8 when available, otherwise query fresh
+$adminMembers = if ($admins -ne "Error" -and $admins) { @($admins) } else { Safe-Invoke { @(Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) } "Local Admin Members" }
 $adminCount   = if ($adminMembers -ne "Error" -and $adminMembers) { $adminMembers.Count } else { $null }
 $adminClass   = if ($null -eq $adminCount) { "sev-warn" } elseif ($adminCount -le 2) { "sev-good" } elseif ($adminCount -le 4) { "sev-warn" } else { "sev-bad" }
 
@@ -1858,9 +1875,9 @@ Html-Add ("<tr class='{0}'><th>OneDrive</th><td>{1}</td></tr>"           -f $odC
 Html-Add "</tbody></table>"
 
 if ($backupTasks -ne "Error" -and $backupTasks -and @($backupTasks).Count -gt 0) {
-    Html-AddTable -Rows $backupTasks -Columns @(
-        @{ Header = "Task";      Property = "TaskName"    }
-        @{ Header = "State";     Property = "State"       }
+    Html-AddTable -Items $backupTasks -Columns @(
+        @{ Header = "Task";      Property = "TaskName"    },
+        @{ Header = "State";     Property = "State"       },
         @{ Header = "Last Run";  Property = "LastRunTime" }
     )
 }
@@ -1875,6 +1892,11 @@ Write-Host "[Final] Saving HTML report: $HtmlReportPath" -ForegroundColor Cyan
 try {
     $generated = Get-Date
     $elevText = if ($IsElevated) { "Yes" } else { "No" }
+
+    # Pre-encode values interpolated into the HTML template
+    $safeComputerName  = Html-Enc $ComputerName
+    $safeReportPath    = Html-Enc $HtmlReportPath
+    $safeLogPath       = Html-Enc $LogPath
 
     # Build Table of Contents (from Html-StartSection calls)
     $tocHtml = ""
@@ -1899,7 +1921,7 @@ $htmlContent = @"
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>System Audit Report - $ComputerName</title>
+<title>System Audit Report - $safeComputerName</title>
 <style>
 :root{
   --bg:#f6f8fb; --card:#ffffff; --text:#1f2937; --muted:#6b7280;
@@ -1931,6 +1953,8 @@ h1{ margin:0 0 6px; color:var(--accent); font-size: 28px; }
 .toc a:hover{ text-decoration: underline; }
 .kv{ display:grid; grid-template-columns: 240px 1fr; gap:6px 12px; font-size: 14px; }
 .kv div.key{ color:var(--muted); }
+.kv-table{ margin-top:6px; }
+.kv-table th{ width:280px; }
 .small{ font-size:12px; color:var(--muted); }
 .code{ font-family: Consolas, 'Courier New', monospace; }
 details{ margin-top:10px; }
@@ -1952,9 +1976,9 @@ tr.sev-bad td{ background:#fef2f2 !important; }
 <body>
 <div class="container">
   <div class="header">
-    <h1>System Audit Report - $ComputerName</h1>
+    <h1>System Audit Report - $safeComputerName</h1>
     <div class="meta">Generated: $generated • Elevated: $elevText</div>
-    <div class="meta">Report: <span class="code">$HtmlReportPath</span> • Log: <span class="code">$LogPath</span></div>
+    <div class="meta">Report: <span class="code">$safeReportPath</span> • Log: <span class="code">$safeLogPath</span></div>
   </div>
 
 $tocHtml
@@ -1976,6 +2000,7 @@ $($Html.ToString())
 catch {
     Write-Host "Failed to write HTML report: $_" -ForegroundColor Red
     Log "Failed to write HTML report: $_"
+    exit 3
 }
 
 Write-Host "=== Audit Completed for $ComputerName ===" -ForegroundColor Green
@@ -1985,4 +2010,14 @@ if (-not $Silent) {
     Write-Host ""
     Write-Host "Audit complete. Press ENTER to exit..." -ForegroundColor Cyan
     [void][System.Console]::ReadLine()
+}
+
+exit 0
+
+} catch {
+    $msg = "FATAL: Unhandled exception — $($_.Exception.Message)"
+    Write-Host $msg -ForegroundColor Red
+    try { Log $msg } catch { }
+    try { Log-ExceptionDetail -Context "Top-level" -ErrorRecord $_ } catch { }
+    exit 1
 }
