@@ -1056,13 +1056,16 @@ $WantUpdateExe    = $UpdateAll -or $UpdateExe
 # Check for updates
 $UpdateInfo = Test-ForUpdate
 if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
-    if ($WantUpdate) {
-        # User explicitly requested an update - perform it
+    if ($WantUpdate -or $Silent) {
+        # Explicit update request, or -Silent mode (auto-update script only)
+        $doScript = $WantUpdateScript -or $Silent
+        $doExe    = $WantUpdateExe
+
         Write-Host ("    Updating: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Cyan
         Log ("Performing update: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion)
 
-        $didUpdate = Invoke-SelfUpdate -UpdateInfo $UpdateInfo -IncludeScript:$WantUpdateScript -IncludeExe:$WantUpdateExe
-        if ($didUpdate -and $WantUpdateScript -and $PSCommandPath -and $UpdateInfo.Ps1DownloadUrl) {
+        $didUpdate = Invoke-SelfUpdate -UpdateInfo $UpdateInfo -IncludeScript:$doScript -IncludeExe:$doExe
+        if ($didUpdate -and $doScript -and $PSCommandPath -and $UpdateInfo.Ps1DownloadUrl) {
             # .ps1 was replaced - re-launch the updated script (without update flags) and exit
             Write-Host "    Restarting with updated script..." -ForegroundColor Cyan
             Log "Self-update: re-launching updated .ps1"
@@ -1072,7 +1075,7 @@ if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
             exit $LASTEXITCODE
         }
     } else {
-        # Default: notify only
+        # Interactive default: notify and pause
         Write-Host ""
         Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
         Write-Host "    It is recommended you update before continuing." -ForegroundColor Yellow
@@ -1082,10 +1085,8 @@ if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
         Write-Host "      .\Run-Audit.ps1 -UpdateExe       # update binary only" -ForegroundColor Yellow
         Write-Host ""
         Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
-        if (-not $Silent) {
-            Write-Host "    Press ENTER to continue with the current version..." -ForegroundColor DarkYellow
-            [void][System.Console]::ReadLine()
-        }
+        Write-Host "    Press ENTER to continue with the current version..." -ForegroundColor DarkYellow
+        [void][System.Console]::ReadLine()
     }
 } elseif ($UpdateInfo) {
     if ($WantUpdate) {
