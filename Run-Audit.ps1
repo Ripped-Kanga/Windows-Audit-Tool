@@ -865,7 +865,7 @@ function Html-AddTable {
 function Test-ForUpdate {
     <#
       Checks the GitHub Releases API for a newer version.
-      Returns a PSCustomObject with update status, or $null on failure.
+      Returns a PSCustomObject with update status and asset URLs, or $null on failure.
       Never throws - all errors are logged and swallowed.
     #>
     $repoOwner = "Ripped-Kanga"
@@ -892,16 +892,140 @@ function Test-ForUpdate {
             $isNewer = ($latestClean -ne $currentClean)
         }
 
+        # Find download URLs for .ps1 and .exe release assets
+        $ps1Asset = $null
+        $exeAsset = $null
+        if ($response.assets) {
+            foreach ($asset in $response.assets) {
+                $name = [string]$asset.name
+                if ($name -like '*.ps1') { $ps1Asset = [string]$asset.browser_download_url }
+                if ($name -like '*.exe') { $exeAsset = [string]$asset.browser_download_url }
+            }
+        }
+
         return [pscustomobject]@{
             UpdateAvailable = $isNewer
             LatestVersion   = $latestTag
             CurrentVersion  = $ScriptVersion
             ReleaseUrl      = [string]$response.html_url
             ReleaseNotes    = [string]$response.body
+            Ps1DownloadUrl  = $ps1Asset
+            ExeDownloadUrl  = $exeAsset
         }
     } catch {
         Log "Update check failed: $($_.Exception.Message)"
         return $null
+    }
+}
+
+function Invoke-SelfUpdate {
+    <#
+      Downloads updated release assets and replaces the local files.
+      For .ps1: overwrites the running script and re-launches it.
+      For .exe: downloads alongside. If the .exe is the running process,
+      it cannot be overwritten while locked - write to a .new file and
+      rename on next launch.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject]$UpdateInfo
+    )
+
+    # Determine the directory containing the running script/exe
+    $scriptDir = $null
+    $runningAsExe = $false
+    if ($PSCommandPath) {
+        $scriptDir = Split-Path -Parent $PSCommandPath
+    } else {
+        $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
+        $scriptDir = Split-Path -Parent $exePath
+        $runningAsExe = $true
+    }
+
+    if (-not $scriptDir) {
+        Log "Self-update: could not determine script directory"
+        Write-Action -What "Update failed: could not determine script directory" -Kind warn
+        return $false
+    }
+
+    $updated = $false
+
+    # Download .ps1
+    if ($UpdateInfo.Ps1DownloadUrl) {
+        $ps1Target = Join-Path $scriptDir "Run-Audit.ps1"
+        try {
+            Write-Action -What "Downloading Run-Audit.ps1..." -Kind run
+            Invoke-WebRequest -Uri $UpdateInfo.Ps1DownloadUrl -OutFile $ps1Target -TimeoutSec 30 -ErrorAction Stop
+            Write-Action -What "Updated Run-Audit.ps1" -Kind ok
+            Log ("Self-update: downloaded Run-Audit.ps1 from {0}" -f $UpdateInfo.Ps1DownloadUrl)
+            $updated = $true
+        } catch {
+            Write-Action -What ("Failed to download Run-Audit.ps1: {0}" -f $_.Exception.Message) -Kind warn
+            Log ("Self-update: failed to download .ps1 - {0}" -f $_.Exception.Message)
+        }
+    }
+
+    # Download .exe
+    if ($UpdateInfo.ExeDownloadUrl) {
+        $exeTarget = Join-Path $scriptDir "Run-Audit.exe"
+        $exeTemp   = Join-Path $scriptDir "Run-Audit.exe.update"
+
+        if ($runningAsExe) {
+            # Running exe is locked - download to temp file for manual swap
+            try {
+                Write-Action -What "Downloading Run-Audit.exe (staged for next launch)..." -Kind run
+                Invoke-WebRequest -Uri $UpdateInfo.ExeDownloadUrl -OutFile $exeTemp -TimeoutSec 60 -ErrorAction Stop
+                Write-Action -What "Downloaded Run-Audit.exe.update (rename to Run-Audit.exe after this run)" -Kind warn
+                Log ("Self-update: downloaded .exe to {0} (running exe is locked)" -f $exeTemp)
+                $updated = $true
+            } catch {
+                Write-Action -What ("Failed to download Run-Audit.exe: {0}" -f $_.Exception.Message) -Kind warn
+                Log ("Self-update: failed to download .exe - {0}" -f $_.Exception.Message)
+            }
+        } else {
+            # Running as .ps1 - exe is not locked, overwrite directly
+            try {
+                Write-Action -What "Downloading Run-Audit.exe..." -Kind run
+                Invoke-WebRequest -Uri $UpdateInfo.ExeDownloadUrl -OutFile $exeTarget -TimeoutSec 60 -ErrorAction Stop
+                Write-Action -What "Updated Run-Audit.exe" -Kind ok
+                Log ("Self-update: downloaded Run-Audit.exe from {0}" -f $UpdateInfo.ExeDownloadUrl)
+                $updated = $true
+            } catch {
+                Write-Action -What ("Failed to download Run-Audit.exe: {0}" -f $_.Exception.Message) -Kind warn
+                Log ("Self-update: failed to download .exe - {0}" -f $_.Exception.Message)
+            }
+        }
+    }
+
+    return $updated
+}
+
+function Invoke-PendingExeSwap {
+    <#
+      If a previous update left a Run-Audit.exe.update file (because the exe
+      was locked), swap it into place now before the audit starts.
+    #>
+    $scriptDir = $null
+    if ($PSCommandPath) {
+        $scriptDir = Split-Path -Parent $PSCommandPath
+    } else {
+        $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
+        $scriptDir = Split-Path -Parent $exePath
+    }
+
+    if (-not $scriptDir) { return }
+
+    $pending = Join-Path $scriptDir "Run-Audit.exe.update"
+    $target  = Join-Path $scriptDir "Run-Audit.exe"
+
+    if (Test-Path -LiteralPath $pending) {
+        try {
+            Move-Item -LiteralPath $pending -Destination $target -Force -ErrorAction Stop
+            Write-Action -What "Applied pending Run-Audit.exe update" -Kind ok
+            Log "Self-update: swapped Run-Audit.exe.update into Run-Audit.exe"
+        } catch {
+            Write-Action -What ("Could not apply pending .exe update: {0}" -f $_.Exception.Message) -Kind warn
+            Log ("Self-update: failed to swap .exe - {0}" -f $_.Exception.Message)
+        }
     }
 }
 
@@ -914,12 +1038,29 @@ Write-Host "=== Windows Audit Tool v$ScriptVersion ===" -ForegroundColor Cyan
 Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
 Log "Audit started for $ComputerName (v$ScriptVersion)"
 
-# Check for updates (non-blocking - failures are silently logged)
+# Apply any pending .exe update from a prior run
+Invoke-PendingExeSwap
+
+# Check for updates and auto-update if a newer release exists
 $UpdateInfo = Test-ForUpdate
 if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
     Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
-    Write-Host ("    Download: {0}" -f $UpdateInfo.ReleaseUrl) -ForegroundColor Yellow
     Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
+
+    if ($UpdateInfo.Ps1DownloadUrl -or $UpdateInfo.ExeDownloadUrl) {
+        $didUpdate = Invoke-SelfUpdate -UpdateInfo $UpdateInfo
+        if ($didUpdate -and $PSCommandPath -and $UpdateInfo.Ps1DownloadUrl) {
+            # .ps1 was replaced - re-launch the updated script and exit this instance
+            Write-Host "    Restarting with updated script..." -ForegroundColor Cyan
+            Log "Self-update: re-launching updated .ps1"
+            $silentArg = if ($Silent) { " -Silent" } else { "" }
+            $relaunchArgs = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
+            Start-Process powershell.exe -ArgumentList $relaunchArgs -NoNewWindow -Wait
+            exit $LASTEXITCODE
+        }
+    } else {
+        Write-Host ("    Download: {0}" -f $UpdateInfo.ReleaseUrl) -ForegroundColor Yellow
+    }
 } elseif ($UpdateInfo) {
     Write-Host "    Version: up to date" -ForegroundColor Green
 }
