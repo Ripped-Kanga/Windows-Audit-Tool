@@ -17,6 +17,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ------------------------- #
+# Version                   #
+# ------------------------- #
+$ScriptVersion = "0.9.7"
+
+# ------------------------- #
 # Paths (per computer)      #
 # ------------------------- #
 $ComputerName = $env:COMPUTERNAME
@@ -28,7 +33,12 @@ $HtmlReportPath = "C:\Temp\${ComputerName}-Audit.html"
 $LogPath        = "C:\Windows\Temp\AuditLog.txt"
 
 # Ensure directories exist
-New-Item -ItemType Directory -Path "C:\Temp" -Force | Out-Null
+try {
+    New-Item -ItemType Directory -Path "C:\Temp" -Force -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host "FATAL: Could not create C:\Temp - $_" -ForegroundColor Red
+    exit 2
+}
 
 # ------------------------- #
 # Logging Helper            #
@@ -109,16 +119,18 @@ function Start-SelfElevate {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
 
+    $silentArg = if ($Silent) { " -Silent" } else { "" }
+
     if ($PSCommandPath) {
-        # Running as a .ps1 script – relaunch via powershell.exe
+        # Running as a .ps1 script - relaunch via powershell.exe
         $psi.FileName  = "powershell.exe"
-        $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
     }
     else {
         # Likely running as a PS2EXE-compiled executable
         $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
         $psi.FileName  = $exePath
-        $psi.Arguments = ""
+        $psi.Arguments = $silentArg.TrimStart()
     }
 
     $psi.Verb = "runas"
@@ -208,7 +220,17 @@ function Get-PendingWindowsUpdatesWUA {
     $criteria = "IsInstalled=0 and IsHidden=0"
     $result   = $searcher.Search($criteria)
 
-    $updates = @()
+    $updates = [System.Collections.Generic.List[object]]::new()
+
+    $updates.Add([pscustomobject]@{
+        Title          = "<META>"
+        KB             = "N/A"
+        Categories     = ("ResultCode={0}; Criteria={1}; Count={2}" -f $result.ResultCode, $criteria, $result.Updates.Count)
+        Downloaded     = $false
+        Mandatory      = $false
+        RebootRequired = $false
+        EulaAccepted   = $true
+    })
 
     for ($i = 0; $i -lt $result.Updates.Count; $i++) {
         $u = $result.Updates.Item($i)
@@ -227,7 +249,7 @@ function Get-PendingWindowsUpdatesWUA {
             }
         } catch {}
 
-        $updates += [pscustomobject]@{
+        $updates.Add([pscustomobject]@{
             Title          = $u.Title
             KB             = $kb
             Categories     = $cats
@@ -235,20 +257,10 @@ function Get-PendingWindowsUpdatesWUA {
             Mandatory      = $u.IsMandatory
             RebootRequired = $u.RebootRequired
             EulaAccepted   = $u.EulaAccepted
-        }
+        })
     }
 
-    $meta = [pscustomobject]@{
-        Title          = "<META>"
-        KB             = "N/A"
-        Categories     = ("ResultCode={0}; Criteria={1}; Count={2}" -f $result.ResultCode, $criteria, $result.Updates.Count)
-        Downloaded     = $false
-        Mandatory      = $false
-        RebootRequired = $false
-        EulaAccepted   = $true
-    }
-
-    return @($meta) + $updates
+    return @($updates)
 }
 
 # ------------------------- #
@@ -848,10 +860,210 @@ function Html-AddTable {
 }
 
 # ------------------------- #
+# Self-Update Check         #
+# ------------------------- #
+function Test-ForUpdate {
+    <#
+      Checks the GitHub Releases API for a newer version.
+      Returns a PSCustomObject with update status and asset URLs, or $null on failure.
+      Never throws - all errors are logged and swallowed.
+    #>
+    $repoOwner = "Ripped-Kanga"
+    $repoName  = "Windows-Audit-Tool"
+    $apiUrl    = "https://api.github.com/repos/$repoOwner/$repoName/releases/latest"
+
+    try {
+        # TLS 1.2 required by GitHub API
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+        $response = Invoke-RestMethod -Uri $apiUrl -Method Get -TimeoutSec 10 -ErrorAction Stop -Headers @{ Accept = "application/vnd.github.v3+json" }
+
+        $latestTag = [string]$response.tag_name
+        # Strip leading 'v' for comparison (e.g. "v1.0.0" -> "1.0.0")
+        $latestClean  = $latestTag -replace '^v', ''
+        $currentClean = $ScriptVersion -replace '^v', ''
+
+        try {
+            $latestVer  = [version]$latestClean
+            $currentVer = [version]$currentClean
+            $isNewer    = $latestVer -gt $currentVer
+        } catch {
+            # Version string not parseable - fall back to string comparison
+            $isNewer = ($latestClean -ne $currentClean)
+        }
+
+        # Find download URLs for .ps1 and .exe release assets
+        $ps1Asset = $null
+        $exeAsset = $null
+        if ($response.assets) {
+            foreach ($asset in $response.assets) {
+                $name = [string]$asset.name
+                if ($name -like '*.ps1') { $ps1Asset = [string]$asset.browser_download_url }
+                if ($name -like '*.exe') { $exeAsset = [string]$asset.browser_download_url }
+            }
+        }
+
+        return [pscustomobject]@{
+            UpdateAvailable = $isNewer
+            LatestVersion   = $latestTag
+            CurrentVersion  = $ScriptVersion
+            ReleaseUrl      = [string]$response.html_url
+            ReleaseNotes    = [string]$response.body
+            Ps1DownloadUrl  = $ps1Asset
+            ExeDownloadUrl  = $exeAsset
+        }
+    } catch {
+        Log "Update check failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Invoke-SelfUpdate {
+    <#
+      Downloads updated release assets and replaces the local files.
+      For .ps1: overwrites the running script and re-launches it.
+      For .exe: downloads alongside. If the .exe is the running process,
+      it cannot be overwritten while locked - write to a .new file and
+      rename on next launch.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][pscustomobject]$UpdateInfo
+    )
+
+    # Determine the directory containing the running script/exe
+    $scriptDir = $null
+    $runningAsExe = $false
+    if ($PSCommandPath) {
+        $scriptDir = Split-Path -Parent $PSCommandPath
+    } else {
+        $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
+        $scriptDir = Split-Path -Parent $exePath
+        $runningAsExe = $true
+    }
+
+    if (-not $scriptDir) {
+        Log "Self-update: could not determine script directory"
+        Write-Action -What "Update failed: could not determine script directory" -Kind warn
+        return $false
+    }
+
+    $updated = $false
+
+    # Download .ps1
+    if ($UpdateInfo.Ps1DownloadUrl) {
+        $ps1Target = Join-Path $scriptDir "Run-Audit.ps1"
+        try {
+            Write-Action -What "Downloading Run-Audit.ps1..." -Kind run
+            Invoke-WebRequest -Uri $UpdateInfo.Ps1DownloadUrl -OutFile $ps1Target -TimeoutSec 30 -ErrorAction Stop
+            Write-Action -What "Updated Run-Audit.ps1" -Kind ok
+            Log ("Self-update: downloaded Run-Audit.ps1 from {0}" -f $UpdateInfo.Ps1DownloadUrl)
+            $updated = $true
+        } catch {
+            Write-Action -What ("Failed to download Run-Audit.ps1: {0}" -f $_.Exception.Message) -Kind warn
+            Log ("Self-update: failed to download .ps1 - {0}" -f $_.Exception.Message)
+        }
+    }
+
+    # Download .exe
+    if ($UpdateInfo.ExeDownloadUrl) {
+        $exeTarget = Join-Path $scriptDir "Run-Audit.exe"
+        $exeTemp   = Join-Path $scriptDir "Run-Audit.exe.update"
+
+        if ($runningAsExe) {
+            # Running exe is locked - download to temp file for manual swap
+            try {
+                Write-Action -What "Downloading Run-Audit.exe (staged for next launch)..." -Kind run
+                Invoke-WebRequest -Uri $UpdateInfo.ExeDownloadUrl -OutFile $exeTemp -TimeoutSec 60 -ErrorAction Stop
+                Write-Action -What "Downloaded Run-Audit.exe.update (rename to Run-Audit.exe after this run)" -Kind warn
+                Log ("Self-update: downloaded .exe to {0} (running exe is locked)" -f $exeTemp)
+                $updated = $true
+            } catch {
+                Write-Action -What ("Failed to download Run-Audit.exe: {0}" -f $_.Exception.Message) -Kind warn
+                Log ("Self-update: failed to download .exe - {0}" -f $_.Exception.Message)
+            }
+        } else {
+            # Running as .ps1 - exe is not locked, overwrite directly
+            try {
+                Write-Action -What "Downloading Run-Audit.exe..." -Kind run
+                Invoke-WebRequest -Uri $UpdateInfo.ExeDownloadUrl -OutFile $exeTarget -TimeoutSec 60 -ErrorAction Stop
+                Write-Action -What "Updated Run-Audit.exe" -Kind ok
+                Log ("Self-update: downloaded Run-Audit.exe from {0}" -f $UpdateInfo.ExeDownloadUrl)
+                $updated = $true
+            } catch {
+                Write-Action -What ("Failed to download Run-Audit.exe: {0}" -f $_.Exception.Message) -Kind warn
+                Log ("Self-update: failed to download .exe - {0}" -f $_.Exception.Message)
+            }
+        }
+    }
+
+    return $updated
+}
+
+function Invoke-PendingExeSwap {
+    <#
+      If a previous update left a Run-Audit.exe.update file (because the exe
+      was locked), swap it into place now before the audit starts.
+    #>
+    $scriptDir = $null
+    if ($PSCommandPath) {
+        $scriptDir = Split-Path -Parent $PSCommandPath
+    } else {
+        $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
+        $scriptDir = Split-Path -Parent $exePath
+    }
+
+    if (-not $scriptDir) { return }
+
+    $pending = Join-Path $scriptDir "Run-Audit.exe.update"
+    $target  = Join-Path $scriptDir "Run-Audit.exe"
+
+    if (Test-Path -LiteralPath $pending) {
+        try {
+            Move-Item -LiteralPath $pending -Destination $target -Force -ErrorAction Stop
+            Write-Action -What "Applied pending Run-Audit.exe update" -Kind ok
+            Log "Self-update: swapped Run-Audit.exe.update into Run-Audit.exe"
+        } catch {
+            Write-Action -What ("Could not apply pending .exe update: {0}" -f $_.Exception.Message) -Kind warn
+            Log ("Self-update: failed to swap .exe - {0}" -f $_.Exception.Message)
+        }
+    }
+}
+
+# ------------------------- #
 # Start                     #
 # ------------------------- #
+try {
+
+Write-Host "=== Windows Audit Tool v$ScriptVersion ===" -ForegroundColor Cyan
 Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
-Log "Audit started for $ComputerName"
+Log "Audit started for $ComputerName (v$ScriptVersion)"
+
+# Apply any pending .exe update from a prior run
+Invoke-PendingExeSwap
+
+# Check for updates and auto-update if a newer release exists
+$UpdateInfo = Test-ForUpdate
+if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
+    Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
+    Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
+
+    if ($UpdateInfo.Ps1DownloadUrl -or $UpdateInfo.ExeDownloadUrl) {
+        $didUpdate = Invoke-SelfUpdate -UpdateInfo $UpdateInfo
+        if ($didUpdate -and $PSCommandPath -and $UpdateInfo.Ps1DownloadUrl) {
+            # .ps1 was replaced - re-launch the updated script and exit this instance
+            Write-Host "    Restarting with updated script..." -ForegroundColor Cyan
+            Log "Self-update: re-launching updated .ps1"
+            $silentArg = if ($Silent) { " -Silent" } else { "" }
+            $relaunchArgs = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
+            Start-Process powershell.exe -ArgumentList $relaunchArgs -NoNewWindow -Wait
+            exit $LASTEXITCODE
+        }
+    } else {
+        Write-Host ("    Download: {0}" -f $UpdateInfo.ReleaseUrl) -ForegroundColor Yellow
+    }
+} elseif ($UpdateInfo) {
+    Write-Host "    Version: up to date" -ForegroundColor Green
+}
 
 $IsElevated = Test-IsElevated
 if (-not $IsElevated -and -not $Silent) {
@@ -925,8 +1137,8 @@ if ($mem -ne "Error") {
     $kv["Installed RAM (GB)"] = $ramGB
 }
 
-$boot = Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime"
-if ($boot -ne "Error") {
+$boot = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
+if ($boot -ne "Error" -and $boot) {
     $uptime = New-TimeSpan -Start $boot
     $kv["Uptime"] = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
 }
@@ -1368,7 +1580,7 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
     } "AntiVirus Products"
 
     if ($av -ne "Error" -and $av) {
-        # Deduplicate by displayName — enterprise suites (e.g. Sophos Intercept X) register
+        # Deduplicate by displayName - enterprise suites (e.g. Sophos Intercept X) register
         # multiple sub-components under the same product name in SecurityCenter2.
         # Keep the entry that reports "On" status; fall back to first occurrence.
         $avSeen    = @{}
@@ -1555,7 +1767,12 @@ Html-Add "<h3>2. Patch Applications</h3>"
 Html-AddNote -Text "Full application inventory is in Section 2 (Installed Software). Full hotfix list is in Section 3 (Patches)." -Kind info
 
 $lastHotfix = Safe-Invoke {
-    $hf = @(Get-HotFix | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    # Reuse $patches from Section 3 when available, otherwise query fresh
+    $hf = if ($patches -ne "Error" -and $patches) {
+        @($patches | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    } else {
+        @(Get-HotFix | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending)
+    }
     if ($hf.Count -gt 0) {
         $days = ([datetime]::Now - [datetime]$hf[0].InstalledOn).Days
         [pscustomobject]@{ HotFixID = $hf[0].HotFixID; InstalledOn = ($hf[0].InstalledOn).ToString("yyyy-MM-dd"); DaysAgo = $days }
@@ -1636,9 +1853,9 @@ foreach ($app in $officeApps) {
 }
 
 if ($officeResults.Count -gt 0) {
-    Html-AddTable -Rows $officeResults -Columns @(
-        @{ Header = "Application"; Property = "Application" }
-        @{ Header = "Macro Setting"; Property = "Description" }
+    Html-AddTable -Items $officeResults -Columns @(
+        @{ Header = "Application"; Property = "Application" },
+        @{ Header = "Macro Setting"; Property = "Description" },
         @{ Header = "Source"; Property = "Source" }
     ) -RowClass {
         param($r)
@@ -1659,17 +1876,19 @@ if ($officeResults.Count -gt 0) {
 # ---- E8-4: User Application Hardening ----
 Html-Add "<h3>4. User Application Hardening</h3>"
 
-$cfa = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).EnableControlledFolderAccess } "Controlled Folder Access"
+$mpPref = Safe-Invoke { Get-MpPreference -ErrorAction Stop } "Defender Preferences"
+
+$cfa = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.EnableControlledFolderAccess } else { "Error" }
 # 0=Disabled, 1=Enabled, 2=Audit Mode
 $cfaLabel = switch ($cfa) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($cfa -eq "Error") { "Query failed" } else { "Unknown ($cfa)" } } }
 $cfaClass = switch ($cfa) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
 
-$np = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).EnableNetworkProtection } "Network Protection"
+$np = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.EnableNetworkProtection } else { "Error" }
 # 0=Disabled, 1=Enabled, 2=Audit Mode
 $npLabel = switch ($np) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($np -eq "Error") { "Query failed" } else { "Unknown ($np)" } } }
 $npClass = switch ($np) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
 
-$asrIds = Safe-Invoke { (Get-MpPreference -ErrorAction Stop).AttackSurfaceReductionRules_Ids } "ASR Rule IDs"
+$asrIds = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.AttackSurfaceReductionRules_Ids } else { "Error" }
 $asrCount = if ($asrIds -ne "Error" -and $asrIds) { @($asrIds).Count } else { 0 }
 $asrClass = if ($asrCount -gt 0) { "sev-good" } else { "sev-warn" }
 
@@ -1733,7 +1952,8 @@ $uacBehaviorClass = switch ($uacBehavior) {
     default              { "sev-warn" }
 }
 
-$adminMembers = Safe-Invoke { @(Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) } "Local Admin Members"
+# Reuse $admins from Section 8 when available, otherwise query fresh
+$adminMembers = if ($admins -ne "Error" -and $admins) { @($admins) } else { Safe-Invoke { @(Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) } "Local Admin Members" }
 $adminCount   = if ($adminMembers -ne "Error" -and $adminMembers) { $adminMembers.Count } else { $null }
 $adminClass   = if ($null -eq $adminCount) { "sev-warn" } elseif ($adminCount -le 2) { "sev-good" } elseif ($adminCount -le 4) { "sev-warn" } else { "sev-bad" }
 
@@ -1750,8 +1970,16 @@ Html-AddNote -Text "Pending Windows Updates are detailed in Section 4." -Kind in
 
 $osBuild = Safe-Invoke {
     $rv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    # Registry ProductName is unreliable on Windows 11 (often still says "Windows 10").
+    # Prefer the CIM Caption from Section 1; fall back to registry with build-number correction.
+    $prodName = $rv.ProductName
+    if ($os -ne "Error" -and $os -and $os.Caption) {
+        $prodName = $os.Caption
+    } elseif ($rv.CurrentBuild -and [int]$rv.CurrentBuild -ge 22000 -and $prodName -match 'Windows 10') {
+        $prodName = $prodName -replace 'Windows 10', 'Windows 11'
+    }
     [pscustomobject]@{
-        ProductName    = $rv.ProductName
+        ProductName    = $prodName
         DisplayVersion = if ($rv.DisplayVersion) { $rv.DisplayVersion } else { $rv.ReleaseId }
         CurrentBuild   = $rv.CurrentBuild
         UBR            = $rv.UBR
@@ -1858,9 +2086,9 @@ Html-Add ("<tr class='{0}'><th>OneDrive</th><td>{1}</td></tr>"           -f $odC
 Html-Add "</tbody></table>"
 
 if ($backupTasks -ne "Error" -and $backupTasks -and @($backupTasks).Count -gt 0) {
-    Html-AddTable -Rows $backupTasks -Columns @(
-        @{ Header = "Task";      Property = "TaskName"    }
-        @{ Header = "State";     Property = "State"       }
+    Html-AddTable -Items $backupTasks -Columns @(
+        @{ Header = "Task";      Property = "TaskName"    },
+        @{ Header = "State";     Property = "State"       },
         @{ Header = "Last Run";  Property = "LastRunTime" }
     )
 }
@@ -1875,6 +2103,20 @@ Write-Host "[Final] Saving HTML report: $HtmlReportPath" -ForegroundColor Cyan
 try {
     $generated = Get-Date
     $elevText = if ($IsElevated) { "Yes" } else { "No" }
+
+    # Pre-encode values interpolated into the HTML template
+    $safeComputerName  = Html-Enc $ComputerName
+    $safeReportPath    = Html-Enc $HtmlReportPath
+    $safeLogPath       = Html-Enc $LogPath
+    $safeVersion       = Html-Enc $ScriptVersion
+
+    # Build update notice for the report header (if an update was detected)
+    $updateNoticeHtml = ""
+    if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
+        $safeLatest = Html-Enc $UpdateInfo.LatestVersion
+        $safeUrl    = Html-Enc $UpdateInfo.ReleaseUrl
+        $updateNoticeHtml = "<div class='meta' style='color:#b45309;'>Update available: v$safeVersion -&gt; $safeLatest &mdash; <a href='$safeUrl' style='color:#b45309;'>Download</a></div>"
+    }
 
     # Build Table of Contents (from Html-StartSection calls)
     $tocHtml = ""
@@ -1899,7 +2141,7 @@ $htmlContent = @"
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>System Audit Report - $ComputerName</title>
+<title>System Audit Report - $safeComputerName</title>
 <style>
 :root{
   --bg:#f6f8fb; --card:#ffffff; --text:#1f2937; --muted:#6b7280;
@@ -1931,6 +2173,8 @@ h1{ margin:0 0 6px; color:var(--accent); font-size: 28px; }
 .toc a:hover{ text-decoration: underline; }
 .kv{ display:grid; grid-template-columns: 240px 1fr; gap:6px 12px; font-size: 14px; }
 .kv div.key{ color:var(--muted); }
+.kv-table{ margin-top:6px; }
+.kv-table th{ width:280px; }
 .small{ font-size:12px; color:var(--muted); }
 .code{ font-family: Consolas, 'Courier New', monospace; }
 details{ margin-top:10px; }
@@ -1952,9 +2196,10 @@ tr.sev-bad td{ background:#fef2f2 !important; }
 <body>
 <div class="container">
   <div class="header">
-    <h1>System Audit Report - $ComputerName</h1>
-    <div class="meta">Generated: $generated • Elevated: $elevText</div>
-    <div class="meta">Report: <span class="code">$HtmlReportPath</span> • Log: <span class="code">$LogPath</span></div>
+    <h1>System Audit Report - $safeComputerName</h1>
+    <div class="meta">Generated: $generated &bull; Elevated: $elevText &bull; Version: v$safeVersion</div>
+    <div class="meta">Report: <span class="code">$safeReportPath</span> &bull; Log: <span class="code">$safeLogPath</span></div>
+$updateNoticeHtml
   </div>
 
 $tocHtml
@@ -1962,7 +2207,7 @@ $tocHtml
 $($Html.ToString())
 
   <div class="footer">
-    <div>Note: Large tables may take a moment to render in the browser.</div>
+    <div>Windows Audit Tool v$safeVersion &bull; Note: Large tables may take a moment to render in the browser.</div>
   </div>
 </div>
 </body>
@@ -1976,6 +2221,7 @@ $($Html.ToString())
 catch {
     Write-Host "Failed to write HTML report: $_" -ForegroundColor Red
     Log "Failed to write HTML report: $_"
+    exit 3
 }
 
 Write-Host "=== Audit Completed for $ComputerName ===" -ForegroundColor Green
@@ -1985,4 +2231,14 @@ if (-not $Silent) {
     Write-Host ""
     Write-Host "Audit complete. Press ENTER to exit..." -ForegroundColor Cyan
     [void][System.Console]::ReadLine()
+}
+
+exit 0
+
+} catch {
+    $msg = "FATAL: Unhandled exception - $($_.Exception.Message)"
+    Write-Host $msg -ForegroundColor Red
+    try { Log $msg } catch { }
+    try { Log-ExceptionDetail -Context "Top-level" -ErrorRecord $_ } catch { }
+    exit 1
 }
