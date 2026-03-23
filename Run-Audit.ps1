@@ -1970,8 +1970,16 @@ Html-AddNote -Text "Pending Windows Updates are detailed in Section 4." -Kind in
 
 $osBuild = Safe-Invoke {
     $rv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    # Registry ProductName is unreliable on Windows 11 (often still says "Windows 10").
+    # Prefer the CIM Caption from Section 1; fall back to registry with build-number correction.
+    $prodName = $rv.ProductName
+    if ($os -ne "Error" -and $os -and $os.Caption) {
+        $prodName = $os.Caption
+    } elseif ($rv.CurrentBuild -and [int]$rv.CurrentBuild -ge 22000 -and $prodName -match 'Windows 10') {
+        $prodName = $prodName -replace 'Windows 10', 'Windows 11'
+    }
     [pscustomobject]@{
-        ProductName    = $rv.ProductName
+        ProductName    = $prodName
         DisplayVersion = if ($rv.DisplayVersion) { $rv.DisplayVersion } else { $rv.ReleaseId }
         CurrentBuild   = $rv.CurrentBuild
         UBR            = $rv.UBR
