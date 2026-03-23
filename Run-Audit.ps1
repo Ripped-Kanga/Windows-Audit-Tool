@@ -11,7 +11,12 @@ param(
     # Suppress UAC elevation prompt and final interactive pause.
     # Intended for unattended deployment via RMM/MDM tools (Atera, Intune, etc.)
     # where the script is always launched in an already-elevated context.
-    [switch]$Silent
+    [switch]$Silent,
+
+    # Update switches - download newer release assets from GitHub then run the audit.
+    [Alias('update-all')]    [switch]$UpdateAll,
+    [Alias('update-script')] [switch]$UpdateScript,
+    [Alias('update-exe')]    [switch]$UpdateExe
 )
 
 $ErrorActionPreference = "Stop"
@@ -927,7 +932,9 @@ function Invoke-SelfUpdate {
       rename on next launch.
     #>
     param(
-        [Parameter(Mandatory=$true)][pscustomobject]$UpdateInfo
+        [Parameter(Mandatory=$true)][pscustomobject]$UpdateInfo,
+        [switch]$IncludeScript,
+        [switch]$IncludeExe
     )
 
     # Determine the directory containing the running script/exe
@@ -950,7 +957,7 @@ function Invoke-SelfUpdate {
     $updated = $false
 
     # Download .ps1
-    if ($UpdateInfo.Ps1DownloadUrl) {
+    if ($IncludeScript -and $UpdateInfo.Ps1DownloadUrl) {
         $ps1Target = Join-Path $scriptDir "Run-Audit.ps1"
         try {
             Write-Action -What "Downloading Run-Audit.ps1..." -Kind run
@@ -965,7 +972,7 @@ function Invoke-SelfUpdate {
     }
 
     # Download .exe
-    if ($UpdateInfo.ExeDownloadUrl) {
+    if ($IncludeExe -and $UpdateInfo.ExeDownloadUrl) {
         $exeTarget = Join-Path $scriptDir "Run-Audit.exe"
         $exeTemp   = Join-Path $scriptDir "Run-Audit.exe.update"
 
@@ -1041,16 +1048,22 @@ Log "Audit started for $ComputerName (v$ScriptVersion)"
 # Apply any pending .exe update from a prior run
 Invoke-PendingExeSwap
 
-# Check for updates and auto-update if a newer release exists
+# Determine if the user requested an update
+$WantUpdate       = $UpdateAll -or $UpdateScript -or $UpdateExe
+$WantUpdateScript = $UpdateAll -or $UpdateScript
+$WantUpdateExe    = $UpdateAll -or $UpdateExe
+
+# Check for updates
 $UpdateInfo = Test-ForUpdate
 if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
-    Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
-    Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
+    if ($WantUpdate) {
+        # User explicitly requested an update - perform it
+        Write-Host ("    Updating: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Cyan
+        Log ("Performing update: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion)
 
-    if ($UpdateInfo.Ps1DownloadUrl -or $UpdateInfo.ExeDownloadUrl) {
-        $didUpdate = Invoke-SelfUpdate -UpdateInfo $UpdateInfo
-        if ($didUpdate -and $PSCommandPath -and $UpdateInfo.Ps1DownloadUrl) {
-            # .ps1 was replaced - re-launch the updated script and exit this instance
+        $didUpdate = Invoke-SelfUpdate -UpdateInfo $UpdateInfo -IncludeScript:$WantUpdateScript -IncludeExe:$WantUpdateExe
+        if ($didUpdate -and $WantUpdateScript -and $PSCommandPath -and $UpdateInfo.Ps1DownloadUrl) {
+            # .ps1 was replaced - re-launch the updated script (without update flags) and exit
             Write-Host "    Restarting with updated script..." -ForegroundColor Cyan
             Log "Self-update: re-launching updated .ps1"
             $silentArg = if ($Silent) { " -Silent" } else { "" }
@@ -1059,10 +1072,19 @@ if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
             exit $LASTEXITCODE
         }
     } else {
-        Write-Host ("    Download: {0}" -f $UpdateInfo.ReleaseUrl) -ForegroundColor Yellow
+        # Default: notify only
+        Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
+        Write-Host "    Run with -UpdateAll, -UpdateScript, or -UpdateExe to update." -ForegroundColor Yellow
+        Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
     }
 } elseif ($UpdateInfo) {
-    Write-Host "    Version: up to date" -ForegroundColor Green
+    if ($WantUpdate) {
+        Write-Host "    Already up to date (v$ScriptVersion)" -ForegroundColor Green
+    } else {
+        Write-Host "    Version: up to date" -ForegroundColor Green
+    }
+} elseif ($WantUpdate) {
+    Write-Host "    Update check failed (no internet or GitHub unreachable). Continuing..." -ForegroundColor Yellow
 }
 
 $IsElevated = Test-IsElevated
