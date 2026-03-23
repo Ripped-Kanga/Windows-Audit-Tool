@@ -22,7 +22,7 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent
 .\Run-Audit.exe -Silent
 ```
 
-The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. Use this when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
+The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. In `-Silent` mode, script updates from GitHub are applied automatically before the audit runs. Use this when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
 
 The script will request administrator privileges via UAC automatically in interactive mode. If elevation is declined it continues in limited mode, skipping admin-only checks and noting what was skipped in the report.
 
@@ -31,6 +31,39 @@ The script will request administrator privileges via UAC automatically in intera
 |---|---|
 | HTML report | `C:\Temp\<ComputerName>-Audit.html` |
 | Operational log | `C:\Windows\Temp\AuditLog.txt` |
+
+---
+
+## Self-Update
+
+The script checks the [GitHub Releases](https://github.com/Ripped-Kanga/Windows-Audit-Tool/releases) API on every run to detect newer versions.
+
+**Interactive mode (default):** If an update is found, the script pauses and recommends updating before continuing:
+
+```
+    Update available: 1.1.0 -> v1.2.0
+    It is recommended you update before continuing.
+    Restart the script with one of the following switches:
+      .\Run-Audit.ps1 -UpdateAll       # update script + binary
+      .\Run-Audit.ps1 -UpdateScript    # update script only
+      .\Run-Audit.ps1 -UpdateExe       # update binary only
+
+    Press ENTER to continue with the current version...
+```
+
+| Switch | What it downloads |
+|---|---|
+| `-UpdateAll` | Both `Run-Audit.ps1` and `Run-Audit.exe` from the release assets |
+| `-UpdateScript` | `Run-Audit.ps1` only |
+| `-UpdateExe` | `Run-Audit.exe` only |
+
+After updating the `.ps1`, the script automatically re-launches the new version and runs the audit.
+
+**Silent mode (`-Silent`):** Script updates are applied automatically without prompting. Only the `.ps1` is updated (the `.exe` is not used in RMM/MDM deployments that invoke the script directly via `powershell.exe`).
+
+**No internet / GitHub unreachable:** The update check silently fails and the audit proceeds with the current version. Update failures never block the audit.
+
+> **Note for releases:** Attach both `Run-Audit.ps1` and `Run-Audit.exe` as assets to each GitHub Release. The updater looks for files ending in `.ps1` and `.exe` in the release assets.
 
 ---
 

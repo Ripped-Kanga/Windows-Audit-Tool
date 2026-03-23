@@ -22,7 +22,7 @@ This file provides context for AI assistants working on this codebase.
 
 ```
 Windows-Audit-Tool/
-├── Run-Audit.ps1   # Primary source — the entire tool (1,598 lines)
+├── Run-Audit.ps1   # Primary source — the entire tool (~2,277 lines)
 ├── Run-Audit.exe   # PS2EXE compiled binary — build artifact, never edited directly
 ├── README.md       # User-facing documentation
 └── LICENSE         # MIT 2025
@@ -36,12 +36,13 @@ Windows-Audit-Tool/
 
 `Run-Audit.ps1` is organized into distinct logical regions, top-to-bottom:
 
-### 1. Bootstrap / Global Setup (lines 1–10)
+### 1. Bootstrap / Global Setup
+- Defines `$ScriptVersion` (e.g. `"1.1.0"`) — used for update checks and displayed in console + HTML report
 - Sets `$ErrorActionPreference = "Stop"` globally
 - Defines `$ComputerName`, `$HtmlReportPath` (`C:\Temp\<ComputerName>-Audit.html`), `$LogPath` (`C:\Windows\Temp\AuditLog.txt`)
 - Creates `C:\Temp\` if it does not exist
 
-### 2. Core Helper Functions (lines 29–180)
+### 2. Core Helper Functions
 
 | Function | Purpose |
 |---|---|
@@ -53,8 +54,11 @@ Windows-Audit-Tool/
 | `Write-Step` | Prints `[N/Total] Title` in yellow; used once per audit section |
 | `Write-Action` | Prints a color-coded action line under the current step |
 | `Write-PrivilegedGate` | Checks elevation and prints skip/run; returns `$true` if elevated |
+| `Test-ForUpdate` | Queries the GitHub Releases API for a newer version; returns update info with asset URLs or `$null` on failure |
+| `Invoke-SelfUpdate` | Downloads `.ps1` and/or `.exe` release assets into the script directory; accepts `-IncludeScript` / `-IncludeExe` switches |
+| `Invoke-PendingExeSwap` | At startup, renames any `Run-Audit.exe.update` left by a prior locked-exe update into `Run-Audit.exe` |
 
-### 3. Data Collection Functions (lines 184–710)
+### 3. Data Collection Functions
 
 | Function | Purpose |
 |---|---|
@@ -62,7 +66,7 @@ Windows-Audit-Tool/
 | `Get-InstalledSoftwareInventory` | Merges software from HKLM/HKCU/HKU registry uninstall keys, offline NTUSER.DAT hives, AppX/Store packages, and Winget; normalises and deduplicates |
 | `Remove-SoftwareDuplicates` | Two-pass dedup: drops N/A-version rows when a real version exists; collapses exact name+version duplicates while merging `Scope` and `Sources` fields |
 
-### 4. HTML Builder Infrastructure (lines 713–840)
+### 4. HTML Builder Infrastructure
 
 All HTML is accumulated in `$Html` (a `System.Text.StringBuilder`). A parallel `$Toc` list drives the Table of Contents.
 
@@ -77,7 +81,7 @@ All HTML is accumulated in `$Html` (a `System.Text.StringBuilder`). A parallel `
 | `Html-AddTable` | Renders a list of objects as an HTML table with specified column headers and optional per-row CSS class callback |
 | `Html-StartDetails` / `Html-EndDetails` | Wraps content in a `<details>`/`<summary>` collapsible block |
 
-### 5. Main Execution Sequence (lines ~840–1481)
+### 5. Main Execution Sequence
 
 The script runs 10 sequential audit sections, each introduced with `Write-Step`:
 
@@ -94,7 +98,7 @@ The script runs 10 sequential audit sections, each introduced with `Write-Step`:
 | 9 | Azure AD Join Status | `dsregcmd.exe /status` output parsing |
 | 10 | Essential Eight Assessment | `Get-AppLockerPolicy`, `Get-MpPreference` (CFA/NP/ASR), `Get-WindowsOptionalFeature`, `Get-PnpDevice`, `Get-CimInstance Win32_ShadowCopy`, `Get-ScheduledTask`, registry (UAC, Office macros, WH4B, WU policy) |
 
-### 6. Report Generation (lines ~1700–1820)
+### 6. Report Generation
 
 After all sections run, the script assembles the final HTML document:
 - Builds the TOC from the `$Toc` list
@@ -181,7 +185,14 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent
 .\Run-Audit.exe -Silent
 ```
 
-The script auto-requests elevation via UAC if not already admin. If the user declines, it continues in limited mode (security baseline section is skipped). When `-Silent` is passed the UAC step is skipped entirely and the process exits cleanly without waiting for input.
+The script auto-requests elevation via UAC if not already admin. If the user declines, it continues in limited mode (security baseline section is skipped). When `-Silent` is passed the UAC step is skipped entirely, script updates are applied automatically, and the process exits cleanly without waiting for input.
+
+**Update switches:**
+```powershell
+.\Run-Audit.ps1 -UpdateAll       # download .ps1 + .exe, then run audit
+.\Run-Audit.ps1 -UpdateScript    # download .ps1 only, then run audit
+.\Run-Audit.ps1 -UpdateExe       # download .exe only, then run audit
+```
 
 **Check outputs:**
 - HTML report: `C:\Temp\<ComputerName>-Audit.html`
@@ -210,6 +221,17 @@ There is **no automated test suite**. All validation is manual:
 - Keep commits focused; commit both `.ps1` and `.exe` when the binary is updated
 - PRs used for significant features or changes
 
+### Release Workflow
+When cutting a new version:
+1. Bump `$ScriptVersion` in `Run-Audit.ps1`
+2. Compile: `Invoke-ps2exe .\Run-Audit.ps1 .\Run-Audit.exe`
+3. Commit and push both files
+4. Create a GitHub Release with both assets in one command:
+   ```powershell
+   gh release create v1.2.0 .\Run-Audit.ps1 .\Run-Audit.exe --title "v1.2.0" --notes "Release notes"
+   ```
+The self-update mechanism looks for `.ps1` and `.exe` assets attached to the latest GitHub Release.
+
 ---
 
 ## Constraints for AI Assistants
@@ -218,7 +240,10 @@ These are non-negotiable design decisions. Do not work around them:
 
 1. **No external dependencies.** The script uses only built-in Windows cmdlets and standard COM APIs. Do not add `Install-Module`, `Import-Module`, or any external tool dependency.
 
-2. **One permitted parameter: `-Silent`.** The tool is zero-config by design. The sole exception is the `-Silent` switch, which suppresses the UAC elevation prompt and the final interactive pause for unattended deployment via RMM/MDM tools (Atera, Intune, etc.). Do not add any other parameters such as `-Verbose`, `-OutputPath`, or `-SkipSection`.
+2. **Permitted parameters are limited to operational switches.** The tool is zero-config by design. The permitted parameters are:
+   - `-Silent` — suppresses the UAC elevation prompt, the final interactive pause, and auto-applies script updates for unattended RMM/MDM deployment
+   - `-UpdateAll` / `-UpdateScript` / `-UpdateExe` — explicit update switches that download release assets from GitHub before running the audit
+   Do not add configuration parameters such as `-Verbose`, `-OutputPath`, or `-SkipSection`.
 
 3. **Preserve graceful degradation.** Every data-gathering call must use `Safe-Invoke` and handle the `"Error"` return gracefully. A broken section must never stop the audit.
 
