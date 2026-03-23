@@ -17,6 +17,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ------------------------- #
+# Version                   #
+# ------------------------- #
+$ScriptVersion = "0.9.7"
+
+# ------------------------- #
 # Paths (per computer)      #
 # ------------------------- #
 $ComputerName = $env:COMPUTERNAME
@@ -855,12 +860,69 @@ function Html-AddTable {
 }
 
 # ------------------------- #
+# Self-Update Check         #
+# ------------------------- #
+function Test-ForUpdate {
+    <#
+      Checks the GitHub Releases API for a newer version.
+      Returns a PSCustomObject with update status, or $null on failure.
+      Never throws - all errors are logged and swallowed.
+    #>
+    $repoOwner = "Ripped-Kanga"
+    $repoName  = "Windows-Audit-Tool"
+    $apiUrl    = "https://api.github.com/repos/$repoOwner/$repoName/releases/latest"
+
+    try {
+        # TLS 1.2 required by GitHub API
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+        $response = Invoke-RestMethod -Uri $apiUrl -Method Get -TimeoutSec 10 -ErrorAction Stop -Headers @{ Accept = "application/vnd.github.v3+json" }
+
+        $latestTag = [string]$response.tag_name
+        # Strip leading 'v' for comparison (e.g. "v1.0.0" -> "1.0.0")
+        $latestClean  = $latestTag -replace '^v', ''
+        $currentClean = $ScriptVersion -replace '^v', ''
+
+        try {
+            $latestVer  = [version]$latestClean
+            $currentVer = [version]$currentClean
+            $isNewer    = $latestVer -gt $currentVer
+        } catch {
+            # Version string not parseable - fall back to string comparison
+            $isNewer = ($latestClean -ne $currentClean)
+        }
+
+        return [pscustomobject]@{
+            UpdateAvailable = $isNewer
+            LatestVersion   = $latestTag
+            CurrentVersion  = $ScriptVersion
+            ReleaseUrl      = [string]$response.html_url
+            ReleaseNotes    = [string]$response.body
+        }
+    } catch {
+        Log "Update check failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# ------------------------- #
 # Start                     #
 # ------------------------- #
 try {
 
+Write-Host "=== Windows Audit Tool v$ScriptVersion ===" -ForegroundColor Cyan
 Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
-Log "Audit started for $ComputerName"
+Log "Audit started for $ComputerName (v$ScriptVersion)"
+
+# Check for updates (non-blocking - failures are silently logged)
+$UpdateInfo = Test-ForUpdate
+if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
+    Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
+    Write-Host ("    Download: {0}" -f $UpdateInfo.ReleaseUrl) -ForegroundColor Yellow
+    Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
+} elseif ($UpdateInfo) {
+    Write-Host "    Version: up to date" -ForegroundColor Green
+}
 
 $IsElevated = Test-IsElevated
 if (-not $IsElevated -and -not $Silent) {
@@ -1897,6 +1959,15 @@ try {
     $safeComputerName  = Html-Enc $ComputerName
     $safeReportPath    = Html-Enc $HtmlReportPath
     $safeLogPath       = Html-Enc $LogPath
+    $safeVersion       = Html-Enc $ScriptVersion
+
+    # Build update notice for the report header (if an update was detected)
+    $updateNoticeHtml = ""
+    if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
+        $safeLatest = Html-Enc $UpdateInfo.LatestVersion
+        $safeUrl    = Html-Enc $UpdateInfo.ReleaseUrl
+        $updateNoticeHtml = "<div class='meta' style='color:#b45309;'>Update available: v$safeVersion -&gt; $safeLatest &mdash; <a href='$safeUrl' style='color:#b45309;'>Download</a></div>"
+    }
 
     # Build Table of Contents (from Html-StartSection calls)
     $tocHtml = ""
@@ -1977,8 +2048,9 @@ tr.sev-bad td{ background:#fef2f2 !important; }
 <div class="container">
   <div class="header">
     <h1>System Audit Report - $safeComputerName</h1>
-    <div class="meta">Generated: $generated &bull; Elevated: $elevText</div>
+    <div class="meta">Generated: $generated &bull; Elevated: $elevText &bull; Version: v$safeVersion</div>
     <div class="meta">Report: <span class="code">$safeReportPath</span> &bull; Log: <span class="code">$safeLogPath</span></div>
+$updateNoticeHtml
   </div>
 
 $tocHtml
@@ -1986,7 +2058,7 @@ $tocHtml
 $($Html.ToString())
 
   <div class="footer">
-    <div>Note: Large tables may take a moment to render in the browser.</div>
+    <div>Windows Audit Tool v$safeVersion &bull; Note: Large tables may take a moment to render in the browser.</div>
   </div>
 </div>
 </body>
