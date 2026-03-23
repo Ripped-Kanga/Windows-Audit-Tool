@@ -31,7 +31,7 @@ $LogPath        = "C:\Windows\Temp\AuditLog.txt"
 try {
     New-Item -ItemType Directory -Path "C:\Temp" -Force -ErrorAction Stop | Out-Null
 } catch {
-    Write-Host "FATAL: Could not create C:\Temp — $_" -ForegroundColor Red
+    Write-Host "FATAL: Could not create C:\Temp - $_" -ForegroundColor Red
     exit 2
 }
 
@@ -117,7 +117,7 @@ function Start-SelfElevate {
     $silentArg = if ($Silent) { " -Silent" } else { "" }
 
     if ($PSCommandPath) {
-        # Running as a .ps1 script – relaunch via powershell.exe
+        # Running as a .ps1 script - relaunch via powershell.exe
         $psi.FileName  = "powershell.exe"
         $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
     }
@@ -1377,7 +1377,7 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
     } "AntiVirus Products"
 
     if ($av -ne "Error" -and $av) {
-        # Deduplicate by displayName — enterprise suites (e.g. Sophos Intercept X) register
+        # Deduplicate by displayName - enterprise suites (e.g. Sophos Intercept X) register
         # multiple sub-components under the same product name in SecurityCenter2.
         # Keep the entry that reports "On" status; fall back to first occurrence.
         $avSeen    = @{}
@@ -1977,8 +1977,8 @@ tr.sev-bad td{ background:#fef2f2 !important; }
 <div class="container">
   <div class="header">
     <h1>System Audit Report - $safeComputerName</h1>
-    <div class="meta">Generated: $generated • Elevated: $elevText</div>
-    <div class="meta">Report: <span class="code">$safeReportPath</span> • Log: <span class="code">$safeLogPath</span></div>
+    <div class="meta">Generated: $generated &bull; Elevated: $elevText</div>
+    <div class="meta">Report: <span class="code">$safeReportPath</span> &bull; Log: <span class="code">$safeLogPath</span></div>
   </div>
 
 $tocHtml
@@ -2015,7 +2015,7 @@ if (-not $Silent) {
 exit 0
 
 } catch {
-    $msg = "FATAL: Unhandled exception — $($_.Exception.Message)"
+    $msg = "FATAL: Unhandled exception - $($_.Exception.Message)"
     Write-Host $msg -ForegroundColor Red
     try { Log $msg } catch { }
     try { Log-ExceptionDetail -Context "Top-level" -ErrorRecord $_ } catch { }
