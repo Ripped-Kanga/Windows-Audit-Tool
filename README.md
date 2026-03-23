@@ -8,7 +8,7 @@ A self-contained PowerShell script that audits a single Windows machine and prod
 
 **Option 1 — Right-click the script or executable:**
 - `Run-Audit.ps1` → right-click → *Run with PowerShell*
-- `Run-Audit.exe` → double-click (no PowerShell required)
+- `Run-Audit.exe` → double-click (no PowerShell window needed — launches automatically)
 
 **Option 2 — From an elevated PowerShell prompt:**
 ```powershell
