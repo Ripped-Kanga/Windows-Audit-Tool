@@ -1073,9 +1073,19 @@ if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
         }
     } else {
         # Default: notify only
+        Write-Host ""
         Write-Host ("    Update available: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Yellow
-        Write-Host "    Run with -UpdateAll, -UpdateScript, or -UpdateExe to update." -ForegroundColor Yellow
+        Write-Host "    It is recommended you update before continuing." -ForegroundColor Yellow
+        Write-Host "    Restart the script with one of the following switches:" -ForegroundColor Yellow
+        Write-Host "      .\Run-Audit.ps1 -UpdateAll       # update script + binary" -ForegroundColor Yellow
+        Write-Host "      .\Run-Audit.ps1 -UpdateScript    # update script only" -ForegroundColor Yellow
+        Write-Host "      .\Run-Audit.ps1 -UpdateExe       # update binary only" -ForegroundColor Yellow
+        Write-Host ""
         Log ("Update available: {0} -> {1} ({2})" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion, $UpdateInfo.ReleaseUrl)
+        if (-not $Silent) {
+            Write-Host "    Press ENTER to continue with the current version..." -ForegroundColor DarkYellow
+            [void][System.Console]::ReadLine()
+        }
     }
 } elseif ($UpdateInfo) {
     if ($WantUpdate) {
