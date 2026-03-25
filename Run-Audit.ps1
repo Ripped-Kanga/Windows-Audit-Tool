@@ -777,12 +777,15 @@ function Html-Add {
     [void]$Html.AppendLine($Line)
 }
 
+$SectionNumber = 0
+
 function Html-StartSection {
     param([string]$Title)
+    $script:SectionNumber++
     $id = New-SectionId -Title $Title
-    $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id }) | Out-Null
+    $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id; Number = $script:SectionNumber }) | Out-Null
     Html-Add "<div class='section'>"
-    Html-Add ("<h2 id='{0}'>{1}</h2>" -f (Html-Enc $id), (Html-Enc $Title))
+    Html-Add ("<h2 id='{0}'><span class='sec-num'>{1}</span>{2}</h2>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
 }
 
 function Html-EndSection { Html-Add "</div>" }
@@ -793,12 +796,12 @@ function Html-AddNote {
         [ValidateSet('info','good','warn','bad')][string]$Kind = 'info'
     )
     $klass = switch ($Kind) {
-        'good' { 'badge good' }
-        'warn' { 'badge warn' }
-        'bad'  { 'badge bad' }
-        default { 'badge' }
+        'good' { 'callout callout-good' }
+        'warn' { 'callout callout-warn' }
+        'bad'  { 'callout callout-bad' }
+        default { 'callout callout-info' }
     }
-    Html-Add ("<p><span class='{0}'>{1}</span></p>" -f $klass, (Html-Enc $Text))
+    Html-Add ("<div class='{0}'>{1}</div>" -f $klass, (Html-Enc $Text))
 }
 
 function Html-AddKV {
@@ -2454,7 +2457,7 @@ try {
     if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
         $safeLatest = Html-Enc $UpdateInfo.LatestVersion
         $safeUrl    = Html-Enc $UpdateInfo.ReleaseUrl
-        $updateNoticeHtml = "<div class='meta' style='color:#b45309;'>Update available: v$safeVersion -&gt; $safeLatest &mdash; <a href='$safeUrl' style='color:#b45309;'>Download</a></div>"
+        $updateNoticeHtml = "<div class='update-notice'>Update available: v$safeVersion &rarr; $safeLatest &mdash; <a href='$safeUrl'>Download</a></div>"
     }
 
     # Build Table of Contents (from Html-StartSection calls)
@@ -2463,13 +2466,13 @@ try {
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.AppendLine("<div class='toc'>")
         [void]$sb.AppendLine("<h2>Contents</h2>")
-        [void]$sb.AppendLine("<ol>")
+        [void]$sb.AppendLine("<div class='toc-grid'>")
         foreach ($t in $Toc) {
             $id = Html-Enc $t.Id
             $tt = Html-Enc $t.Title
-            [void]$sb.AppendLine(("<li><a href='#{0}'>{1}</a></li>" -f $id, $tt))
+            [void]$sb.AppendLine(("<a class='toc-item' href='#{0}'><span class='toc-num'>{1}</span>{2}</a>" -f $id, $t.Number, $tt))
         }
-        [void]$sb.AppendLine("</ol>")
+        [void]$sb.AppendLine("</div>")
         [void]$sb.AppendLine("</div>")
         $tocHtml = $sb.ToString()
     }
@@ -2483,63 +2486,163 @@ $htmlContent = @"
 <title>System Audit Report - $safeReportTitle</title>
 <style>
 :root{
-  --bg:#f6f8fb; --card:#ffffff; --text:#1f2937; --muted:#6b7280;
-  --accent:#2E5C6E; --border:#d1d5db;
+  --bg:#f0f4f8; --card:#ffffff; --text:#1e293b; --muted:#64748b;
+  --accent:#1e3a5f; --accent-light:#2E5C6E; --border:#e2e8f0;
+  --good:#059669; --good-bg:#ecfdf5; --good-border:#a7f3d0;
+  --warn:#d97706; --warn-bg:#fffbeb; --warn-border:#fde68a;
+  --bad:#dc2626;  --bad-bg:#fef2f2;  --bad-border:#fecaca;
 }
 *{ box-sizing:border-box; }
-body{ font-family: Segoe UI, Arial, sans-serif; background:var(--bg); color:var(--text); margin:0; padding:24px; }
-.container{ max-width: 1100px; margin:0 auto; }
+body{ font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; padding:24px; line-height:1.5; }
+.container{ max-width:1100px; margin:0 auto; }
+
+/* ---- Header ---- */
 .header{
-  background:var(--card); border:1px solid var(--border); border-radius:12px;
-  padding:18px 20px; box-shadow:0 1px 2px rgba(0,0,0,.04);
+  background:linear-gradient(135deg, var(--accent) 0%, var(--accent-light) 100%);
+  border-radius:14px; padding:28px 32px; color:#fff;
+  box-shadow:0 4px 12px rgba(30,58,95,.15);
 }
-h1{ margin:0 0 6px; color:var(--accent); font-size: 28px; }
-.meta{ color:var(--muted); font-size: 13px; line-height:1.4; }
-.section{
-  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:12px;
-  padding:16px 18px; box-shadow:0 1px 2px rgba(0,0,0,.04); overflow:hidden;
+h1{ margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px; }
+.header .subtitle{ font-size:15px; opacity:0.85; margin-top:4px; font-weight:400; }
+.header .meta-bar{
+  display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:14px; padding-top:14px;
+  border-top:1px solid rgba(255,255,255,.2); font-size:12px; opacity:0.8;
 }
-.section h2{ margin:0 0 10px; color:var(--accent); border-bottom:1px solid var(--border); padding-bottom:8px; font-size: 20px; }
-.section h3{ margin:16px 0 8px; color:#334155; font-size: 16px; }
+.header .meta-bar span{ white-space:nowrap; }
+.header .update-notice{
+  margin-top:10px; padding:8px 14px; border-radius:8px;
+  background:rgba(255,255,255,.15); font-size:13px;
+}
+.header .update-notice a{ color:#fde68a; }
+
+/* ---- TOC ---- */
 .toc{
-  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:12px;
-  padding:16px 18px; box-shadow:0 1px 2px rgba(0,0,0,.04);
+  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:14px;
+  padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,.04);
 }
-.toc h2{ margin:0 0 10px; color:var(--accent); border-bottom:1px solid var(--border); padding-bottom:8px; font-size: 20px; }
-.toc ol{ margin:0; padding-left: 18px; columns: 2; column-gap: 28px; }
-.toc li{ break-inside: avoid; padding: 2px 0; }
-.toc a{ color: var(--accent); text-decoration: none; }
-.toc a:hover{ text-decoration: underline; }
-.kv{ display:grid; grid-template-columns: 240px 1fr; gap:6px 12px; font-size: 14px; }
-.kv div.key{ color:var(--muted); }
-.kv-table{ margin-top:6px; table-layout: auto; }
+.toc h2{ margin:0 0 14px; color:var(--accent); font-size:18px; font-weight:700; }
+.toc-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:6px 16px; }
+.toc-item{
+  display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:8px;
+  text-decoration:none; color:var(--text); font-size:14px; transition:background .15s;
+}
+.toc-item:hover{ background:var(--bg); }
+.toc-num{
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width:26px; height:26px; border-radius:7px;
+  background:var(--accent); color:#fff; font-size:12px; font-weight:700; flex-shrink:0;
+}
+
+/* ---- Sections ---- */
+.section{
+  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:14px;
+  padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,.04); overflow:hidden;
+}
+.section h2{
+  position:sticky; top:0; z-index:10; background:var(--card);
+  margin:0 -24px 14px; padding:12px 24px 12px; color:var(--accent);
+  border-bottom:2px solid var(--border); font-size:18px; font-weight:700;
+  display:flex; align-items:center; gap:10px;
+}
+.sec-num{
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width:28px; height:28px; border-radius:8px;
+  background:var(--accent); color:#fff; font-size:13px; font-weight:700; flex-shrink:0;
+}
+.section h3{ margin:20px 0 10px; color:#334155; font-size:15px; font-weight:600; }
+
+/* ---- Callout / Note bars ---- */
+.callout{
+  padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0;
+  border-left:4px solid var(--border); background:var(--bg); color:var(--text);
+}
+.callout-good{ border-left-color:var(--good); background:var(--good-bg); }
+.callout-warn{ border-left-color:var(--warn); background:var(--warn-bg); }
+.callout-bad{  border-left-color:var(--bad);  background:var(--bad-bg); }
+.callout-info{ border-left-color:var(--accent-light); }
+
+/* ---- Key-value grids ---- */
+.kv{ display:grid; grid-template-columns:240px 1fr; gap:6px 12px; font-size:14px; }
+.kv div.key{ color:var(--muted); font-weight:500; }
+.kv-table{ margin-top:6px; table-layout:auto; }
 .kv-table th{ width:280px; }
+
+/* ---- Details / collapsible ---- */
+details{ margin-top:12px; }
+summary{
+  cursor:pointer; user-select:none; font-weight:600; color:var(--accent);
+  padding:8px 0; font-size:14px;
+}
+summary:hover{ text-decoration:underline; }
+
+/* ---- Tables ---- */
+table{ width:100%; border-collapse:collapse; margin-top:10px; font-size:13px; table-layout:fixed; }
+th,td{ border:1px solid var(--border); padding:8px 10px; vertical-align:top; overflow-wrap:break-word; word-break:break-word; }
+th{ background:#eef3f7; text-align:left; position:sticky; top:0; z-index:1; font-weight:600; color:#334155; font-size:12px; text-transform:uppercase; letter-spacing:0.3px; }
+tr:nth-child(even) td{ background:#f8fafc; }
+tbody tr:hover td{ background:#eef3f7 !important; }
+tr.sev-good td{ background:var(--good-bg) !important; }
+tr.sev-warn td{ background:var(--warn-bg) !important; }
+tr.sev-bad td{ background:var(--bad-bg) !important; }
+tr.sev-good:hover td{ background:#d1fae5 !important; }
+tr.sev-warn:hover td{ background:#fef3c7 !important; }
+tr.sev-bad:hover td{ background:#fee2e2 !important; }
+
+/* ---- Badges ---- */
+.badge{
+  display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600;
+  border:1px solid var(--border); background:#f9fafb; color:var(--muted);
+}
+.badge.good{ background:var(--good-bg); border-color:var(--good-border); color:var(--good); }
+.badge.warn{ background:var(--warn-bg); border-color:var(--warn-border); color:var(--warn); }
+.badge.bad{  background:var(--bad-bg);  border-color:var(--bad-border);  color:var(--bad); }
+
+/* ---- Filter box ---- */
+.filter-box{
+  width:100%; padding:10px 14px; margin:10px 0 6px; border:1px solid var(--border);
+  border-radius:8px; font-size:14px; font-family:inherit; outline:none; background:var(--bg);
+}
+.filter-box:focus{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(30,58,95,.1); background:#fff; }
+
+/* ---- Utility ---- */
 .small{ font-size:12px; color:var(--muted); }
-.filter-box{ width:100%; padding:8px 12px; margin:8px 0 4px; border:1px solid var(--border); border-radius:8px; font-size:14px; font-family:inherit; outline:none; }
-.filter-box:focus{ border-color:var(--accent); box-shadow:0 0 0 2px rgba(46,92,110,.15); }
-.code{ font-family: Consolas, 'Courier New', monospace; }
-details{ margin-top:10px; }
-summary{ cursor:pointer; user-select:none; font-weight:600; color:#334155; padding:6px 0; }
-table{ width:100%; border-collapse: collapse; margin-top:10px; font-size: 13px; table-layout: fixed; }
-th,td{ border:1px solid var(--border); padding:8px 10px; vertical-align: top; overflow-wrap: break-word; word-break: break-word; }
-th{ background:#eef3f7; text-align:left; position:sticky; top:0; z-index:1; }
-tr:nth-child(even) td{ background:#fafbfd; }
-tr.sev-good td{ background:#ecfdf5 !important; }
-tr.sev-warn td{ background:#fffbeb !important; }
-tr.sev-bad td{ background:#fef2f2 !important; }
-.badge{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#f9fafb; }
-.badge.good{ background:#ecfdf5; border-color:#a7f3d0; }
-.badge.warn{ background:#fffbeb; border-color:#fde68a; }
-.badge.bad{ background:#fef2f2; border-color:#fecaca; }
-.footer{ margin-top:16px; color:var(--muted); font-size:12px; }
+.code{ font-family:Consolas,'Courier New',monospace; font-size:12px; }
+
+/* ---- Footer ---- */
+.footer{
+  margin-top:24px; padding-top:16px; border-top:1px solid var(--border);
+  color:var(--muted); font-size:12px; text-align:center;
+}
+
+/* ---- Print ---- */
+@media print{
+  body{ background:#fff; padding:0; font-size:11px; }
+  .container{ max-width:none; }
+  .header{ background:var(--accent) !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .section,.toc{ box-shadow:none; border:1px solid #ccc; break-inside:avoid; }
+  .section h2{ position:static; }
+  details[open] summary{ display:none; }
+  details > *{ display:block !important; }
+  summary{ page-break-after:avoid; }
+  .filter-box,.small#sw-filter-count{ display:none; }
+  table{ font-size:10px; }
+  th{ position:static; }
+  tbody tr:hover td{ background:inherit !important; }
+  .footer{ border-top:1px solid #ccc; }
+  a{ color:var(--accent) !important; text-decoration:none; }
+}
 </style>
 </head>
 <body>
 <div class="container">
   <div class="header">
-    <h1>System Audit Report - $safeReportTitle</h1>
-    <div class="meta">Generated: $generated &bull; Elevated: $elevText &bull; Version: v$safeVersion</div>
-    <div class="meta">Report: <span class="code">$safeReportPath</span> &bull; Log: <span class="code">$safeLogPath</span></div>
+    <h1>System Audit Report</h1>
+    <div class="subtitle">$safeReportTitle</div>
+    <div class="meta-bar">
+      <span>Generated: $generated</span>
+      <span>Elevated: $elevText</span>
+      <span>Version: v$safeVersion</span>
+    </div>
 $updateNoticeHtml
   </div>
 
@@ -2548,9 +2651,12 @@ $tocHtml
 $($Html.ToString())
 
   <div class="footer">
-    <div>Windows Audit Tool v$safeVersion &bull; Note: Large tables may take a moment to render in the browser.</div>
+    Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
   </div>
 </div>
+<script>
+window.addEventListener('beforeprint',function(){document.querySelectorAll('details').forEach(function(d){d.setAttribute('open','')})});
+</script>
 </body>
 </html>
 "@
