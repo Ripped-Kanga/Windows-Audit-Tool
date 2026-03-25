@@ -1229,6 +1229,8 @@ if ($apps -ne "Error" -and $apps) {
     if ($appCount -le 200) { $open = $true }
 
     Html-StartDetails -Summary ("Applications ({0})" -f $appCount) -Open:($open)
+    Html-Add "<input type='text' id='sw-filter' placeholder='Filter software...' class='filter-box' onkeyup='filterSoftwareTable()'>"
+    Html-Add "<div id='sw-filter-count' class='small'></div>"
     Html-AddTable -Items $appsList -Columns @(
         @{ Header="Name";      Property="DisplayName" },
         @{ Header="Version";   Property="DisplayVersion" },
@@ -1236,6 +1238,25 @@ if ($apps -ne "Error" -and $apps) {
         @{ Header="Scope";     Property="Scope" },
         @{ Header="Sources";   Property="Sources" }
     )
+    Html-Add @"
+<script>
+function filterSoftwareTable(){
+  var f=document.getElementById('sw-filter').value.toLowerCase();
+  var tbl=document.getElementById('sw-filter').closest('details').querySelector('table');
+  if(!tbl)return;
+  var rows=tbl.querySelectorAll('tbody tr');
+  var shown=0;
+  for(var i=0;i<rows.length;i++){
+    var txt=rows[i].textContent.toLowerCase();
+    var match=!f||txt.indexOf(f)!==-1;
+    rows[i].style.display=match?'':'none';
+    if(match)shown++;
+  }
+  var c=document.getElementById('sw-filter-count');
+  c.textContent=f?'Showing '+shown+' of '+rows.length+' applications':'';
+}
+</script>
+"@
     Html-EndDetails
 }
 else {
@@ -2466,6 +2487,8 @@ h1{ margin:0 0 6px; color:var(--accent); font-size: 28px; }
 .kv-table{ margin-top:6px; table-layout: auto; }
 .kv-table th{ width:280px; }
 .small{ font-size:12px; color:var(--muted); }
+.filter-box{ width:100%; padding:8px 12px; margin:8px 0 4px; border:1px solid var(--border); border-radius:8px; font-size:14px; font-family:inherit; outline:none; }
+.filter-box:focus{ border-color:var(--accent); box-shadow:0 0 0 2px rgba(46,92,110,.15); }
 .code{ font-family: Consolas, 'Courier New', monospace; }
 details{ margin-top:10px; }
 summary{ cursor:pointer; user-select:none; font-weight:600; color:#334155; padding:6px 0; }
