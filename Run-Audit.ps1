@@ -16,7 +16,12 @@ param(
     # Update switches - download newer release assets from GitHub then run the audit.
     [Alias('update-all')]    [switch]$UpdateAll,
     [Alias('update-script')] [switch]$UpdateScript,
-    [Alias('update-exe')]    [switch]$UpdateExe
+    [Alias('update-exe')]    [switch]$UpdateExe,
+
+    # Customer / business name to include in the report title and filename.
+    # Required when using -Silent; prompted interactively otherwise.
+    [Alias('customer-name')]
+    [string]$CustomerName
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,7 +29,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.1.5"
+$ScriptVersion = "1.2.0"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -124,18 +129,20 @@ function Start-SelfElevate {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
 
-    $silentArg = if ($Silent) { " -Silent" } else { "" }
+    $extraArgs = ""
+    if ($Silent) { $extraArgs += " -Silent" }
+    if ($CustomerName) { $extraArgs += " -CustomerName `"$CustomerName`"" }
 
     if ($PSCommandPath) {
         # Running as a .ps1 script - relaunch via powershell.exe
         $psi.FileName  = "powershell.exe"
-        $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
+        $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$extraArgs"
     }
     else {
         # Likely running as a PS2EXE-compiled executable
         $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
         $psi.FileName  = $exePath
-        $psi.Arguments = $silentArg.TrimStart()
+        $psi.Arguments = $extraArgs.TrimStart()
     }
 
     $psi.Verb = "runas"
@@ -1069,8 +1076,10 @@ if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
             # .ps1 was replaced - re-launch the updated script (without update flags) and exit
             Write-Host "    Restarting with updated script..." -ForegroundColor Cyan
             Log "Self-update: re-launching updated .ps1"
-            $silentArg = if ($Silent) { " -Silent" } else { "" }
-            $relaunchArgs = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$silentArg"
+            $relaunchExtra = ""
+            if ($Silent) { $relaunchExtra += " -Silent" }
+            if ($CustomerName) { $relaunchExtra += " -CustomerName `"$CustomerName`"" }
+            $relaunchArgs = "-ExecutionPolicy Bypass -File `"$PSCommandPath`"$relaunchExtra"
             Start-Process powershell.exe -ArgumentList $relaunchArgs -NoNewWindow -Wait
             exit $LASTEXITCODE
         }
@@ -1117,6 +1126,23 @@ if ($IsElevated) {
 }
 
 Write-Mode -IsElevated:$IsElevated
+
+# ------------------------- #
+# Customer Name             #
+# ------------------------- #
+if (-not $CustomerName -and -not $Silent) {
+    Write-Host ""
+    Write-Host "Enter customer / business name (or press ENTER to skip):" -ForegroundColor Cyan
+    $inputName = [System.Console]::ReadLine()
+    if ($inputName -and $inputName.Trim() -ne "") {
+        $CustomerName = $inputName.Trim()
+    }
+}
+if ($CustomerName) {
+    Write-Action -What ("Customer: {0}" -f $CustomerName) -Kind ok
+    Log ("Customer name: {0}" -f $CustomerName)
+    $HtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
+}
 
 # ============================================================
 # [1] SYSTEM INFORMATION
@@ -2417,6 +2443,8 @@ try {
 
     # Pre-encode values interpolated into the HTML template
     $safeComputerName  = Html-Enc $ComputerName
+    $safeCustomerName  = if ($CustomerName) { Html-Enc $CustomerName } else { $null }
+    $safeReportTitle   = if ($safeCustomerName) { "$safeCustomerName - $safeComputerName" } else { $safeComputerName }
     $safeReportPath    = Html-Enc $HtmlReportPath
     $safeLogPath       = Html-Enc $LogPath
     $safeVersion       = Html-Enc $ScriptVersion
@@ -2452,7 +2480,7 @@ $htmlContent = @"
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>System Audit Report - $safeComputerName</title>
+<title>System Audit Report - $safeReportTitle</title>
 <style>
 :root{
   --bg:#f6f8fb; --card:#ffffff; --text:#1f2937; --muted:#6b7280;
@@ -2509,7 +2537,7 @@ tr.sev-bad td{ background:#fef2f2 !important; }
 <body>
 <div class="container">
   <div class="header">
-    <h1>System Audit Report - $safeComputerName</h1>
+    <h1>System Audit Report - $safeReportTitle</h1>
     <div class="meta">Generated: $generated &bull; Elevated: $elevText &bull; Version: v$safeVersion</div>
     <div class="meta">Report: <span class="code">$safeReportPath</span> &bull; Log: <span class="code">$safeLogPath</span></div>
 $updateNoticeHtml

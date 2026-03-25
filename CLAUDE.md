@@ -246,6 +246,7 @@ These are non-negotiable design decisions. Do not work around them:
 2. **Permitted parameters are limited to operational switches.** The tool is zero-config by design. The permitted parameters are:
    - `-Silent` — suppresses the UAC elevation prompt, the final interactive pause, and auto-applies script updates for unattended RMM/MDM deployment
    - `-UpdateAll` / `-UpdateScript` / `-UpdateExe` — explicit update switches that download release assets from GitHub before running the audit
+   - `-CustomerName "Name"` — customer/business name included in the report title and filename; prompted interactively when not using `-Silent`
    Do not add configuration parameters such as `-Verbose`, `-OutputPath`, or `-SkipSection`.
 
 3. **Preserve graceful degradation.** Every data-gathering call must use `Safe-Invoke` and handle the `"Error"` return gracefully. A broken section must never stop the audit.
