@@ -1254,10 +1254,7 @@ if ($apps -ne "Error" -and $apps) {
     Write-Action -What ("Applications found: {0}" -f $appCount) -Kind ok
     Html-AddNote -Text ("Applications found: {0}" -f $appCount) -Kind info
 
-    $open = $false
-    if ($appCount -le 200) { $open = $true }
-
-    Html-StartDetails -Summary ("Applications ({0})" -f $appCount) -Open:($open)
+    Html-StartDetails -Summary ("Applications ({0})" -f $appCount)
     Html-Add "<input type='text' id='sw-filter' placeholder='Filter software...' class='filter-box' onkeyup='filterSoftwareTable()'>"
     Html-Add "<div id='sw-filter-count' class='small'></div>"
     Html-AddTable -Items $appsList -Columns @(
