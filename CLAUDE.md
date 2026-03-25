@@ -83,7 +83,7 @@ All HTML is accumulated in `$Html` (a `System.Text.StringBuilder`). A parallel `
 
 ### 5. Main Execution Sequence
 
-The script runs 10 sequential audit sections, each introduced with `Write-Step`:
+The script runs 13 sequential audit sections, each introduced with `Write-Step`:
 
 | # | Section | Key APIs |
 |---|---|---|
@@ -95,8 +95,11 @@ The script runs 10 sequential audit sections, each introduced with `Write-Step`:
 | 6 | SMB Shares | `Get-SmbShare` with exposure classification (IPC$, ADMIN$, drive shares, custom) |
 | 7 | Printers | `Get-Printer` |
 | 8 | Security Baseline | `Get-BitLockerVolume`, `Get-Tpm`, `Confirm-SecureBootUEFI`, `Get-NetFirewallProfile`, `Get-MpComputerStatus`, WMI `AntiVirusProduct`, `net localgroup Administrators` — **admin-only** |
-| 9 | Azure AD Join Status | `dsregcmd.exe /status` output parsing |
-| 10 | Essential Eight Assessment | `Get-AppLockerPolicy`, `Get-MpPreference` (CFA/NP/ASR), `Get-WindowsOptionalFeature`, `Get-PnpDevice`, `Get-CimInstance Win32_ShadowCopy`, `Get-ScheduledTask`, registry (UAC, Office macros, WH4B, WU policy) |
+| 9 | Local User Accounts | `Get-LocalUser` — enumerates all local accounts, flags disabled/no-password-required |
+| 10 | Startup Programs | Registry `Run`/`RunOnce` keys (HKLM + HKCU), `Get-CimInstance Win32_StartupCommand` |
+| 11 | Event Log Health | `Get-WinEvent -ListLog` for Application, Security, System, Setup, PowerShell — checks enabled status, capacity, retention |
+| 12 | Microsoft Entra ID Join Status | `dsregcmd.exe /status` output parsing |
+| 13 | Essential Eight Assessment | `Get-AppLockerPolicy`, `Get-MpPreference` (CFA/NP/ASR), `Get-WindowsOptionalFeature`, `Get-PnpDevice`, `Get-CimInstance Win32_ShadowCopy`, `Get-ScheduledTask`, registry (UAC, Office macros, WH4B, WU policy); includes summary scorecard |
 
 ### 6. Report Generation
 
@@ -255,6 +258,6 @@ These are non-negotiable design decisions. Do not work around them:
 
 7. **The `.exe` is a build artifact.** Never edit `Run-Audit.exe` directly. Only update it by recompiling from `Run-Audit.ps1` with PS2EXE.
 
-8. **Maintain the `[1/10]`…`[10/10]` step count.** If you add a new section, update the `$Total` value in all `Write-Step` calls and add a matching entry in the audit sections table above.
+8. **Maintain the `[1/13]`…`[13/13]` step count.** If you add a new section, update the `$Total` value in all `Write-Step` calls and add a matching entry in the audit sections table above.
 
 9. **Use `Html-Enc` for all user-derived data.** Never interpolate raw system values directly into HTML strings — always pass through `Html-Enc` to prevent HTML injection from unexpected characters in computer names, software names, etc.

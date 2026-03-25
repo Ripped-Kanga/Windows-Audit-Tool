@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.1.0"
+$ScriptVersion = "1.1.5"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1121,7 +1121,7 @@ Write-Mode -IsElevated:$IsElevated
 # ============================================================
 # [1] SYSTEM INFORMATION
 # ============================================================
-Write-Step -Index 1 -Total 10 -Title "Collecting system information..."
+Write-Step -Index 1 -Total 13 -Title "Collecting system information..."
 Write-Action -What "Running: System Information (CIM/Registry)" -Kind run
 Html-StartSection "System Information"
 
@@ -1199,7 +1199,7 @@ Html-EndSection
 # ============================================================
 # [2] INSTALLED SOFTWARE
 # ============================================================
-Write-Step -Index 2 -Total 10 -Title "Collecting installed software..."
+Write-Step -Index 2 -Total 13 -Title "Collecting installed software..."
 Write-Action -What ("Running: Installed Software (Scope: {0})" -f ($(if($IsElevated){"HKLM/HKCU + HKU/offline + AppX(all users) + Winget(best-effort)"} else {"HKLM/HKCU + AppX(current user) + Winget(best-effort)"}))) -Kind run
 Html-StartSection "Installed Software"
 
@@ -1251,7 +1251,7 @@ Html-EndSection
 #   - Try Get-HotFix in BOTH elevated and non-elevated sessions.
 #   - Only suggest elevation if it fails while non-elevated.
 # ============================================================
-Write-Step -Index 3 -Total 10 -Title "Collecting installed Windows patches..."
+Write-Step -Index 3 -Total 13 -Title "Collecting installed Windows patches..."
 Write-Action -What "Running: Installed patches/hotfixes (Get-HotFix)" -Kind run
 Html-StartSection "Windows Patches / Hotfixes"
 
@@ -1303,7 +1303,7 @@ Html-EndSection
 # ============================================================
 # [4] PENDING WINDOWS UPDATES (WUA API)
 # ============================================================
-Write-Step -Index 4 -Total 10 -Title "Checking pending Windows Updates..."
+Write-Step -Index 4 -Total 13 -Title "Checking pending Windows Updates..."
 Write-Action -What "Running: Pending updates (WUA API)" -Kind run
 Html-StartSection "Pending Windows Updates"
 
@@ -1364,7 +1364,7 @@ Html-EndSection
 # ============================================================
 # [5] NETWORK ADAPTERS
 # ============================================================
-Write-Step -Index 5 -Total 10 -Title "Gathering network information..."
+Write-Step -Index 5 -Total 13 -Title "Gathering network information..."
 Write-Action -What "Running: Network adapters + primary config" -Kind run
 Html-StartSection "Network"
 
@@ -1416,7 +1416,7 @@ Html-EndSection
 # ============================================================
 # [6] SMB SHARES
 # ============================================================
-Write-Step -Index 6 -Total 10 -Title "Gathering SMB shares..."
+Write-Step -Index 6 -Total 13 -Title "Gathering SMB shares..."
 Write-Action -What "Running: SMB shares (Get-SmbShare)" -Kind run
 Html-StartSection "SMB Shares"
 
@@ -1457,7 +1457,7 @@ Html-EndSection
 # ============================================================
 # [7] PRINTERS
 # ============================================================
-Write-Step -Index 7 -Total 10 -Title "Gathering printers..."
+Write-Step -Index 7 -Total 13 -Title "Gathering printers..."
 Write-Action -What "Running: Printers (Get-Printer)" -Kind run
 Html-StartSection "Printers"
 
@@ -1494,7 +1494,7 @@ Html-EndSection
 # ============================================================
 # [8] SECURITY BASELINE CHECKS
 # ============================================================
-Write-Step -Index 8 -Total 10 -Title "Performing security baseline checks..."
+Write-Step -Index 8 -Total 13 -Title "Performing security baseline checks..."
 Html-StartSection "Security Baseline Checks"
 
 if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLocker/TPM/SecureBoot/Firewall/Defender/Admins)") {
@@ -1717,11 +1717,223 @@ else {
 Html-EndSection
 
 # ============================================================
-# [9] AZURE AD JOIN STATUS
+# [9] LOCAL USER ACCOUNTS
 # ============================================================
-Write-Step -Index 9 -Total 10 -Title "Checking Azure AD join status..."
+Write-Step -Index 9 -Total 13 -Title "Enumerating local user accounts..."
+Write-Action -What "Running: Local user accounts (Get-LocalUser)" -Kind run
+Html-StartSection "Local User Accounts"
+
+$localUsers = Safe-Invoke { Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordRequired, PasswordLastSet, AccountExpires, Description } "Local User Accounts"
+
+if ($localUsers -ne "Error" -and $localUsers) {
+    $userList = @($localUsers) | Sort-Object Name
+    $userCount = $userList.Count
+    $enabledCount = @($userList | Where-Object { $_.Enabled -eq $true }).Count
+    $noPasswordReq = @($userList | Where-Object { $_.Enabled -eq $true -and $_.PasswordRequired -eq $false })
+
+    Write-Action -What ("Local accounts: {0} ({1} enabled)" -f $userCount, $enabledCount) -Kind ok
+    Html-AddNote -Text ("Local accounts: {0} total, {1} enabled" -f $userCount, $enabledCount) -Kind info
+
+    if ($noPasswordReq.Count -gt 0) {
+        Write-Action -What ("{0} enabled account(s) do not require a password" -f $noPasswordReq.Count) -Kind bad
+        Html-AddNote -Text ("{0} enabled account(s) do not require a password" -f $noPasswordReq.Count) -Kind bad
+    }
+
+    $userRows = $userList | ForEach-Object {
+        [pscustomobject]@{
+            Name             = $_.Name
+            Enabled          = $_.Enabled
+            PasswordRequired = $_.PasswordRequired
+            LastLogon        = if ($_.LastLogon) { $_.LastLogon.ToString("yyyy-MM-dd HH:mm") } else { "Never" }
+            PasswordLastSet  = if ($_.PasswordLastSet) { $_.PasswordLastSet.ToString("yyyy-MM-dd") } else { "Never" }
+            Description      = $_.Description
+        }
+    }
+
+    Html-StartDetails -Summary ("Accounts ({0})" -f $userCount) -Open
+    Html-AddTable -Items $userRows -Columns @(
+        @{ Header="Name";              Property="Name" },
+        @{ Header="Enabled";           Property="Enabled" },
+        @{ Header="Password Required"; Property="PasswordRequired" },
+        @{ Header="Last Logon";        Property="LastLogon" },
+        @{ Header="Password Last Set"; Property="PasswordLastSet" },
+        @{ Header="Description";       Property="Description" }
+    ) -RowClass {
+        param($r)
+        if ($r.Enabled -eq $false) { return '' }
+        if ($r.PasswordRequired -eq $false) { return 'sev-bad' }
+        return 'sev-good'
+    }
+    Html-EndDetails
+}
+else {
+    Write-Action -What "Local user accounts query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve local user accounts." -Kind warn
+}
+
+Html-EndSection
+
+# ============================================================
+# [10] STARTUP PROGRAMS
+# ============================================================
+Write-Step -Index 10 -Total 13 -Title "Enumerating startup programs..."
+Write-Action -What "Running: Startup programs (Registry Run keys + WMI)" -Kind run
+Html-StartSection "Startup Programs"
+
+$startupItems = Safe-Invoke {
+    $items = [System.Collections.Generic.List[object]]::new()
+
+    # Registry Run keys (machine + current user)
+    $runKeys = @(
+        @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run';     Scope = 'Machine' },
+        @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'; Scope = 'Machine (RunOnce)' },
+        @{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run';     Scope = 'Current User' },
+        @{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'; Scope = 'Current User (RunOnce)' }
+    )
+
+    foreach ($rk in $runKeys) {
+        try {
+            $props = Get-ItemProperty -Path $rk.Path -ErrorAction SilentlyContinue
+            if ($props) {
+                $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+                    $items.Add([pscustomobject]@{
+                        Name    = $_.Name
+                        Command = [string]$_.Value
+                        Source  = "Registry"
+                        Scope   = $rk.Scope
+                    })
+                }
+            }
+        } catch { }
+    }
+
+    # WMI StartupCommand (broader coverage including Startup folder shortcuts)
+    try {
+        Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue | ForEach-Object {
+            $items.Add([pscustomobject]@{
+                Name    = $_.Name
+                Command = $_.Command
+                Source  = "WMI"
+                Scope   = $_.Location
+            })
+        }
+    } catch { }
+
+    @($items)
+} "Startup Programs"
+
+if ($startupItems -ne "Error" -and $startupItems) {
+    # Deduplicate by Name+Command (registry and WMI often overlap)
+    $startupList = @($startupItems) | Sort-Object Name, Command -Unique | Sort-Object Name
+    $startupCount = $startupList.Count
+
+    Write-Action -What ("Startup items found: {0}" -f $startupCount) -Kind ok
+    Html-AddNote -Text ("Startup items found: {0}" -f $startupCount) -Kind info
+
+    Html-StartDetails -Summary ("Startup Items ({0})" -f $startupCount) -Open
+    Html-AddTable -Items $startupList -Columns @(
+        @{ Header="Name";    Property="Name" },
+        @{ Header="Command"; Property="Command" },
+        @{ Header="Source";  Property="Source" },
+        @{ Header="Scope";   Property="Scope" }
+    )
+    Html-EndDetails
+}
+elseif ($startupItems -eq "Error") {
+    Write-Action -What "Startup programs query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve startup program information." -Kind warn
+}
+else {
+    Write-Action -What "No startup items found." -Kind info
+    Html-AddNote -Text "No startup items found." -Kind info
+}
+
+Html-EndSection
+
+# ============================================================
+# [11] EVENT LOG HEALTH
+# ============================================================
+Write-Step -Index 11 -Total 13 -Title "Checking event log health..."
+Write-Action -What "Running: Event log configuration (Get-WinEvent)" -Kind run
+Html-StartSection "Event Log Health"
+
+$eventLogs = Safe-Invoke {
+    $logNames = @('Application', 'Security', 'System', 'Setup', 'Windows PowerShell')
+    $results = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($logName in $logNames) {
+        try {
+            $log = Get-WinEvent -ListLog $logName -ErrorAction Stop
+            $results.Add([pscustomobject]@{
+                LogName       = $log.LogName
+                Enabled       = $log.IsEnabled
+                MaxSizeMB     = [math]::Round($log.MaximumSizeInBytes / 1MB, 1)
+                CurrentSizeMB = [math]::Round($log.FileSize / 1MB, 1)
+                RecordCount   = $log.RecordCount
+                RetentionMode = if ($log.LogMode -eq 'Circular') { "Circular (overwrites)" } else { [string]$log.LogMode }
+                IsFull        = ($log.FileSize -ge ($log.MaximumSizeInBytes * 0.95))
+            })
+        } catch {
+            $results.Add([pscustomobject]@{
+                LogName       = $logName
+                Enabled       = "Error"
+                MaxSizeMB     = "N/A"
+                CurrentSizeMB = "N/A"
+                RecordCount   = "N/A"
+                RetentionMode = "N/A"
+                IsFull        = $false
+            })
+        }
+    }
+
+    @($results)
+} "Event Log Health"
+
+if ($eventLogs -ne "Error" -and $eventLogs) {
+    $logList      = @($eventLogs)
+    $fullLogs     = @($logList | Where-Object { $_.IsFull -eq $true })
+    $disabledLogs = @($logList | Where-Object { $_.Enabled -eq $false })
+
+    if ($fullLogs.Count -gt 0) {
+        Write-Action -What ("{0} event log(s) near capacity" -f $fullLogs.Count) -Kind warn
+        Html-AddNote -Text ("{0} event log(s) at or near maximum capacity" -f $fullLogs.Count) -Kind warn
+    }
+    if ($disabledLogs.Count -gt 0) {
+        Write-Action -What ("{0} event log(s) disabled" -f $disabledLogs.Count) -Kind warn
+        Html-AddNote -Text ("{0} critical event log(s) disabled" -f $disabledLogs.Count) -Kind bad
+    }
+    if ($fullLogs.Count -eq 0 -and $disabledLogs.Count -eq 0) {
+        Write-Action -What "All monitored event logs healthy" -Kind ok
+        Html-AddNote -Text "All monitored event logs are enabled and within capacity." -Kind good
+    }
+
+    Html-AddTable -Items $logList -Columns @(
+        @{ Header="Log";            Property="LogName" },
+        @{ Header="Enabled";        Property="Enabled" },
+        @{ Header="Max Size (MB)";  Property="MaxSizeMB" },
+        @{ Header="Current (MB)";   Property="CurrentSizeMB" },
+        @{ Header="Records";        Property="RecordCount" },
+        @{ Header="Retention Mode"; Property="RetentionMode" }
+    ) -RowClass {
+        param($r)
+        if ($r.Enabled -eq $false -or $r.Enabled -eq "Error") { return 'sev-bad' }
+        if ($r.IsFull -eq $true) { return 'sev-warn' }
+        return 'sev-good'
+    }
+}
+else {
+    Write-Action -What "Event log query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve event log information." -Kind warn
+}
+
+Html-EndSection
+
+# ============================================================
+# [12] MICROSOFT ENTRA ID JOIN STATUS
+# ============================================================
+Write-Step -Index 12 -Total 13 -Title "Checking Microsoft Entra ID join status..."
 Write-Action -What "Running: dsregcmd /status parse" -Kind run
-Html-StartSection "Azure AD Join Status"
+Html-StartSection "Microsoft Entra ID Join Status"
 
 $aadInfo = Safe-Invoke {
     $ds     = dsregcmd.exe /status
@@ -1738,27 +1950,31 @@ $aadInfo = Safe-Invoke {
 
 if ($aadInfo -ne "Error" -and $aadInfo) {
     Html-AddKV -Pairs ([ordered]@{
-        "Azure AD Joined" = $aadInfo.Joined
+        "Entra ID Joined" = $aadInfo.Joined
         "Tenant ID"       = $aadInfo.TenantId
         "Tenant Name"     = $aadInfo.TenantName
     })
 
-    Write-Action -What ("Azure AD Joined: {0}" -f $(if($aadInfo.Joined){"Yes"} else {"No"})) -Kind info
+    Write-Action -What ("Entra ID Joined: {0}" -f $(if($aadInfo.Joined){"Yes"} else {"No"})) -Kind info
 }
 else {
-    Write-Action -What "Azure AD join status query failed." -Kind warn
-    Html-AddNote -Text "Could not retrieve Azure AD join status." -Kind warn
+    Write-Action -What "Entra ID join status query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve Microsoft Entra ID join status." -Kind warn
 }
 
 Html-EndSection
 
 # ============================================================
-# [10] ESSENTIAL EIGHT ASSESSMENT
+# [13] ESSENTIAL EIGHT ASSESSMENT
 # ============================================================
-Write-Step -Index 10 -Total 10 -Title "Performing Essential Eight assessment..."
+Write-Step -Index 13 -Total 13 -Title "Performing Essential Eight assessment..."
 Write-Action -What "Running: ASD Essential Eight Maturity Model checks" -Kind run
 Html-StartSection "Essential Eight Assessment"
 Html-AddNote -Text "Assessment based on the ASD Essential Eight Maturity Model. This tool performs read-only detection only; results reflect observed endpoint configuration and cannot substitute for a formal E8 assessment." -Kind info
+
+# Scorecard accumulator - entries added after each E8 check, rendered at the end
+$e8Scores = [System.Collections.Generic.List[object]]::new()
+$e8ScorecardInsertPos = $Html.Length
 
 # ---- E8-1: Application Control ----
 Html-Add "<h3>1. Application Control</h3>"
@@ -1794,6 +2010,7 @@ Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f $
 Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $(if ($appLockOk -or $wdacOk) { "good" } else { "bad" }), $acStatus)
 Html-Add "</tbody></table>"
 Write-Action -What ("Application Control: {0}" -f $acStatus) -Kind $(if ($appLockOk -or $wdacOk) { "ok" } else { "warn" })
+$e8Scores.Add([pscustomobject]@{ Control = "Application Control"; Status = $acStatus; Badge = if ($appLockOk -or $wdacOk) { "good" } else { "bad" } })
 
 # ---- E8-2: Patch Applications ----
 Html-Add "<h3>2. Patch Applications</h3>"
@@ -1846,6 +2063,8 @@ if ($wuAU -ne "Error" -and $wuAU) {
 }
 Html-Add "</tbody></table>"
 Write-Action -What ("Patch currency: {0}" -f $(if ($null -ne $patchDays) { "$patchDays days since last hotfix" } else { "date unavailable" })) -Kind $(if ($patchClass -eq "sev-good") { "ok" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" })
+$e8PatchStatus = if ($patchClass -eq "sev-good") { "Current" } elseif ($patchClass -eq "sev-warn") { "Needs attention" } else { "Overdue" }
+$e8Scores.Add([pscustomobject]@{ Control = "Patch Applications"; Status = $e8PatchStatus; Badge = if ($patchClass -eq "sev-good") { "good" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" } })
 
 # ---- E8-3: Restrict Microsoft Office Macros ----
 Html-Add "<h3>3. Restrict Microsoft Office Macros</h3>"
@@ -1905,6 +2124,10 @@ if ($officeResults.Count -gt 0) {
     Html-AddNote -Text "No Microsoft Office 2016/2019/365 macro settings detected. Office may not be installed, or no macro policy has been configured." -Kind info
     Write-Action -What "No Office macro settings detected" -Kind info
 }
+$e8MacroOk = ($officeResults.Count -gt 0) -and (@($officeResults | Where-Object { $_.Setting -eq 1 }).Count -eq 0)
+$e8MacroStatus = if ($officeResults.Count -eq 0) { "Not configured" } elseif ($e8MacroOk) { "Restricted" } else { "Insecure" }
+$e8MacroBadge  = if ($officeResults.Count -eq 0) { "warn" } elseif ($e8MacroOk) { "good" } else { "bad" }
+$e8Scores.Add([pscustomobject]@{ Control = "Restrict Office Macros"; Status = $e8MacroStatus; Badge = $e8MacroBadge })
 
 # ---- E8-4: User Application Hardening ----
 Html-Add "<h3>4. User Application Hardening</h3>"
@@ -1955,6 +2178,10 @@ Html-Add ("<tr class='{0}'><th>PowerShell v2</th><td>{1}</td></tr>"             
 Html-Add ("<tr class='{0}'><th>Internet Explorer</th><td>{1}</td></tr>"            -f $ieClass,   (Html-Enc $ieLabel))
 Html-Add "</tbody></table>"
 Write-Action -What "User application hardening checks complete" -Kind info
+$e8HardenCount = @($cfaClass, $npClass, $asrClass, $psv2Class, $ieClass) | Where-Object { $_ -eq 'sev-good' } | Measure-Object | Select-Object -ExpandProperty Count
+$e8HardenStatus = if ($e8HardenCount -ge 4) { "Hardened" } elseif ($e8HardenCount -ge 2) { "Partial" } else { "Weak" }
+$e8HardenBadge  = if ($e8HardenCount -ge 4) { "good" } elseif ($e8HardenCount -ge 2) { "warn" } else { "bad" }
+$e8Scores.Add([pscustomobject]@{ Control = "User Application Hardening"; Status = $e8HardenStatus; Badge = $e8HardenBadge })
 
 # ---- E8-5: Restrict Administrative Privileges ----
 Html-Add "<h3>5. Restrict Administrative Privileges</h3>"
@@ -1996,6 +2223,10 @@ Html-Add ("<tr class='{0}'><th>UAC Admin Consent Prompt</th><td>{1}</td></tr>"  
 Html-Add ("<tr class='{0}'><th>Local Administrator Count</th><td>{1}</td></tr>"                 -f $adminClass,       (Html-Enc $(if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" })))
 Html-Add "</tbody></table>"
 Write-Action -What ("UAC: {0} | Admin members: {1}" -f $uacLuaLabel, $(if ($null -ne $adminCount) { $adminCount } else { "unknown" })) -Kind info
+$e8AdminOk = ($uacLua -eq 1) -and ($null -ne $adminCount) -and ($adminCount -le 4)
+$e8AdminStatus = if ($e8AdminOk) { "Restricted" } elseif ($uacLua -eq 1) { "Partial" } else { "Weak" }
+$e8AdminBadge  = if ($e8AdminOk) { "good" } elseif ($uacLua -eq 1) { "warn" } else { "bad" }
+$e8Scores.Add([pscustomobject]@{ Control = "Restrict Admin Privileges"; Status = $e8AdminStatus; Badge = $e8AdminBadge })
 
 # ---- E8-6: Patch Operating Systems ----
 Html-Add "<h3>6. Patch Operating Systems</h3>"
@@ -2042,6 +2273,10 @@ if ($wuSvc -ne "Error" -and $wuSvc) {
 }
 Html-Add "</tbody></table>"
 Write-Action -What ("OS: {0} | WU Service: {1}" -f $(if ($osBuild -ne "Error" -and $osBuild) { "$($osBuild.ProductName) $($osBuild.DisplayVersion)" } else { "unknown" }), $(if ($wuSvc -ne "Error" -and $wuSvc) { $wuSvc.Status } else { "unknown" })) -Kind info
+$e8OsPatchOk = ($wuSvc -ne "Error" -and $wuSvc -and $wuSvc.Status -eq "Running") -and ($patchClass -ne "sev-bad")
+$e8OsStatus  = if ($e8OsPatchOk -and $patchClass -eq "sev-good") { "Current" } elseif ($e8OsPatchOk) { "Needs attention" } else { "Overdue" }
+$e8OsBadge   = if ($e8OsPatchOk -and $patchClass -eq "sev-good") { "good" } elseif ($e8OsPatchOk) { "warn" } else { "bad" }
+$e8Scores.Add([pscustomobject]@{ Control = "Patch Operating Systems"; Status = $e8OsStatus; Badge = $e8OsBadge })
 
 # ---- E8-7: Multi-Factor Authentication ----
 Html-Add "<h3>7. Multi-Factor Authentication</h3>"
@@ -2082,6 +2317,10 @@ Html-Add ("<tr class='{0}'><th>Smartcard Readers</th><td>{1}</td></tr>"         
 Html-Add ("<tr class='{0}'><th>Cached Domain Credentials</th><td>{1}</td></tr>"          -f $cachedClass,  (Html-Enc $cachedLabel))
 Html-Add "</tbody></table>"
 Write-Action -What ("MFA signals: WH4B policy=$wh4bLabel | Smartcards=$scCount") -Kind info
+$e8MfaOk = ($wh4bPolicy -eq 1) -or ($helloDetected -eq $true) -or ($scCount -gt 0)
+$e8MfaStatus = if ($e8MfaOk) { "Signals present" } else { "Not detected" }
+$e8MfaBadge  = if ($e8MfaOk) { "good" } else { "warn" }
+$e8Scores.Add([pscustomobject]@{ Control = "Multi-Factor Authentication"; Status = $e8MfaStatus; Badge = $e8MfaBadge })
 
 # ---- E8-8: Regular Backups ----
 Html-Add "<h3>8. Regular Backups</h3>"
@@ -2126,6 +2365,24 @@ if ($backupTasks -ne "Error" -and $backupTasks -and @($backupTasks).Count -gt 0)
     )
 }
 Write-Action -What ("Backups: VSS copies=$($scCopies.Count) | File History=$fhLabel | OneDrive=$odLabel") -Kind $(if ($scCopies.Count -gt 0) { "ok" } else { "warn" })
+$e8BackupOk = ($scCopies.Count -gt 0) -or ($fileHistory -eq 1) -or ($oneDriveRunning -eq $true)
+$e8BackupStatus = if ($e8BackupOk) { "Detected" } else { "Not detected" }
+$e8BackupBadge  = if ($e8BackupOk) { "good" } else { "warn" }
+$e8Scores.Add([pscustomobject]@{ Control = "Regular Backups"; Status = $e8BackupStatus; Badge = $e8BackupBadge })
+
+# ---- E8 Summary Scorecard (inserted at top of section) ----
+$scorecardHtml = New-Object System.Text.StringBuilder
+[void]$scorecardHtml.AppendLine("<h3>Summary Scorecard</h3>")
+[void]$scorecardHtml.AppendLine("<table><thead><tr><th>#</th><th>Control</th><th>Status</th></tr></thead><tbody>")
+$e8Num = 1
+foreach ($s in $e8Scores) {
+    $badgeHtml = "<span class='badge {0}'>{1}</span>" -f (Html-Enc $s.Badge), (Html-Enc $s.Status)
+    $rowClass  = switch ($s.Badge) { 'good' { 'sev-good' }; 'warn' { 'sev-warn' }; 'bad' { 'sev-bad' }; default { '' } }
+    [void]$scorecardHtml.AppendLine(("<tr class='{0}'><td>{1}</td><td>{2}</td><td>{3}</td></tr>" -f $rowClass, $e8Num, (Html-Enc $s.Control), $badgeHtml))
+    $e8Num++
+}
+[void]$scorecardHtml.AppendLine("</tbody></table>")
+[void]$Html.Insert($e8ScorecardInsertPos, $scorecardHtml.ToString())
 
 Html-EndSection
 
