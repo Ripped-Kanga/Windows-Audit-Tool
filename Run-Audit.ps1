@@ -747,6 +747,19 @@ function Remove-SoftwareDuplicates {
 $Html = New-Object System.Text.StringBuilder
 $Toc = New-Object System.Collections.Generic.List[object]
 $SectionIdCounts = @{}
+$SectionHealth = @{}
+$CurrentSectionId = $null
+
+function Set-SectionHealth {
+    param([ValidateSet('good','warn','bad')][string]$Status)
+    if ($script:CurrentSectionId) {
+        $rank = @{ 'good' = 0; 'warn' = 1; 'bad' = 2 }
+        $current = $SectionHealth[$script:CurrentSectionId]
+        if (-not $current -or $rank[$Status] -gt $rank[$current]) {
+            $SectionHealth[$script:CurrentSectionId] = $Status
+        }
+    }
+}
 
 function New-SectionId {
     param([string]$Title)
@@ -783,6 +796,8 @@ function Html-StartSection {
     param([string]$Title)
     $script:SectionNumber++
     $id = New-SectionId -Title $Title
+    $script:CurrentSectionId = $id
+    $SectionHealth[$id] = 'good'
     $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id; Number = $script:SectionNumber }) | Out-Null
     Html-Add "<div class='section'>"
     Html-Add ("<h2 id='{0}'><span class='sec-num'>{1}</span>{2}</h2>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
@@ -795,6 +810,7 @@ function Html-AddNote {
         [string]$Text,
         [ValidateSet('info','good','warn','bad')][string]$Kind = 'info'
     )
+    if ($Kind -in @('good','warn','bad')) { Set-SectionHealth -Status $Kind }
     $klass = switch ($Kind) {
         'good' { 'callout callout-good' }
         'warn' { 'callout callout-warn' }
@@ -2431,6 +2447,12 @@ foreach ($s in $e8Scores) {
 [void]$scorecardHtml.AppendLine("</tbody></table>")
 [void]$Html.Insert($e8ScorecardInsertPos, $scorecardHtml.ToString())
 
+# Set section health from E8 scorecard results
+foreach ($s in $e8Scores) {
+    if ($s.Badge -eq 'bad') { Set-SectionHealth -Status bad }
+    elseif ($s.Badge -eq 'warn') { Set-SectionHealth -Status warn }
+}
+
 Html-EndSection
 
 # ============================================================
@@ -2457,21 +2479,58 @@ try {
         $updateNoticeHtml = "<div class='update-notice'>Update available: v$safeVersion &rarr; $safeLatest &mdash; <a href='$safeUrl'>Download</a></div>"
     }
 
-    # Build Table of Contents (from Html-StartSection calls)
-    $tocHtml = ""
+    # Build sidebar navigation (replaces old TOC)
+    $sidebarHtml = ""
     if ($Toc -and $Toc.Count -gt 0) {
         $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine("<div class='toc'>")
-        [void]$sb.AppendLine("<h2>Contents</h2>")
-        [void]$sb.AppendLine("<div class='toc-grid'>")
+        [void]$sb.AppendLine("<nav class='sidebar' id='sidebar'>")
+        [void]$sb.AppendLine("<div class='sidebar-header'><h2>Audit Navigation</h2><span class='version'>v$safeVersion</span></div>")
+        [void]$sb.AppendLine("<ul class='sidebar-nav'>")
         foreach ($t in $Toc) {
-            $id = Html-Enc $t.Id
-            $tt = Html-Enc $t.Title
-            [void]$sb.AppendLine(("<a class='toc-item' href='#{0}'><span class='toc-num'>{1}</span>{2}</a>" -f $id, $t.Number, $tt))
+            $id    = Html-Enc $t.Id
+            $tt    = Html-Enc $t.Title
+            $health = if ($SectionHealth.ContainsKey($t.Id)) { $SectionHealth[$t.Id] } else { 'good' }
+            [void]$sb.AppendLine(("<li><a href='#{0}' data-section='{0}'><span class='nav-num'>{1}</span><span class='nav-label'>{2}</span><span class='health-dot {3}'></span></a></li>" -f $id, $t.Number, $tt, $health))
         }
+        [void]$sb.AppendLine("</ul>")
+        [void]$sb.AppendLine("</nav>")
+        $sidebarHtml = $sb.ToString()
+    }
+
+    # Build system health score card (replaces TOC position in main content)
+    $scoreCardHtml = ""
+    if ($Toc -and $Toc.Count -gt 0) {
+        $goodCount = @($SectionHealth.Values | Where-Object { $_ -eq 'good' }).Count
+        $warnCount = @($SectionHealth.Values | Where-Object { $_ -eq 'warn' }).Count
+        $badCount  = @($SectionHealth.Values | Where-Object { $_ -eq 'bad'  }).Count
+        $totalCount = $goodCount + $warnCount + $badCount
+        $score = if ($totalCount -gt 0) { [math]::Round(($goodCount * 1.0 + $warnCount * 0.5) / $totalCount * 10, 1) } else { 0 }
+
+        $scoreColor = if ($score -ge 7) { 'var(--good)' } elseif ($score -ge 4) { 'var(--warn)' } else { 'var(--bad)' }
+        $scoreClass = if ($score -ge 7) { 'good' } elseif ($score -ge 4) { 'warn' } else { 'bad' }
+
+        # SVG ring parameters
+        $circumference = [math]::Round(2 * [math]::PI * 52, 2)
+        $offset = [math]::Round($circumference * (1 - $score / 10), 2)
+        $scoreDisplay = $score.ToString("0.0")
+
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("<div class='score-card'>")
+        [void]$sb.AppendLine("<div class='score-ring'>")
+        [void]$sb.AppendLine("<svg viewBox='0 0 120 120'><circle class='bg' cx='60' cy='60' r='52'/><circle class='fg' cx='60' cy='60' r='52' stroke='$scoreColor' stroke-dasharray='$circumference' stroke-dashoffset='$offset'/></svg>")
+        [void]$sb.AppendLine("<div class='score-value'><span class='num' style='color:$scoreColor'>$scoreDisplay</span><span class='label'>out of 10</span></div>")
+        [void]$sb.AppendLine("</div>")
+        [void]$sb.AppendLine("<div class='score-breakdown'>")
+        [void]$sb.AppendLine("<h2>System Health Score</h2>")
+        [void]$sb.AppendLine("<p class='score-desc'>Based on $totalCount audit modules. Each module contributes to the overall score based on its health status.</p>")
+        [void]$sb.AppendLine("<div class='score-stats'>")
+        [void]$sb.AppendLine("<div class='score-stat'><span class='dot good'></span><strong>$goodCount</strong> Healthy</div>")
+        [void]$sb.AppendLine("<div class='score-stat'><span class='dot warn'></span><strong>$warnCount</strong> Warning</div>")
+        [void]$sb.AppendLine("<div class='score-stat'><span class='dot bad'></span><strong>$badCount</strong> Critical</div>")
         [void]$sb.AppendLine("</div>")
         [void]$sb.AppendLine("</div>")
-        $tocHtml = $sb.ToString()
+        [void]$sb.AppendLine("</div>")
+        $scoreCardHtml = $sb.ToString()
     }
 
 $htmlContent = @"
@@ -2490,7 +2549,7 @@ $htmlContent = @"
   --bad:#dc2626;  --bad-bg:#fef2f2;  --bad-border:#fecaca;
 }
 *{ box-sizing:border-box; }
-body{ font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; padding:24px; line-height:1.5; }
+body{ font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; padding:24px 24px 24px 284px; line-height:1.5; }
 .container{ max-width:1100px; margin:0 auto; }
 
 /* ---- Header ---- */
@@ -2512,22 +2571,81 @@ h1{ margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px
 }
 .header .update-notice a{ color:#fde68a; }
 
-/* ---- TOC ---- */
-.toc{
-  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:14px;
-  padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,.04);
+/* ---- Sidebar ---- */
+.sidebar{
+  position:fixed; left:0; top:0; width:260px; height:100vh; background:var(--card);
+  border-right:1px solid var(--border); overflow-y:auto; padding:0; z-index:100;
+  box-shadow:2px 0 8px rgba(0,0,0,.04); display:flex; flex-direction:column;
 }
-.toc h2{ margin:0 0 14px; color:var(--accent); font-size:18px; font-weight:700; }
-.toc-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:6px 16px; }
-.toc-item{
-  display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:8px;
-  text-decoration:none; color:var(--text); font-size:14px; transition:background .15s;
+.sidebar-header{
+  padding:20px 20px 16px; border-bottom:1px solid var(--border); flex-shrink:0;
 }
-.toc-item:hover{ background:var(--bg); }
-.toc-num{
+.sidebar-header h2{ margin:0; font-size:15px; color:var(--accent); font-weight:700; }
+.sidebar-header .version{ font-size:11px; color:var(--muted); }
+.sidebar-nav{ list-style:none; padding:8px 0; margin:0; overflow-y:auto; flex:1; }
+.sidebar-nav li{ margin:0; }
+.sidebar-nav a{
+  display:flex; align-items:center; gap:10px; padding:9px 20px;
+  text-decoration:none; color:var(--text); font-size:13px;
+  transition:background .15s, border-color .15s; border-left:3px solid transparent;
+}
+.sidebar-nav a:hover{ background:var(--bg); }
+.sidebar-nav a.active{ background:var(--bg); border-left-color:var(--accent); font-weight:600; }
+.nav-num{
   display:inline-flex; align-items:center; justify-content:center;
-  min-width:26px; height:26px; border-radius:7px;
-  background:var(--accent); color:#fff; font-size:12px; font-weight:700; flex-shrink:0;
+  min-width:22px; height:22px; border-radius:6px; background:var(--bg);
+  font-size:11px; font-weight:700; flex-shrink:0; color:var(--muted);
+}
+.nav-label{ flex:1; line-height:1.3; }
+.health-dot{ width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.health-dot.good{ background:var(--good); }
+.health-dot.warn{ background:var(--warn); }
+.health-dot.bad{ background:var(--bad); }
+.sidebar-toggle{
+  display:none; position:fixed; bottom:20px; left:20px; z-index:200;
+  width:48px; height:48px; border-radius:50%; background:var(--accent); color:#fff;
+  border:none; cursor:pointer; font-size:22px; box-shadow:0 2px 10px rgba(0,0,0,.2);
+  align-items:center; justify-content:center;
+}
+.sidebar-overlay{
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,.3); z-index:99;
+}
+.sidebar-overlay.open{ display:block; }
+@media(max-width:900px){
+  .sidebar{ transform:translateX(-100%); transition:transform .25s ease; }
+  .sidebar.open{ transform:translateX(0); }
+  .sidebar-toggle{ display:flex; }
+  body{ padding-left:24px !important; }
+}
+
+/* ---- Score Card ---- */
+.score-card{
+  margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:14px;
+  padding:28px 32px; box-shadow:0 1px 3px rgba(0,0,0,.04);
+  display:flex; align-items:center; gap:32px;
+}
+.score-ring{ position:relative; width:120px; height:120px; flex-shrink:0; }
+.score-ring svg{ width:120px; height:120px; transform:rotate(-90deg); }
+.score-ring .bg{ fill:none; stroke:var(--border); stroke-width:8; }
+.score-ring .fg{ fill:none; stroke-width:8; stroke-linecap:round; }
+.score-value{
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+}
+.score-value .num{ font-size:32px; font-weight:700; line-height:1; }
+.score-value .label{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-top:2px; }
+.score-breakdown{ flex:1; }
+.score-breakdown h2{ margin:0 0 6px; font-size:18px; color:var(--accent); font-weight:700; }
+.score-desc{ margin:0 0 14px; font-size:13px; color:var(--muted); }
+.score-stats{ display:flex; flex-wrap:wrap; gap:16px 28px; }
+.score-stat{ display:flex; align-items:center; gap:8px; font-size:14px; }
+.score-stat .dot{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }
+.score-stat .dot.good{ background:var(--good); }
+.score-stat .dot.warn{ background:var(--warn); }
+.score-stat .dot.bad{ background:var(--bad); }
+@media(max-width:600px){
+  .score-card{ flex-direction:column; text-align:center; gap:20px; padding:20px; }
+  .score-stats{ justify-content:center; }
 }
 
 /* ---- Sections ---- */
@@ -2613,10 +2731,12 @@ tr.sev-bad:hover td{ background:#fee2e2 !important; }
 
 /* ---- Print ---- */
 @media print{
-  body{ background:#fff; padding:0; font-size:11px; }
+  .sidebar,.sidebar-toggle,.sidebar-overlay{ display:none !important; }
+  body{ background:#fff; padding:0 !important; font-size:11px; }
   .container{ max-width:none; }
   .header{ background:var(--accent) !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  .section,.toc{ box-shadow:none; border:1px solid #ccc; break-inside:avoid; }
+  .section,.score-card{ box-shadow:none; border:1px solid #ccc; break-inside:avoid; }
+  .score-ring svg{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   .section h2{ position:static; }
   details[open] summary{ display:none; }
   details > *{ display:block !important; }
@@ -2631,6 +2751,9 @@ tr.sev-bad:hover td{ background:#fee2e2 !important; }
 </style>
 </head>
 <body>
+$sidebarHtml
+<button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation">&#9776;</button>
+<div class="sidebar-overlay" id="sidebar-overlay"></div>
 <div class="container">
   <div class="header">
     <h1>System Audit Report</h1>
@@ -2643,7 +2766,7 @@ tr.sev-bad:hover td{ background:#fee2e2 !important; }
 $updateNoticeHtml
   </div>
 
-$tocHtml
+$scoreCardHtml
 
 $($Html.ToString())
 
@@ -2652,7 +2775,39 @@ $($Html.ToString())
   </div>
 </div>
 <script>
-window.addEventListener('beforeprint',function(){document.querySelectorAll('details').forEach(function(d){d.setAttribute('open','')})});
+(function(){
+  var toggle=document.getElementById('sidebar-toggle');
+  var sidebar=document.getElementById('sidebar');
+  var overlay=document.getElementById('sidebar-overlay');
+  if(toggle&&sidebar){
+    toggle.addEventListener('click',function(){sidebar.classList.toggle('open');overlay.classList.toggle('open')});
+    overlay.addEventListener('click',function(){sidebar.classList.remove('open');overlay.classList.remove('open')});
+  }
+  var links=document.querySelectorAll('.sidebar-nav a');
+  var sections=document.querySelectorAll('.section');
+  if(sections.length&&links.length){
+    var observer=new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        if(entry.isIntersecting){
+          var h2=entry.target.querySelector('h2[id]');
+          if(!h2)return;
+          links.forEach(function(l){l.classList.toggle('active',l.getAttribute('data-section')===h2.id)});
+        }
+      });
+    },{rootMargin:'-10% 0px -80% 0px'});
+    sections.forEach(function(s){observer.observe(s)});
+    links.forEach(function(l){
+      l.addEventListener('click',function(e){
+        e.preventDefault();
+        var t=document.getElementById(this.getAttribute('data-section'));
+        if(t)t.scrollIntoView({behavior:'smooth',block:'start'});
+        if(sidebar)sidebar.classList.remove('open');
+        if(overlay)overlay.classList.remove('open');
+      });
+    });
+  }
+  window.addEventListener('beforeprint',function(){document.querySelectorAll('details').forEach(function(d){d.setAttribute('open','')})});
+})();
 </script>
 </body>
 </html>
