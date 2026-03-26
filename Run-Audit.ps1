@@ -1223,6 +1223,16 @@ if ($boot -ne "Error" -and $boot) {
 
 Html-AddKV -Pairs $kv
 
+# Uptime health check — machines that haven't rebooted miss kernel-level patches
+if ($boot -ne "Error" -and $boot) {
+    if ($uptime.TotalDays -gt 30) {
+        Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
+        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn
+    } else {
+        Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
+    }
+}
+
 $disks = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
 if ($disks -ne "Error" -and $disks) {
     $diskList = @($disks) | ForEach-Object {
@@ -1324,8 +1334,22 @@ if ($patches -ne "Error" -and $patches) {
     $patchList  = @($patches) | Sort-Object InstalledOn -Descending
     $patchCount = $patchList.Count
 
+    # Patch currency check — how recently was the last patch applied?
+    $latestPatch = $patchList | Where-Object { $_.InstalledOn } | Select-Object -First 1
+    if ($latestPatch -and $latestPatch.InstalledOn) {
+        $daysSincePatch = [math]::Floor((New-TimeSpan -Start $latestPatch.InstalledOn).TotalDays)
+        if ($daysSincePatch -gt 90) {
+            Write-Action -What ("Last patch: {0} days ago (exceeds 90-day threshold)" -f $daysSincePatch) -Kind bad
+            Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Systems should be patched at least every 90 days." -f $daysSincePatch, $latestPatch.HotFixID) -Kind bad
+        } elseif ($daysSincePatch -gt 30) {
+            Write-Action -What ("Last patch: {0} days ago (exceeds 30-day threshold)" -f $daysSincePatch) -Kind warn
+            Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Consider applying recent updates." -f $daysSincePatch, $latestPatch.HotFixID) -Kind warn
+        } else {
+            Html-AddNote -Text ("Last patch installed {0} days ago (KB: {1}). Patch currency is healthy." -f $daysSincePatch, $latestPatch.HotFixID) -Kind good
+        }
+    }
+
     Write-Action -What ("Patches found: {0}" -f $patchCount) -Kind ok
-    Html-AddNote -Text ("Patches found: {0}" -f $patchCount) -Kind info
 
     $open = $false
     if ($patchCount -le 200) { $open = $true }
@@ -2018,7 +2042,13 @@ if ($aadInfo -ne "Error" -and $aadInfo) {
         "Tenant Name"     = $aadInfo.TenantName
     })
 
-    Write-Action -What ("Entra ID Joined: {0}" -f $(if($aadInfo.Joined){"Yes"} else {"No"})) -Kind info
+    if ($aadInfo.Joined) {
+        Write-Action -What "Entra ID Joined: Yes" -Kind ok
+        Html-AddNote -Text ("Device is joined to Microsoft Entra ID (Tenant: {0})." -f $(if ($aadInfo.TenantName -ne "N/A") { $aadInfo.TenantName } else { $aadInfo.TenantId })) -Kind good
+    } else {
+        Write-Action -What "Entra ID Joined: No" -Kind warn
+        Html-AddNote -Text "Device is not joined to Microsoft Entra ID. Most managed environments require Entra ID join for policy enforcement and conditional access." -Kind warn
+    }
 }
 else {
     Write-Action -What "Entra ID join status query failed." -Kind warn
