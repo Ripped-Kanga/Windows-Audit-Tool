@@ -29,7 +29,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.2.0"
+$ScriptVersion = "1.2.2"
 
 # ------------------------- #
 # Paths (per computer)      #
