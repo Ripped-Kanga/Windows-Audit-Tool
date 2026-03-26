@@ -6,6 +6,11 @@ A self-contained PowerShell script that audits a single Windows machine and prod
 
 ## Quick Start
 
+**Download the script:**
+```powershell
+curl -o Run-Audit.ps1 https://github.com/Ripped-Kanga/Windows-Audit-Tool/releases/latest/download/Run-Audit.ps1
+```
+
 **Option 1 — Right-click the script or executable:**
 - `Run-Audit.ps1` → right-click → *Run with PowerShell*
 - `Run-Audit.exe` → double-click (no PowerShell window needed — launches automatically)
@@ -17,19 +22,22 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1
 
 **Option 3 — Unattended via RMM/MDM (Atera, Intune, etc.):**
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent
+powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "Acme Corp"
 # or
-.\Run-Audit.exe -Silent
+.\Run-Audit.exe -Silent -CustomerName "Acme Corp"
 ```
 
 The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. In `-Silent` mode, script updates from GitHub are applied automatically before the audit runs. Use this when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
 
 The script will request administrator privileges via UAC automatically in interactive mode. If elevation is declined it continues in limited mode, skipping admin-only checks and noting what was skipped in the report.
 
+**Customer name:** In interactive mode the script prompts for a customer/business name after startup. Press ENTER to skip. In `-Silent` mode, pass `-CustomerName "Name"` to include it. When provided, the name appears in the report title, HTML heading, and output filename.
+
 **Outputs:**
 | File | Path |
 |---|---|
-| HTML report | `C:\Temp\<ComputerName>-Audit.html` |
+| HTML report | `C:\Temp\<CustomerName> - <ComputerName>-Audit.html` |
+| HTML report (no customer name) | `C:\Temp\<ComputerName>-Audit.html` |
 | Operational log | `C:\Windows\Temp\AuditLog.txt` |
 
 ---
@@ -69,13 +77,13 @@ After updating the `.ps1`, the script automatically re-launches the new version 
 
 ## What It Collects
 
-The audit runs 10 sequential sections. Each section fails independently — a problem in one area never stops the rest.
+The audit runs 13 sequential sections. Each section fails independently — a problem in one area never stops the rest.
 
 ### 1. System Information
 Operating system, edition, build number, install date, uptime, CPU model and core count, total RAM, and attached disk drives with size and model.
 
 ### 2. Installed Software
-Merged inventory from all available sources: HKLM and HKCU uninstall registry keys (both 64-bit and WOW6432Node), per-user registry hives including offline NTUSER.DAT files, AppX/Store packages, and Winget. Automatically deduplicates across sources, merging scope and origin metadata.
+Merged inventory from all available sources: HKLM and HKCU uninstall registry keys (both 64-bit and WOW6432Node), per-user registry hives including offline NTUSER.DAT files, AppX/Store packages, and Winget. Automatically deduplicates across sources, merging scope and origin metadata. Includes an interactive search/filter bar in the report.
 
 ### 3. Patches / Hotfixes
 All installed Windows hotfixes and cumulative updates via `Get-HotFix`, sorted by install date.
@@ -103,11 +111,20 @@ Installed printers with driver name, port, and whether they are shared.
 | Anti-Virus Products | All SecurityCenter2-registered AV products with engine and signature status; deduplicated by product name so multi-component suites (e.g. Sophos Intercept X) appear as a single entry |
 | Local Administrators | All members of the local Administrators group |
 
-### 9. Azure AD Join Status
-Parses `dsregcmd /status` output to report Azure AD join state, tenant name, and tenant ID.
+### 9. Local User Accounts
+All local user accounts with enabled/disabled status, password requirements, last logon time, password age, and description. Accounts that don't require a password are flagged.
 
-### 10. Essential Eight Assessment
-Read-only checks mapped to all eight ASD Essential Eight mitigation strategies:
+### 10. Startup Programs
+Programs configured to run at startup from registry Run/RunOnce keys (HKLM and HKCU) and WMI `Win32_StartupCommand`, with automatic deduplication across sources.
+
+### 11. Event Log Health
+Checks the five core Windows event logs (Application, Security, System, Setup, PowerShell) for enabled status, current size vs. maximum capacity, record count, and retention mode. Warns when logs are near full or disabled.
+
+### 12. Microsoft Entra ID Join Status
+Parses `dsregcmd /status` output to report Entra ID (formerly Azure AD) join state, tenant name, and tenant ID.
+
+### 13. Essential Eight Assessment
+Read-only checks mapped to all eight ASD Essential Eight mitigation strategies, with a **summary scorecard** at the top showing pass/warn/fail status for each control at a glance:
 
 | Strategy | Checks performed |
 |---|---|
@@ -124,9 +141,16 @@ Read-only checks mapped to all eight ASD Essential Eight mitigation strategies:
 
 ## Output Format
 
-The report is a **single self-contained HTML file** with embedded CSS. No external stylesheets, no JavaScript, no internet access needed to view it. It opens correctly in any browser and can be attached to emails, uploaded to ticketing systems, or archived as-is.
+The report is a **single self-contained HTML file** with embedded CSS and minimal inline JavaScript. No external stylesheets, no external scripts, no internet access needed to view it. It opens correctly in any browser and can be attached to emails, uploaded to ticketing systems, or archived as-is.
 
-The report includes a linked table of contents, color-coded severity badges (green/amber/red), and collapsible detail sections for long tables.
+Report features:
+- **Professional header** with customer name branding and gradient accent banner
+- **Numbered table of contents** with clickable navigation
+- **Numbered section headings** that stick when scrolling for easy orientation
+- **Color-coded severity** — green/amber/red callout bars, row highlighting, and badges throughout
+- **Interactive search** on the installed software table for quick filtering
+- **Collapsible detail sections** for long tables (auto-expanded when printing)
+- **Print-ready** — `Ctrl+P` produces a clean PDF with all sections expanded and UI elements hidden
 
 ---
 
@@ -154,7 +178,7 @@ The report includes a linked table of contents, color-coded severity badges (gre
 
 **Partial data beats no data.** Every section is independent. A failed WMI query, blocked command, or missing privilege produces a visible warning in the report rather than crashing the audit.
 
-**Zero-touch execution.** No prompts, no configuration, no prerequisites to install. Run it and collect the report.
+**Zero-touch execution.** No configuration files, no prerequisites to install. An optional customer name prompt is the only interaction before the audit runs.
 
 **Self-contained output.** The HTML report is a single file. No viewer software, no server, no dependencies.
 
