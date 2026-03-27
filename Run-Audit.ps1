@@ -1169,15 +1169,16 @@ function Invoke-HuduRequest {
       Lightweight wrapper around Invoke-RestMethod for the Hudu REST API.
       Adds the x-api-key header automatically. Returns the parsed response.
       Throws on HTTP errors so callers can catch and report.
+      Credentials are stored in script-scope variables set during validation.
     #>
     param(
         [string]$Method   = "GET",
         [string]$Endpoint,
         [hashtable]$Body
     )
-    $baseUrl = $script:HuduBaseURL.TrimEnd('/')
+    $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
     $uri     = "$baseUrl/api/v1/$($Endpoint.TrimStart('/'))"
-    $headers = @{ "x-api-key" = $script:HuduAPIKey }
+    $headers = @{ "x-api-key" = $script:_HuduAPIKey }
     $splat   = @{
         Uri         = $uri
         Method      = $Method
@@ -1496,6 +1497,9 @@ if ($HuduReport) {
         Log ("Hudu: skipped - missing parameters: {0}" -f ($missingParams -join ", "))
     } else {
         $HuduValid = $true
+        # Store in script-scope so Invoke-HuduRequest can access from nested functions
+        $script:_HuduAPIKey  = $HuduAPIKey
+        $script:_HuduBaseURL = $HuduBaseURL
         Write-Action -What "Hudu integration enabled" -Kind ok
         Write-Action -What ("  Base URL: {0}" -f $HuduBaseURL) -Kind info
         Write-Action -What ("  Company slug: {0}" -f $HuduCompanySlug) -Kind info
