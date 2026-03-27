@@ -3004,15 +3004,15 @@ $huduUpdateLine
     if ($Toc -and $Toc.Count -gt 0) {
         $tocSb = New-Object System.Text.StringBuilder
         [void]$tocSb.AppendLine("<h2 style='margin:24px 0 12px; font-size:18px; font-weight:700;'>Audit Navigation</h2>")
-        [void]$tocSb.AppendLine("<ol style='margin:0; padding-left:32px; font-size:14px; line-height:2;'>")
+        [void]$tocSb.AppendLine("<ul style='margin:0; padding-left:8px; font-size:14px; line-height:2; list-style:none;'>")
         foreach ($t in $Toc) {
             $id    = Html-Enc $t.Id
             $tt    = Html-Enc $t.Title
             $health = if ($SectionHealth.ContainsKey($t.Id)) { $SectionHealth[$t.Id] } else { 'good' }
             $dotColor = switch ($health) { 'good' { '#059669' }; 'warn' { '#d97706' }; 'bad' { '#dc2626' }; default { '#059669' } }
-            [void]$tocSb.AppendLine(("<li><a href='#{0}' style='text-decoration:none; color:inherit;'><span style='color:{2}; font-size:10px;'>&#9679;</span> {1}</a></li>" -f $id, $tt, $dotColor))
+            [void]$tocSb.AppendLine(("<li><a href='#{0}' style='text-decoration:none; color:inherit;'>{3}. <span style='color:{2}; font-size:10px;'>&#9679;</span> {1}</a></li>" -f $id, $tt, $dotColor, $t.Number))
         }
-        [void]$tocSb.AppendLine("</ol>")
+        [void]$tocSb.AppendLine("</ul>")
         $huduTocHtml = $tocSb.ToString()
     }
 
