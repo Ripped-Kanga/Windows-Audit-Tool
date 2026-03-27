@@ -32,7 +32,7 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "
 .\Run-Audit.ps1 -HuduReport `
     -HuduAPIKey "your-api-key" `
     -HuduBaseURL "https://your-instance.huducloud.com" `
-    -HuduCompanySlug "0297b67dbba7" `
+    -HuduCompanySlug "Hex String" `
     -HuduAssetLayoutName "Audit Reports"
 ```
 
@@ -102,7 +102,7 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
 .\Run-Audit.ps1 -HuduReport `
     -HuduAPIKey "your-api-key" `
     -HuduBaseURL "https://your-instance.huducloud.com" `
-    -HuduCompanySlug "0297b67dbba7" `
+    -HuduCompanySlug "Hex String" `
     -HuduAssetLayoutName "Audit Reports"
 ```
 
@@ -122,7 +122,7 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
 .\Run-Audit.ps1 -Silent -HuduReport `
     -HuduAPIKey "your-api-key" `
     -HuduBaseURL "https://your-instance.huducloud.com" `
-    -HuduCompanySlug "0297b67dbba7" `
+    -HuduCompanySlug "Hex String" `
     -HuduAssetLayoutName "Audit Reports"
 ```
 
