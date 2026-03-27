@@ -3399,6 +3399,10 @@ $huduBodyFragment
     Log "STEP Hudu: Uploading report to Hudu"
     $huduAssetDate = Get-Date -Format 'dd/MM/yyyy'
     $huduAssetName = "$ComputerName - $huduAssetDate"
+    # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) — they are
+    # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
+    # These can originate from registry software entries containing embedded null bytes.
+    $huduBodyFragment = $huduBodyFragment -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
     $huduSuccess = Publish-HuduAsset `
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
