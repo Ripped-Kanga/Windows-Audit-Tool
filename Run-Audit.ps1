@@ -3010,7 +3010,7 @@ $huduUpdateLine
             $tt    = Html-Enc $t.Title
             $health = if ($SectionHealth.ContainsKey($t.Id)) { $SectionHealth[$t.Id] } else { 'good' }
             $dotColor = switch ($health) { 'good' { '#059669' }; 'warn' { '#d97706' }; 'bad' { '#dc2626' }; default { '#059669' } }
-            [void]$tocSb.AppendLine(("<li><a href='#{0}' style='text-decoration:none; color:inherit;'>{1}</a> <span style='color:{2}; font-size:10px; vertical-align:middle;'>&#9679;</span></li>" -f $id, $tt, $dotColor))
+            [void]$tocSb.AppendLine(("<li><span style='color:{2}; font-size:10px; vertical-align:middle;'>&#9679;</span> <a href='#{0}' style='text-decoration:none; color:inherit;'>{1}</a></li>" -f $id, $tt, $dotColor))
         }
         [void]$tocSb.AppendLine("</ol>")
         $huduTocHtml = $tocSb.ToString()
