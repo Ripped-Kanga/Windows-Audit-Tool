@@ -807,7 +807,7 @@ function Convert-ToHuduInline {
 
     # Section-level details/summary (must come before generic details/summary rules)
     $L = $L -replace "<details class='section-details'>", "<details style='margin-top:0;'>"
-    $L = $L -replace "<summary class='section-summary' id='([^']*)'>", "<summary id='`$1' style='cursor:pointer; font-weight:700; padding:12px 0; font-size:18px; border-bottom:2px solid rgba(128,128,128,0.2); margin-bottom:14px; list-style:none;'>"
+    $L = $L -replace "<summary class='section-summary' id='([^']*)'>", "<summary id='`$1' style='cursor:pointer; font-weight:700; padding:12px 0; font-size:18px; border-bottom:2px solid rgba(128,128,128,0.2); margin-bottom:14px; list-style:none; scroll-margin-top:80px;'>"
 
     # Section number badge - dark blue bg with white text works in both themes
     $L = $L -replace "<span class='sec-num'>", "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:28px; height:28px; border-radius:8px; background:#1e3a5f; color:#fff; font-size:13px; font-weight:700; margin-right:8px;'>"
