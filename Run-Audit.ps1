@@ -21,7 +21,24 @@ param(
     # Customer / business name to include in the report title and filename.
     # Required when using -Silent; prompted interactively otherwise.
     [Alias('customer-name')]
-    [string]$CustomerName
+    [string]$CustomerName,
+
+    # Hudu API integration - upload the audit report directly to a Hudu asset.
+    # All Hudu parameters require -HuduReport to be set.
+    [Alias('hudu-report')]
+    [switch]$HuduReport,
+
+    [Alias('hudu-api-key')]
+    [string]$HuduAPIKey,
+
+    [Alias('hudu-base-url')]
+    [string]$HuduBaseURL,
+
+    [Alias('hudu-company-id')]
+    [int]$HuduCompanyID,
+
+    [Alias('hudu-asset-layout-name')]
+    [string]$HuduAssetLayoutName
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,7 +46,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.2.4"
+$ScriptVersion = "1.3.0"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1145,6 +1162,142 @@ function Invoke-PendingExeSwap {
 }
 
 # ------------------------- #
+# Hudu API Functions         #
+# ------------------------- #
+function Invoke-HuduRequest {
+    <#
+      Lightweight wrapper around Invoke-RestMethod for the Hudu REST API.
+      Adds the x-api-key header automatically. Returns the parsed response.
+      Throws on HTTP errors so callers can catch and report.
+    #>
+    param(
+        [string]$Method   = "GET",
+        [string]$Endpoint,
+        [hashtable]$Body
+    )
+    $baseUrl = $script:HuduBaseURL.TrimEnd('/')
+    $uri     = "$baseUrl/api/v1/$($Endpoint.TrimStart('/'))"
+    $headers = @{ "x-api-key" = $script:HuduAPIKey }
+    $splat   = @{
+        Uri         = $uri
+        Method      = $Method
+        Headers     = $headers
+        ContentType = "application/json"
+    }
+    if ($Body) {
+        $splat.Body = ($Body | ConvertTo-Json -Depth 10)
+    }
+    Invoke-RestMethod @splat
+}
+
+function Get-HuduAssetLayoutByName {
+    <#
+      Paginates through all asset layouts and returns the first one whose name
+      matches exactly. Returns $null if not found.
+    #>
+    param([string]$Name)
+    $page = 1
+    do {
+        $resp    = Invoke-HuduRequest -Endpoint "asset_layouts?page=$page"
+        $layouts = @($resp.asset_layouts)
+        if (-not $layouts -or $layouts.Count -eq 0) {
+            # Some Hudu versions return a bare array
+            $layouts = @($resp)
+        }
+        foreach ($layout in $layouts) {
+            if ($layout.name -eq $Name) { return $layout }
+        }
+        $page++
+        # Hudu returns 25 per page; stop when a page is short
+    } while ($layouts.Count -ge 25)
+    return $null
+}
+
+function Publish-HuduAsset {
+    <#
+      Creates a new asset in Hudu under the specified company and asset layout.
+      Finds the layout by name, auto-detects the first RichText field, and
+      populates it with the supplied HTML content.
+      Returns $true on success, $false on failure (never throws).
+    #>
+    param(
+        [int]$CompanyID,
+        [string]$LayoutName,
+        [string]$AssetName,
+        [string]$HtmlContent
+    )
+    try {
+        # 1. Find the asset layout
+        Write-Action -What "Looking up asset layout: $LayoutName" -Kind run
+        $layout = Get-HuduAssetLayoutByName -Name $LayoutName
+        if (-not $layout) {
+            Write-Action -What "Asset layout '$LayoutName' not found in Hudu." -Kind bad
+            Log "Hudu: asset layout '$LayoutName' not found"
+            return $false
+        }
+        $layoutId = $layout.id
+        Write-Action -What ("Found layout: {0} (ID {1})" -f $layout.name, $layoutId) -Kind ok
+        Log ("Hudu: found asset layout '{0}' (ID {1})" -f $layout.name, $layoutId)
+
+        # 2. Find the first RichText field in the layout
+        $richField = $null
+        foreach ($f in @($layout.fields)) {
+            if ($f.field_type -eq "RichText") {
+                $richField = $f
+                break
+            }
+        }
+        if (-not $richField) {
+            Write-Action -What "No RichText field found in layout '$LayoutName'." -Kind bad
+            Log "Hudu: no RichText field in layout '$LayoutName'"
+            return $false
+        }
+        # Hudu field keys: label lowercased, spaces to underscores
+        $fieldKey = ($richField.label -replace '[^a-zA-Z0-9\s]', '' -replace '\s+', '_').ToLower()
+        Write-Action -What ("Target field: {0} -> {1}" -f $richField.label, $fieldKey) -Kind info
+        Log ("Hudu: using field '{0}' (key '{1}')" -f $richField.label, $fieldKey)
+
+        # 3. Create the asset
+        Write-Action -What "Creating asset: $AssetName" -Kind run
+        $body = @{
+            asset = @{
+                name            = $AssetName
+                asset_layout_id = $layoutId
+                company_id      = $CompanyID
+                custom_fields   = @(
+                    @{ $fieldKey = $HtmlContent }
+                )
+            }
+        }
+        $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$CompanyID/assets" -Body $body
+        if ($result -and $result.asset) {
+            Write-Action -What ("Asset created successfully (ID: {0})" -f $result.asset.id) -Kind ok
+            Log ("Hudu: asset '{0}' created (ID {1})" -f $AssetName, $result.asset.id)
+            return $true
+        }
+        # Unexpected response shape
+        Write-Action -What "Asset may have been created but response was unexpected." -Kind warn
+        Log ("Hudu: unexpected response from asset create: {0}" -f ($result | ConvertTo-Json -Depth 3 -Compress))
+        return $true
+    }
+    catch {
+        $errMsg = $_.Exception.Message
+        if ($_.Exception.Response) {
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $responseBody = $reader.ReadToEnd()
+                $reader.Close()
+                $errMsg = "{0} - {1}" -f $errMsg, $responseBody
+            } catch { }
+        }
+        Write-Action -What ("Hudu API error: {0}" -f $errMsg) -Kind bad
+        Log ("Hudu: API error - {0}" -f $errMsg)
+        Log-ExceptionDetail $_
+        return $false
+    }
+}
+
+# ------------------------- #
 # Start                     #
 # ------------------------- #
 try {
@@ -1280,6 +1433,39 @@ if ($CustomerName) {
     Log ("Customer name: {0}" -f $CustomerName)
     $HtmlReportPath     = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
     $HuduHtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit-Hudu.html"
+}
+
+# ------------------------- #
+# Hudu Parameter Validation  #
+# ------------------------- #
+$HuduValid = $false
+if ($HuduReport) {
+    # Enforce TLS 1.2 for PS 5.1 (older defaults may reject Hudu's HTTPS cert)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    $missingParams = @()
+    if (-not $HuduAPIKey)           { $missingParams += "-HuduAPIKey" }
+    if (-not $HuduBaseURL)          { $missingParams += "-HuduBaseURL" }
+    if ($HuduCompanyID -le 0)       { $missingParams += "-HuduCompanyID" }
+    if (-not $HuduAssetLayoutName)  { $missingParams += "-HuduAssetLayoutName" }
+
+    if ($missingParams.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  Hudu integration enabled but missing required parameters:" -ForegroundColor Red
+        foreach ($p in $missingParams) {
+            Write-Host "    - $p" -ForegroundColor Red
+        }
+        Write-Host "  Hudu upload will be skipped. The audit will continue normally." -ForegroundColor Yellow
+        Write-Host ""
+        Log ("Hudu: skipped - missing parameters: {0}" -f ($missingParams -join ", "))
+    } else {
+        $HuduValid = $true
+        Write-Action -What "Hudu integration enabled" -Kind ok
+        Write-Action -What ("  Base URL: {0}" -f $HuduBaseURL) -Kind info
+        Write-Action -What ("  Company ID: {0}" -f $HuduCompanyID) -Kind info
+        Write-Action -What ("  Layout: {0}" -f $HuduAssetLayoutName) -Kind info
+        Log ("Hudu: enabled - URL={0}, CompanyID={1}, Layout={2}" -f $HuduBaseURL, $HuduCompanyID, $HuduAssetLayoutName)
+    }
 }
 
 # ============================================================
@@ -2993,10 +3179,11 @@ $($Html.ToString())
     Write-Host "HTML report saved to $HtmlReportPath" -ForegroundColor Green
     Log "HTML report written to $HtmlReportPath"
 
-    # ---- Hudu-compatible report (inline-styled, flat structure for ActionText compatibility) ----
+    # ---- Hudu-compatible report (only when -HuduReport is enabled) ----
+    if ($HuduReport -and $HuduValid) {
     # Hudu's ActionText sanitizer restructures nested <div> containers around block elements.
     # All layouts here use <table> instead of nested divs to survive sanitization intact.
-    Write-Host "[Final] Saving Hudu-compatible report: $HuduHtmlReportPath" -ForegroundColor Cyan
+    Write-Host "[Final] Building Hudu report..." -ForegroundColor Cyan
 
     # Hudu header - table layout prevents ActionText from splitting container around h1
     $huduUpdateLine = ""
@@ -3052,21 +3239,8 @@ $huduUpdateLine
         $huduTocHtml = $tocSb.ToString()
     }
 
-    # Assemble the Hudu HTML document
-    # - Full HTML doc wrapper for browser preview, but content is designed to work
-    #   as a fragment when Hudu strips the document-level elements.
-    # - No outer <div> wrapper - Hudu provides its own container (rich_text_content).
-    # - All block layouts use <table> to survive ActionText sanitization.
-    $huduContent = @"
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>System Audit Report - $safeReportTitle (Hudu)</title>
-</head>
-<body style="font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; margin:0; padding:24px; line-height:1.5;">
-
+    # Build Hudu HTML body fragment (used for both file preview and API upload)
+    $huduBodyFragment = @"
 $huduHeaderHtml
 
 $huduScoreCardHtml
@@ -3079,14 +3253,45 @@ $($HuduHtml.ToString())
 <p style='opacity:0.6; font-size:12px; text-align:center; padding-top:16px;'>
   Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
 </p>
+"@
+
+    # Write Hudu HTML preview file
+    $huduContent = @"
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Audit Report - $safeReportTitle (Hudu)</title>
+</head>
+<body style="font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; margin:0; padding:24px; line-height:1.5;">
+
+$huduBodyFragment
 
 </body>
 </html>
 "@
 
     $huduContent | Out-File -FilePath $HuduHtmlReportPath -Force -Encoding utf8
-    Write-Host "Hudu-compatible report saved to $HuduHtmlReportPath" -ForegroundColor Green
-    Log "Hudu-compatible HTML report written to $HuduHtmlReportPath"
+    Write-Host "Hudu HTML preview saved to $HuduHtmlReportPath" -ForegroundColor Green
+    Log "Hudu HTML preview written to $HuduHtmlReportPath"
+
+    # ---- Upload to Hudu via API ----
+    Write-Host "[Hudu] Uploading report to Hudu..." -ForegroundColor Yellow
+    Log "STEP Hudu: Uploading report to Hudu"
+    $huduAssetDate = Get-Date -Format 'dd/MM/yyyy'
+    $huduAssetName = "$ComputerName - $huduAssetDate"
+    $huduSuccess = Publish-HuduAsset `
+        -CompanyID      $HuduCompanyID `
+        -LayoutName     $HuduAssetLayoutName `
+        -AssetName      $huduAssetName `
+        -HtmlContent    $huduBodyFragment
+    if ($huduSuccess) {
+        Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
+    } else {
+        Write-Host "  Hudu upload failed. The local HTML report is still available." -ForegroundColor Yellow
+    }
+    } # end if ($HuduReport -and $HuduValid)
 }
 catch {
     Write-Host "Failed to write HTML report: $_" -ForegroundColor Red
