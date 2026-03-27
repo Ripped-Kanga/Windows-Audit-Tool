@@ -3004,7 +3004,7 @@ $huduUpdateLine
     if ($Toc -and $Toc.Count -gt 0) {
         $tocSb = New-Object System.Text.StringBuilder
         [void]$tocSb.AppendLine("<h2 style='margin:24px 0 12px; font-size:18px; font-weight:700;'>Audit Navigation</h2>")
-        [void]$tocSb.AppendLine("<ol style='margin:0; padding-left:20px; font-size:14px; line-height:2;'>")
+        [void]$tocSb.AppendLine("<ol style='margin:0; padding-left:32px; font-size:14px; line-height:2;'>")
         foreach ($t in $Toc) {
             $id    = Html-Enc $t.Id
             $tt    = Html-Enc $t.Title
