@@ -27,11 +27,20 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "
 .\Run-Audit.exe -Silent -CustomerName "Acme Corp"
 ```
 
+**Option 4 — With Hudu integration (upload report directly to Hudu):**
+```powershell
+.\Run-Audit.ps1 -HuduReport `
+    -HuduAPIKey "your-api-key" `
+    -HuduBaseURL "https://your-instance.huducloud.com" `
+    -HuduCompanySlug "0297b67dbba7" `
+    -HuduAssetLayoutName "Audit Reports"
+```
+
 The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. In `-Silent` mode, script updates from GitHub are applied automatically before the audit runs. Use this when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
 
 The script will request administrator privileges via UAC automatically in interactive mode. If elevation is declined it continues in limited mode, skipping admin-only checks and noting what was skipped in the report.
 
-**Customer name:** In interactive mode the script prompts for a customer/business name after startup. Press ENTER to skip. In `-Silent` mode, pass `-CustomerName "Name"` to include it. When provided, the name appears in the report title, HTML heading, and output filename.
+**Customer name:** In interactive mode the script prompts for a customer/business name after startup. Press ENTER to skip. In `-Silent` mode, pass `-CustomerName "Name"` to include it. When provided, the name appears in the report title, HTML heading, and output filename. When using `-HuduReport`, the customer name is automatically resolved from the Hudu company slug, so `-CustomerName` is not required.
 
 **Outputs:**
 | File | Path |
@@ -39,6 +48,7 @@ The script will request administrator privileges via UAC automatically in intera
 | HTML report | `C:\Temp\<CustomerName> - <ComputerName>-Audit.html` |
 | HTML report (no customer name) | `C:\Temp\<ComputerName>-Audit.html` |
 | Operational log | `C:\Windows\Temp\AuditLog.txt` |
+| Hudu preview (when `-HuduReport` used) | `C:\Temp\<CustomerName> - <ComputerName>-Audit-Hudu.html` |
 
 ---
 
@@ -72,6 +82,49 @@ After updating the `.ps1`, the script automatically re-launches the new version 
 **No internet / GitHub unreachable:** The update check silently fails and the audit proceeds with the current version. Update failures never block the audit.
 
 > **Note for releases:** Attach both `Run-Audit.ps1` and `Run-Audit.exe` as assets to each GitHub Release. The updater looks for files ending in `.ps1` and `.exe` in the release assets.
+
+---
+
+## Hudu Integration
+
+The script can upload audit reports directly to [Hudu](https://www.huducloud.com/) as a new asset. Enable this with the `-HuduReport` switch and four required parameters:
+
+| Parameter | Description |
+|---|---|
+| `-HuduReport` | Enable Hudu integration |
+| `-HuduAPIKey` | Your Hudu API key (generate from Admin > API Keys in Hudu) |
+| `-HuduBaseURL` | Your Hudu instance URL (e.g. `https://your-instance.huducloud.com`) |
+| `-HuduCompanySlug` | The hex slug from your Hudu company URL (e.g. `0297b67dbba7` from `https://instance.huducloud.com/c/0297b67dbba7`) |
+| `-HuduAssetLayoutName` | The name of the asset layout to create the asset under (e.g. `Audit Reports`) |
+
+**Example:**
+```powershell
+.\Run-Audit.ps1 -HuduReport `
+    -HuduAPIKey "your-api-key" `
+    -HuduBaseURL "https://your-instance.huducloud.com" `
+    -HuduCompanySlug "0297b67dbba7" `
+    -HuduAssetLayoutName "Audit Reports"
+```
+
+**How it works:**
+1. The script resolves the company name from the slug via the Hudu API and uses it as the customer name in the report (no need to pass `-CustomerName` separately)
+2. All audit HTML is transformed in real-time into Hudu-compatible inline-styled HTML (Hudu's ActionText editor strips `<style>` blocks)
+3. After the audit completes, a new asset is created under the specified company and layout with the report content embedded in the first RichText field
+4. The full standalone HTML report is attached to the asset as a downloadable file
+5. A local Hudu preview file is also saved for reference
+
+**Asset layout requirements:** The target asset layout must have at least one RichText field. The script automatically detects and uses the first RichText field in the layout.
+
+**Graceful degradation:** If any Hudu parameter is missing, the API is unreachable, or the company slug cannot be resolved, the script logs the issue and continues the audit normally. Hudu failures never block the local report.
+
+**RMM/MDM deployment with Hudu:**
+```powershell
+.\Run-Audit.ps1 -Silent -HuduReport `
+    -HuduAPIKey "your-api-key" `
+    -HuduBaseURL "https://your-instance.huducloud.com" `
+    -HuduCompanySlug "0297b67dbba7" `
+    -HuduAssetLayoutName "Audit Reports"
+```
 
 ---
 
