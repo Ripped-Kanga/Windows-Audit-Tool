@@ -29,7 +29,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.2.2"
+$ScriptVersion = "1.2.4"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -39,8 +39,9 @@ if (-not $ComputerName -or $ComputerName -eq "") {
     $ComputerName = "UnknownComputer"
 }
 
-$HtmlReportPath = "C:\Temp\${ComputerName}-Audit.html"
-$LogPath        = "C:\Windows\Temp\AuditLog.txt"
+$HtmlReportPath     = "C:\Temp\${ComputerName}-Audit.html"
+$HuduHtmlReportPath = "C:\Temp\${ComputerName}-Audit-Hudu.html"
+$LogPath            = "C:\Windows\Temp\AuditLog.txt"
 
 # Ensure directories exist
 try {
@@ -744,7 +745,8 @@ function Remove-SoftwareDuplicates {
 # ------------------------- #
 # HTML helpers              #
 # ------------------------- #
-$Html = New-Object System.Text.StringBuilder
+$Html     = New-Object System.Text.StringBuilder
+$HuduHtml = New-Object System.Text.StringBuilder
 $Toc = New-Object System.Collections.Generic.List[object]
 $SectionIdCounts = @{}
 $SectionHealth = @{}
@@ -785,9 +787,89 @@ function Html-Enc {
     return [System.Net.WebUtility]::HtmlEncode($s)
 }
 
+function Convert-ToHuduInline {
+    param([string]$L)
+    # Transforms class-based HTML into inline-styled HTML for Hudu compatibility.
+    # Hudu (Rails/ActionText) strips <style> blocks but preserves inline style= attributes.
+    # Uses theme-neutral colors (inherit, rgba) for light/dark Hudu theme compatibility.
+    #
+    # CRITICAL: Hudu's sanitizer restructures nested <div> containers around block elements
+    # (h2/h3/table get pulled out of parent divs, splitting the container). To survive this:
+    #   - Section container divs are flattened to <hr> separators (no wrapping)
+    #   - KV grids are converted from nested divs to <table> (tables survive intact)
+    # Order matters: structural transforms and specific patterns before generic ones.
+
+    # Section container - flatten to HR separator (Hudu breaks divs wrapping block elements)
+    $L = $L -replace "<div class='section'>", "<hr style='border:none; border-top:2px solid rgba(128,128,128,0.15); margin:28px 0 0;'>"
+    # Section end marker - keep </details>, remove the div close (HR is void, no close needed)
+    $L = $L -replace "</details></div><!-- /section -->", "</details>"
+    $L = $L -replace "</div><!-- /section -->", ""
+
+    # Section-level details/summary (must come before generic details/summary rules)
+    $L = $L -replace "<details class='section-details'>", "<details style='margin-top:0;'>"
+    $L = $L -replace "<summary class='section-summary' id='([^']*)'>", "<summary id='`$1' style='cursor:pointer; font-weight:700; padding:12px 0; font-size:18px; border-bottom:2px solid rgba(128,128,128,0.2); margin-bottom:14px; list-style:none; scroll-margin-top:80px;'>"
+
+    # Section number badge - dark blue bg with white text works in both themes
+    $L = $L -replace "<span class='sec-num'>", "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:28px; height:28px; border-radius:8px; background:#1e3a5f; color:#fff; font-size:13px; font-weight:700; margin-right:8px;'>"
+
+    # Callouts - semi-transparent tinted backgrounds, inherit text color (single-line divs, no nesting issue)
+    $L = $L -replace "<div class='callout callout-good'>", "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>"
+    $L = $L -replace "<div class='callout callout-warn'>", "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #d97706; background:rgba(217,119,6,0.1);'>"
+    $L = $L -replace "<div class='callout callout-bad'>",  "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #dc2626; background:rgba(220,38,38,0.1);'>"
+    $L = $L -replace "<div class='callout callout-info'>", "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #2E5C6E; background:rgba(46,92,110,0.1);'>"
+
+    # KV grid - convert from nested divs to table (tables survive Hudu's sanitizer intact)
+    $L = $L -replace "<div class='kv'>", "<table style='width:100%; border-collapse:collapse; margin-top:6px; font-size:14px;'>"
+    $L = $L -replace "</div><!-- /kv -->", "</table>"
+    # KV rows - convert div key/value pairs to table rows (values are Html-Enc'd, no nested tags)
+    $L = $L -replace "<div class='key'>([^<]*)</div><div>([^<]*)</div>", "<tr><td style='width:240px; padding:4px 8px; opacity:0.7; font-weight:500; vertical-align:top;'>`$1</td><td style='padding:4px 8px; vertical-align:top;'>`$2</td></tr>"
+
+    # Badges - keep strong semantic colors, semi-transparent backgrounds
+    $L = $L -replace "<span class='badge good'>", "<span style='display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; background:rgba(5,150,105,0.15); border:1px solid rgba(5,150,105,0.3); color:#059669;'>"
+    $L = $L -replace "<span class='badge warn'>", "<span style='display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; background:rgba(217,119,6,0.15); border:1px solid rgba(217,119,6,0.3); color:#d97706;'>"
+    $L = $L -replace "<span class='badge bad'>",  "<span style='display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; background:rgba(220,38,38,0.15); border:1px solid rgba(220,38,38,0.3); color:#dc2626;'>"
+
+    # Code span
+    $L = $L -replace "<span class='code'>", "<span style='font-family:Consolas,monospace; font-size:12px;'>"
+
+    # Severity rows - semi-transparent tinted backgrounds
+    $L = $L -replace "<tr class='sev-good'>", "<tr style='background:rgba(5,150,105,0.1);'>"
+    $L = $L -replace "<tr class='sev-warn'>", "<tr style='background:rgba(217,119,6,0.1);'>"
+    $L = $L -replace "<tr class='sev-bad'>",  "<tr style='background:rgba(220,38,38,0.1);'>"
+
+    # Tables (kv-table first, then generic)
+    $L = $L -replace "<table class='kv-table'>", "<table style='width:100%; border-collapse:collapse; margin-top:6px; font-size:13px;'>"
+    $L = $L -replace "<table>", "<table style='width:100%; border-collapse:collapse; margin-top:10px; font-size:13px;'>"
+
+    # Table headers and cells - neutral borders, transparent header bg
+    $L = $L -replace "<th>", "<th style='padding:8px 10px; border:1px solid rgba(128,128,128,0.2); background:rgba(128,128,128,0.08); text-align:left; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:0.3px; vertical-align:top;'>"
+    $L = $L -replace "<td>", "<td style='padding:8px 10px; border:1px solid rgba(128,128,128,0.2); vertical-align:top; overflow-wrap:break-word; word-break:break-word;'>"
+
+    # H3 subheaders - inherit text color
+    $L = $L -replace "<h3>", "<h3 style='margin:20px 0 10px; font-size:15px; font-weight:600;'>"
+
+    # Details/summary (open variant first)
+    $L = $L -replace "<details open>", "<details open style='margin-top:12px;'>"
+    $L = $L -replace "<details>", "<details style='margin-top:12px;'>"
+    $L = $L -replace "<summary>", "<summary style='cursor:pointer; font-weight:600; padding:8px 0; font-size:14px;'>"
+
+    # Small text - use opacity instead of hardcoded color
+    $L = $L -replace "<p class='small'>", "<p style='font-size:12px; opacity:0.6;'>"
+
+    # Filter box (strip JS handler - won't work in Hudu)
+    $L = $L -replace " class='filter-box'", " style='width:100%; padding:10px 14px; margin:10px 0 6px; border:1px solid rgba(128,128,128,0.2); border-radius:8px; font-size:14px;'"
+    $L = $L -replace " onkeyup='filterSoftwareTable\(\)'", ""
+
+    # Small div with id
+    $L = $L -replace "<div id='sw-filter-count' class='small'>", "<div id='sw-filter-count' style='font-size:12px; opacity:0.6;'>"
+
+    return $L
+}
+
 function Html-Add {
     param([string]$Line)
     [void]$Html.AppendLine($Line)
+    [void]$HuduHtml.AppendLine((Convert-ToHuduInline $Line))
 }
 
 $SectionNumber = 0
@@ -800,10 +882,10 @@ function Html-StartSection {
     $SectionHealth[$id] = 'good'
     $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id; Number = $script:SectionNumber }) | Out-Null
     Html-Add "<div class='section'>"
-    Html-Add ("<h2 id='{0}'><span class='sec-num'>{1}</span>{2}</h2>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
+    Html-Add ("<details class='section-details'><summary class='section-summary' id='{0}'><span class='sec-num'>{1}</span>{2}</summary>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
 }
 
-function Html-EndSection { Html-Add "</div>" }
+function Html-EndSection { Html-Add "</details></div><!-- /section -->" }
 
 function Html-AddNote {
     param(
@@ -827,7 +909,7 @@ function Html-AddKV {
     foreach ($k in $Pairs.Keys) {
         Html-Add ("<div class='key'>{0}</div><div>{1}</div>" -f (Html-Enc $k), (Html-Enc $Pairs[$k]))
     }
-    Html-Add "</div>"
+    Html-Add "</div><!-- /kv -->"
 }
 
 function Html-StartDetails {
@@ -1067,8 +1149,44 @@ function Invoke-PendingExeSwap {
 # ------------------------- #
 try {
 
-Write-Host "=== Windows Audit Tool v$ScriptVersion ===" -ForegroundColor Cyan
-Write-Host "=== Starting System Audit for $ComputerName ===" -ForegroundColor Cyan
+# Banner - Base64 encoded to keep .ps1 pure ASCII (PS 5.1 compat)
+$BannerWindowsB64 = "4paI4paI4pWXICAgIOKWiOKWiOKVl+KWiOKWiOKVl+KWiOKWiOKWiOKVlyAgIOKWiOKWiOKVl+KWiOKWiOKWiOKWiOKWiOKWiOKVlyAg4paI4paI4paI4paI4paI4paI4pWXIOKWiOKWiOKVlyAgICDilojilojilZfilojilojilojilojilojilojilojilZcK4paI4paI4pWRICAgIOKWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKWiOKWiOKVlyAg4paI4paI4pWR4paI4paI4pWU4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWRICAgIOKWiOKWiOKVkeKWiOKWiOKVlOKVkOKVkOKVkOKVkOKVnQrilojilojilZEg4paI4pWXIOKWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKVlOKWiOKWiOKVlyDilojilojilZHilojilojilZEgIOKWiOKWiOKVkeKWiOKWiOKVkSAgIOKWiOKWiOKVkeKWiOKWiOKVkSDilojilZcg4paI4paI4pWR4paI4paI4paI4paI4paI4paI4paI4pWXCuKWiOKWiOKVkeKWiOKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKVkeKVmuKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKVkSAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWR4paI4paI4paI4pWX4paI4paI4pWR4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWRCuKVmuKWiOKWiOKWiOKVlOKWiOKWiOKWiOKVlOKVneKWiOKWiOKVkeKWiOKWiOKVkSDilZrilojilojilojilojilZHilojilojilojilojilojilojilZTilZ3ilZrilojilojilojilojilojilojilZTilZ3ilZrilojilojilojilZTilojilojilojilZTilZ3ilojilojilojilojilojilojilojilZEKIOKVmuKVkOKVkOKVneKVmuKVkOKVkOKVnSDilZrilZDilZ3ilZrilZDilZ0gIOKVmuKVkOKVkOKVkOKVneKVmuKVkOKVkOKVkOKVkOKVkOKVnSAg4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWdICDilZrilZDilZDilZ3ilZrilZDilZDilZ0g4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWd"
+$BannerToolB64 = "IOKWiOKWiOKWiOKWiOKWiOKVlyDilojilojilZcgICDilojilojilZfilojilojilojilojilojilojilZcg4paI4paI4pWX4paI4paI4paI4paI4paI4paI4paI4paI4pWXICAgIOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKVlyDilojilojilojilojilojilojilZcgIOKWiOKWiOKWiOKWiOKWiOKWiOKVlyDilojilojilZcgICAgIArilojilojilZTilZDilZDilojilojilZfilojilojilZEgICDilojilojilZHilojilojilZTilZDilZDilojilojilZfilojilojilZHilZrilZDilZDilojilojilZTilZDilZDilZ0gICAg4pWa4pWQ4pWQ4paI4paI4pWU4pWQ4pWQ4pWd4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWRICAgICAK4paI4paI4paI4paI4paI4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICDilojilojilZHilojilojilZEgICDilojilojilZEgICAgICAgICAg4paI4paI4pWRICAg4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAgICAK4paI4paI4pWU4pWQ4pWQ4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICDilojilojilZHilojilojilZEgICDilojilojilZEgICAgICAgICAg4paI4paI4pWRICAg4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAgICAK4paI4paI4pWRICDilojilojilZHilZrilojilojilojilojilojilojilZTilZ3ilojilojilojilojilojilojilZTilZ3ilojilojilZEgICDilojilojilZEgICAgICAgICAg4paI4paI4pWRICAg4pWa4paI4paI4paI4paI4paI4paI4pWU4pWd4pWa4paI4paI4paI4paI4paI4paI4pWU4pWd4paI4paI4paI4paI4paI4paI4paI4pWXCuKVmuKVkOKVnSAg4pWa4pWQ4pWdIOKVmuKVkOKVkOKVkOKVkOKVkOKVnSDilZrilZDilZDilZDilZDilZDilZ0g4pWa4pWQ4pWdICAg4pWa4pWQ4pWdICAgICAgICAgIOKVmuKVkOKVnSAgICDilZrilZDilZDilZDilZDilZDilZ0gIOKVmuKVkOKVkOKVkOKVkOKVkOKVnSDilZrilZDilZDilZDilZDilZDilZDilZ0="
+# Version art character map - Base64 JSON mapping chars to 6-line art arrays
+$VerCharMapB64 = "eyJ2IjogWyLilojilojilZcgICDilojilojilZciLCAi4paI4paI4pWRICAg4paI4paI4pWRIiwgIuKVmuKWiOKWiOKVlyDilojilojilZTilZ0iLCAiIOKVmuKWiOKWiOKWiOKWiOKVlOKVnSAiLCAiICDilZrilojilojilZTilZ0gICIsICIgICDilZrilZDilZ0gICAiXSwgIi4iOiBbIiAgICIsICIgICAiLCAiICAgIiwgIiAgICIsICLilojilojilZciLCAi4pWa4pWQ4pWdIl0sICIwIjogWyIg4paI4paI4paI4paI4paI4paI4pWXICIsICLilojilojilZTilZDilZDilZDilojilojilZciLCAi4paI4paI4pWRICAg4paI4paI4pWRIiwgIuKWiOKWiOKVkSAgIOKWiOKWiOKVkSIsICLilZrilojilojilojilojilojilojilZTilZ0iLCAiIOKVmuKVkOKVkOKVkOKVkOKVkOKVnSAiXSwgIjEiOiBbIiDilojilojilZciLCAi4paI4paI4paI4pWRIiwgIuKVmuKWiOKWiOKVkSIsICIg4paI4paI4pWRIiwgIiDilojilojilZEiLCAiIOKVmuKVkOKVnSJdLCAiMiI6IFsi4paI4paI4paI4paI4paI4paI4pWXICIsICLilZrilZDilZDilZDilZDilojilojilZciLCAiIOKWiOKWiOKWiOKWiOKWiOKVlOKVnSIsICLilojilojilZTilZDilZDilZDilZ0gIiwgIuKWiOKWiOKWiOKWiOKWiOKWiOKWiOKVlyIsICLilZrilZDilZDilZDilZDilZDilZDilZ0iXSwgIjMiOiBbIuKWiOKWiOKWiOKWiOKWiOKWiOKVlyAiLCAi4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWXIiwgIiDilojilojilojilojilojilZTilZ0iLCAiIOKVmuKVkOKVkOKVkOKWiOKWiOKVlyIsICLilojilojilojilojilojilojilZTilZ0iLCAi4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWdICJdLCAiNCI6IFsi4paI4paI4pWXICDilojilojilZciLCAi4paI4paI4pWRICDilojilojilZEiLCAi4paI4paI4paI4paI4paI4paI4paI4pWRIiwgIuKVmuKVkOKVkOKVkOKVkOKWiOKWiOKVkSIsICIgICAgIOKWiOKWiOKVkSIsICIgICAgIOKVmuKVkOKVnSJdLCAiNSI6IFsi4paI4paI4paI4paI4paI4paI4paI4pWXIiwgIuKWiOKWiOKVlOKVkOKVkOKVkOKVkOKVnSIsICLilojilojilojilojilojilojilojilZciLCAi4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWRIiwgIuKWiOKWiOKWiOKWiOKWiOKWiOKWiOKVkSIsICLilZrilZDilZDilZDilZDilZDilZDilZ0iXSwgIjYiOiBbIiDilojilojilojilojilojilojilZcgIiwgIuKWiOKWiOKVlOKVkOKVkOKVkOKVkOKVnSAiLCAi4paI4paI4paI4paI4paI4paI4paI4pWXICIsICLilojilojilZTilZDilZDilZDilojilojilZciLCAi4pWa4paI4paI4paI4paI4paI4paI4pWU4pWdIiwgIiDilZrilZDilZDilZDilZDilZDilZ0gIl0sICI3IjogWyLilojilojilojilojilojilojilojilZciLCAi4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWRIiwgIiAgICDilojilojilZTilZ0iLCAiICAg4paI4paI4pWU4pWdICIsICIgIOKWiOKWiOKVlOKVnSAgIiwgIiAg4pWa4pWQ4pWdICAgIl0sICI4IjogWyIg4paI4paI4paI4paI4paI4pWXICIsICLilojilojilZTilZDilZDilojilojilZciLCAi4pWa4paI4paI4paI4paI4paI4pWU4pWdIiwgIuKWiOKWiOKVlOKVkOKVkOKWiOKWiOKVlyIsICLilZrilojilojilojilojilojilZTilZ0iLCAiIOKVmuKVkOKVkOKVkOKVkOKVnSAiXSwgIjkiOiBbIiDilojilojilojilojilojilZcgIiwgIuKWiOKWiOKVlOKVkOKVkOKWiOKWiOKVlyIsICLilZrilojilojilojilojilojilZTilZ0iLCAiIOKVmuKVkOKVkOKVkOKWiOKWiOKVkSIsICIg4paI4paI4paI4paI4paI4pWU4pWdIiwgIiDilZrilZDilZDilZDilZDilZ0gIl19"
+try {
+    $WinText  = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($BannerWindowsB64))
+    $ToolText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($BannerToolB64))
+    $toolWidth = ($ToolText -split "`n" | Select-Object -First 1).Length
+    $winWidth  = ($WinText -split "`n" | Select-Object -First 1).Length
+    # WINDOWS block art - centered relative to AUDIT TOOL width
+    foreach ($wLine in ($WinText -split "`n")) {
+        $pad = [math]::Max(0, [math]::Floor(($toolWidth - $winWidth) / 2))
+        Write-Host ((" " * $pad) + $wLine) -ForegroundColor White
+    }
+    # AUDIT TOOL block art
+    Write-Host $ToolText -ForegroundColor Cyan
+    # Separator line
+    Write-Host ((" " * [math]::Max(0, [math]::Floor(($toolWidth - 40) / 2))) + ("-" * 40)) -ForegroundColor DarkGray
+    # Render version in block art
+    $charMap = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($VerCharMapB64)) | ConvertFrom-Json
+    $verStr = "v" + ($ScriptVersion -replace '^v', '')
+    $lines = @("","","","","","")
+    foreach ($ch in $verStr.ToCharArray()) {
+        $key = [string]$ch
+        if ($charMap.PSObject.Properties[$key]) {
+            $art = @($charMap.$key)
+            for ($i = 0; $i -lt 6; $i++) { $lines[$i] += $art[$i] + " " }
+        }
+    }
+    foreach ($line in $lines) {
+        $pad = [math]::Max(0, [math]::Floor(($toolWidth - $line.Length) / 2))
+        Write-Host ((" " * $pad) + $line) -ForegroundColor DarkCyan
+    }
+    Write-Host ""
+} catch { }
+Write-Host "  Starting System Audit for $ComputerName" -ForegroundColor Cyan
+Write-Host ""
 Log "Audit started for $ComputerName (v$ScriptVersion)"
 
 # Apply any pending .exe update from a prior run
@@ -1160,7 +1278,8 @@ if (-not $CustomerName -and -not $Silent) {
 if ($CustomerName) {
     Write-Action -What ("Customer: {0}" -f $CustomerName) -Kind ok
     Log ("Customer name: {0}" -f $CustomerName)
-    $HtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
+    $HtmlReportPath     = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
+    $HuduHtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit-Hudu.html"
 }
 
 # ============================================================
@@ -2067,7 +2186,8 @@ Html-AddNote -Text "Assessment based on the ASD Essential Eight Maturity Model. 
 
 # Scorecard accumulator - entries added after each E8 check, rendered at the end
 $e8Scores = [System.Collections.Generic.List[object]]::new()
-$e8ScorecardInsertPos = $Html.Length
+$e8ScorecardInsertPos     = $Html.Length
+$e8ScorecardInsertPosHudu = $HuduHtml.Length
 
 # ---- E8-1: Application Control ----
 Html-Add "<h3>1. Application Control</h3>"
@@ -2477,6 +2597,20 @@ foreach ($s in $e8Scores) {
 [void]$scorecardHtml.AppendLine("</tbody></table>")
 [void]$Html.Insert($e8ScorecardInsertPos, $scorecardHtml.ToString())
 
+# Also insert into HuduHtml with inline styles
+$huduScorecard = New-Object System.Text.StringBuilder
+[void]$huduScorecard.AppendLine((Convert-ToHuduInline "<h3>Summary Scorecard</h3>"))
+[void]$huduScorecard.AppendLine((Convert-ToHuduInline "<table><thead><tr><th>#</th><th>Control</th><th>Status</th></tr></thead><tbody>"))
+$e8Num2 = 1
+foreach ($s in $e8Scores) {
+    $badgeHtml2 = "<span class='badge {0}'>{1}</span>" -f (Html-Enc $s.Badge), (Html-Enc $s.Status)
+    $rowClass2  = switch ($s.Badge) { 'good' { 'sev-good' }; 'warn' { 'sev-warn' }; 'bad' { 'sev-bad' }; default { '' } }
+    [void]$huduScorecard.AppendLine((Convert-ToHuduInline ("<tr class='{0}'><td>{1}</td><td>{2}</td><td>{3}</td></tr>" -f $rowClass2, $e8Num2, (Html-Enc $s.Control), $badgeHtml2)))
+    $e8Num2++
+}
+[void]$huduScorecard.AppendLine("</tbody></table>")
+[void]$HuduHtml.Insert($e8ScorecardInsertPosHudu, $huduScorecard.ToString())
+
 # Set section health from E8 scorecard results
 foreach ($s in $e8Scores) {
     if ($s.Badge -eq 'bad') { Set-SectionHealth -Status bad }
@@ -2683,12 +2817,23 @@ h1{ margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px
   margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:14px;
   padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,.04); overflow:hidden;
 }
-.section h2{
+.section-details{ width:100%; }
+.section-summary{
   position:sticky; top:0; z-index:10; background:var(--card);
-  margin:0 -24px 14px; padding:12px 24px 12px; color:var(--accent);
+  margin:0 -24px; padding:12px 24px; color:var(--accent);
   border-bottom:2px solid var(--border); font-size:18px; font-weight:700;
   display:flex; align-items:center; gap:10px;
+  cursor:pointer; user-select:none; list-style:none;
 }
+.section-summary::-webkit-details-marker{ display:none; }
+.section-summary::marker{ display:none; content:''; }
+.section-summary::after{
+  content:''; display:block; width:8px; height:8px; margin-left:auto; flex-shrink:0;
+  border-right:2px solid currentColor; border-bottom:2px solid currentColor;
+  transform:rotate(45deg); transition:transform 0.2s; opacity:0.4;
+}
+.section-details[open] > .section-summary::after{ transform:rotate(-135deg); }
+.section-summary:hover{ opacity:0.8; }
 .sec-num{
   display:inline-flex; align-items:center; justify-content:center;
   min-width:28px; height:28px; border-radius:8px;
@@ -2767,8 +2912,9 @@ tr.sev-bad:hover td{ background:#fee2e2 !important; }
   .header{ background:var(--accent) !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   .section,.score-card{ box-shadow:none; border:1px solid #ccc; break-inside:avoid; }
   .score-ring svg{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  .section h2{ position:static; }
-  details[open] summary{ display:none; }
+  .section-summary{ position:static; }
+  .section-summary::after{ display:none; }
+  details[open] summary:not(.section-summary){ display:none; }
   details > *{ display:block !important; }
   summary{ page-break-after:avoid; }
   .filter-box,.small#sw-filter-count{ display:none; }
@@ -2819,9 +2965,9 @@ $($Html.ToString())
     var observer=new IntersectionObserver(function(entries){
       entries.forEach(function(entry){
         if(entry.isIntersecting){
-          var h2=entry.target.querySelector('h2[id]');
-          if(!h2)return;
-          links.forEach(function(l){l.classList.toggle('active',l.getAttribute('data-section')===h2.id)});
+          var s=entry.target.querySelector('summary[id]');
+          if(!s)return;
+          links.forEach(function(l){l.classList.toggle('active',l.getAttribute('data-section')===s.id)});
         }
       });
     },{rootMargin:'-10% 0px -80% 0px'});
@@ -2830,7 +2976,7 @@ $($Html.ToString())
       l.addEventListener('click',function(e){
         e.preventDefault();
         var t=document.getElementById(this.getAttribute('data-section'));
-        if(t)t.scrollIntoView({behavior:'smooth',block:'start'});
+        if(t){var d=t.closest('details');if(d)d.setAttribute('open','');t.scrollIntoView({behavior:'smooth',block:'start'});}
         if(sidebar)sidebar.classList.remove('open');
         if(overlay)overlay.classList.remove('open');
       });
@@ -2846,6 +2992,101 @@ $($Html.ToString())
     $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
     Write-Host "HTML report saved to $HtmlReportPath" -ForegroundColor Green
     Log "HTML report written to $HtmlReportPath"
+
+    # ---- Hudu-compatible report (inline-styled, flat structure for ActionText compatibility) ----
+    # Hudu's ActionText sanitizer restructures nested <div> containers around block elements.
+    # All layouts here use <table> instead of nested divs to survive sanitization intact.
+    Write-Host "[Final] Saving Hudu-compatible report: $HuduHtmlReportPath" -ForegroundColor Cyan
+
+    # Hudu header - table layout prevents ActionText from splitting container around h1
+    $huduUpdateLine = ""
+    if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
+        $huduUpdateLine = "<p style='margin:10px 0 0; padding:8px 14px; border-radius:8px; background:rgba(255,255,255,.15); font-size:13px; color:#fff;'>Update available: v$safeVersion &rarr; $safeLatest &mdash; <a href='$safeUrl' style='color:#fde68a;'>Download</a></p>"
+    }
+    $huduHeaderHtml = @"
+<table style='width:100%; border-collapse:collapse; border-radius:14px; overflow:hidden;'>
+<tr><td style='background:linear-gradient(135deg, #1e3a5f 0%, #2E5C6E 100%); padding:28px 32px; color:#fff;'>
+<h1 style='margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px;'>System Audit Report</h1>
+<p style='font-size:15px; opacity:0.85; margin:4px 0 0; color:#fff;'>$safeReportTitle</p>
+<p style='font-size:12px; opacity:0.8; margin:14px 0 0; padding-top:14px; border-top:1px solid rgba(255,255,255,.2); color:#fff;'>Generated: $generated &nbsp;&bull;&nbsp; Elevated: $elevText &nbsp;&bull;&nbsp; Version: v$safeVersion</p>
+$huduUpdateLine
+</td></tr>
+</table>
+"@
+
+    # Hudu score card - table layout instead of nested flexbox divs
+    $huduScoreCardHtml = ""
+    if ($Toc -and $Toc.Count -gt 0) {
+        $scoreColor2 = if ($score -ge 7) { '#059669' } elseif ($score -ge 4) { '#d97706' } else { '#dc2626' }
+        $huduScoreCardHtml = @"
+<table style='width:100%; border-collapse:collapse; margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; overflow:hidden;'>
+<tr>
+<td style='text-align:center; padding:28px 20px; width:120px; vertical-align:middle;'>
+<span style='font-size:42px; font-weight:700; color:$scoreColor2; line-height:1;'>$scoreDisplay</span><br>
+<span style='font-size:11px; opacity:0.6; text-transform:uppercase; letter-spacing:0.5px;'>out of 10</span>
+</td>
+<td style='padding:28px 32px 28px 12px; vertical-align:middle;'>
+<strong style='font-size:18px;'>System Health Score</strong><br>
+<span style='font-size:13px; opacity:0.6;'>Based on $totalCount audit modules. Each module contributes to the overall score based on its health status.</span><br><br>
+<span style='font-size:14px;'><span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#059669; vertical-align:middle;'></span> <strong>$goodCount</strong> Healthy &nbsp;&nbsp;<span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#d97706; vertical-align:middle;'></span> <strong>$warnCount</strong> Warning &nbsp;&nbsp;<span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#dc2626; vertical-align:middle;'></span> <strong>$badCount</strong> Critical</span>
+</td>
+</tr>
+</table>
+"@
+    }
+
+    # Hudu TOC - flat structure, no wrapping div (Hudu would split a div around the h2)
+    $huduTocHtml = ""
+    if ($Toc -and $Toc.Count -gt 0) {
+        $tocSb = New-Object System.Text.StringBuilder
+        [void]$tocSb.AppendLine("<h2 style='margin:24px 0 12px; font-size:18px; font-weight:700;'>Audit Navigation</h2>")
+        [void]$tocSb.AppendLine("<ul style='margin:0; padding-left:8px; font-size:14px; line-height:2; list-style:none;'>")
+        foreach ($t in $Toc) {
+            $id    = Html-Enc $t.Id
+            $tt    = Html-Enc $t.Title
+            $health = if ($SectionHealth.ContainsKey($t.Id)) { $SectionHealth[$t.Id] } else { 'good' }
+            $dotColor = switch ($health) { 'good' { '#059669' }; 'warn' { '#d97706' }; 'bad' { '#dc2626' }; default { '#059669' } }
+            [void]$tocSb.AppendLine(("<li><a href='#{0}' style='text-decoration:none; color:inherit;'>{3}. <span style='color:{2}; font-size:10px;'>&#9679;</span> {1}</a></li>" -f $id, $tt, $dotColor, $t.Number))
+        }
+        [void]$tocSb.AppendLine("</ul>")
+        $huduTocHtml = $tocSb.ToString()
+    }
+
+    # Assemble the Hudu HTML document
+    # - Full HTML doc wrapper for browser preview, but content is designed to work
+    #   as a fragment when Hudu strips the document-level elements.
+    # - No outer <div> wrapper - Hudu provides its own container (rich_text_content).
+    # - All block layouts use <table> to survive ActionText sanitization.
+    $huduContent = @"
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Audit Report - $safeReportTitle (Hudu)</title>
+</head>
+<body style="font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; margin:0; padding:24px; line-height:1.5;">
+
+$huduHeaderHtml
+
+$huduScoreCardHtml
+
+$huduTocHtml
+
+$($HuduHtml.ToString())
+
+<hr style='border:none; border-top:1px solid rgba(128,128,128,0.2); margin:24px 0 0;'>
+<p style='opacity:0.6; font-size:12px; text-align:center; padding-top:16px;'>
+  Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+</p>
+
+</body>
+</html>
+"@
+
+    $huduContent | Out-File -FilePath $HuduHtmlReportPath -Force -Encoding utf8
+    Write-Host "Hudu-compatible report saved to $HuduHtmlReportPath" -ForegroundColor Green
+    Log "Hudu-compatible HTML report written to $HuduHtmlReportPath"
 }
 catch {
     Write-Host "Failed to write HTML report: $_" -ForegroundColor Red
