@@ -801,11 +801,13 @@ function Convert-ToHuduInline {
 
     # Section container - flatten to HR separator (Hudu breaks divs wrapping block elements)
     $L = $L -replace "<div class='section'>", "<hr style='border:none; border-top:2px solid rgba(128,128,128,0.15); margin:28px 0 0;'>"
-    # Section end marker - remove (HR is void element, no close tag needed)
+    # Section end marker - keep </details>, remove the div close (HR is void, no close needed)
+    $L = $L -replace "</details></div><!-- /section -->", "</details>"
     $L = $L -replace "</div><!-- /section -->", ""
 
-    # Section h2 header (always has id attribute) - standalone block, no negative margin
-    $L = $L -replace "<h2 id='([^']*)'>", "<h2 id='`$1' style='margin:16px 0 14px; font-size:18px; font-weight:700; padding-bottom:10px; border-bottom:2px solid rgba(128,128,128,0.2);'>"
+    # Section-level details/summary (must come before generic details/summary rules)
+    $L = $L -replace "<details class='section-details'>", "<details style='margin-top:0;'>"
+    $L = $L -replace "<summary class='section-summary' id='([^']*)'>", "<summary id='`$1' style='cursor:pointer; font-weight:700; padding:12px 0; font-size:18px; border-bottom:2px solid rgba(128,128,128,0.2); margin-bottom:14px; list-style:none;'>"
 
     # Section number badge - dark blue bg with white text works in both themes
     $L = $L -replace "<span class='sec-num'>", "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:28px; height:28px; border-radius:8px; background:#1e3a5f; color:#fff; font-size:13px; font-weight:700; margin-right:8px;'>"
@@ -880,10 +882,10 @@ function Html-StartSection {
     $SectionHealth[$id] = 'good'
     $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id; Number = $script:SectionNumber }) | Out-Null
     Html-Add "<div class='section'>"
-    Html-Add ("<h2 id='{0}'><span class='sec-num'>{1}</span>{2}</h2>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
+    Html-Add ("<details class='section-details'><summary class='section-summary' id='{0}'><span class='sec-num'>{1}</span>{2}</summary>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
 }
 
-function Html-EndSection { Html-Add "</div><!-- /section -->" }
+function Html-EndSection { Html-Add "</details></div><!-- /section -->" }
 
 function Html-AddNote {
     param(
@@ -2779,12 +2781,23 @@ h1{ margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px
   margin-top:16px; background:var(--card); border:1px solid var(--border); border-radius:14px;
   padding:20px 24px; box-shadow:0 1px 3px rgba(0,0,0,.04); overflow:hidden;
 }
-.section h2{
+.section-details{ width:100%; }
+.section-summary{
   position:sticky; top:0; z-index:10; background:var(--card);
-  margin:0 -24px 14px; padding:12px 24px 12px; color:var(--accent);
+  margin:0 -24px; padding:12px 24px; color:var(--accent);
   border-bottom:2px solid var(--border); font-size:18px; font-weight:700;
   display:flex; align-items:center; gap:10px;
+  cursor:pointer; user-select:none; list-style:none;
 }
+.section-summary::-webkit-details-marker{ display:none; }
+.section-summary::marker{ display:none; content:''; }
+.section-summary::after{
+  content:''; display:block; width:8px; height:8px; margin-left:auto; flex-shrink:0;
+  border-right:2px solid currentColor; border-bottom:2px solid currentColor;
+  transform:rotate(45deg); transition:transform 0.2s; opacity:0.4;
+}
+.section-details[open] > .section-summary::after{ transform:rotate(-135deg); }
+.section-summary:hover{ opacity:0.8; }
 .sec-num{
   display:inline-flex; align-items:center; justify-content:center;
   min-width:28px; height:28px; border-radius:8px;
@@ -2863,8 +2876,9 @@ tr.sev-bad:hover td{ background:#fee2e2 !important; }
   .header{ background:var(--accent) !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   .section,.score-card{ box-shadow:none; border:1px solid #ccc; break-inside:avoid; }
   .score-ring svg{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  .section h2{ position:static; }
-  details[open] summary{ display:none; }
+  .section-summary{ position:static; }
+  .section-summary::after{ display:none; }
+  details[open] summary:not(.section-summary){ display:none; }
   details > *{ display:block !important; }
   summary{ page-break-after:avoid; }
   .filter-box,.small#sw-filter-count{ display:none; }
@@ -2915,9 +2929,9 @@ $($Html.ToString())
     var observer=new IntersectionObserver(function(entries){
       entries.forEach(function(entry){
         if(entry.isIntersecting){
-          var h2=entry.target.querySelector('h2[id]');
-          if(!h2)return;
-          links.forEach(function(l){l.classList.toggle('active',l.getAttribute('data-section')===h2.id)});
+          var s=entry.target.querySelector('summary[id]');
+          if(!s)return;
+          links.forEach(function(l){l.classList.toggle('active',l.getAttribute('data-section')===s.id)});
         }
       });
     },{rootMargin:'-10% 0px -80% 0px'});
@@ -2926,7 +2940,7 @@ $($Html.ToString())
       l.addEventListener('click',function(e){
         e.preventDefault();
         var t=document.getElementById(this.getAttribute('data-section'));
-        if(t)t.scrollIntoView({behavior:'smooth',block:'start'});
+        if(t){var d=t.closest('details');if(d)d.setAttribute('open','');t.scrollIntoView({behavior:'smooth',block:'start'});}
         if(sidebar)sidebar.classList.remove('open');
         if(overlay)overlay.classList.remove('open');
       });
