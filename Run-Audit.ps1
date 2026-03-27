@@ -35,7 +35,7 @@ param(
     [string]$HuduBaseURL,
 
     [Alias('hudu-company-id')]
-    [int]$HuduCompanyID,
+    [string]$HuduCompanyID,
 
     [Alias('hudu-asset-layout-name')]
     [string]$HuduAssetLayoutName
@@ -1221,7 +1221,7 @@ function Publish-HuduAsset {
       Returns $true on success, $false on failure (never throws).
     #>
     param(
-        [int]$CompanyID,
+        [string]$CompanyID,
         [string]$LayoutName,
         [string]$AssetName,
         [string]$HtmlContent
@@ -1446,7 +1446,7 @@ if ($HuduReport) {
     $missingParams = @()
     if (-not $HuduAPIKey)           { $missingParams += "-HuduAPIKey" }
     if (-not $HuduBaseURL)          { $missingParams += "-HuduBaseURL" }
-    if ($HuduCompanyID -le 0)       { $missingParams += "-HuduCompanyID" }
+    if (-not $HuduCompanyID)         { $missingParams += "-HuduCompanyID" }
     if (-not $HuduAssetLayoutName)  { $missingParams += "-HuduAssetLayoutName" }
 
     if ($missingParams.Count -gt 0) {
