@@ -34,8 +34,8 @@ param(
     [Alias('hudu-base-url')]
     [string]$HuduBaseURL,
 
-    [Alias('hudu-company-id')]
-    [string]$HuduCompanyID,
+    [Alias('hudu-company-slug')]
+    [string]$HuduCompanySlug,
 
     [Alias('hudu-asset-layout-name')]
     [string]$HuduAssetLayoutName
@@ -1213,21 +1213,57 @@ function Get-HuduAssetLayoutByName {
     return $null
 }
 
+function Get-HuduCompanyBySlug {
+    <#
+      Paginates through all companies and returns the first one whose slug
+      matches. The slug is the hex string from the Hudu URL path (e.g.
+      https://instance.huducloud.com/c/0297b67dbba7 -> "0297b67dbba7").
+      Returns $null if not found.
+    #>
+    param([string]$Slug)
+    $page = 1
+    do {
+        $resp      = Invoke-HuduRequest -Endpoint "companies?page=$page"
+        $companies = @($resp.companies)
+        if (-not $companies -or $companies.Count -eq 0) {
+            $companies = @($resp)
+        }
+        foreach ($c in $companies) {
+            if ($c.slug -eq $Slug) { return $c }
+        }
+        $page++
+    } while ($companies.Count -ge 25)
+    return $null
+}
+
 function Publish-HuduAsset {
     <#
       Creates a new asset in Hudu under the specified company and asset layout.
-      Finds the layout by name, auto-detects the first RichText field, and
-      populates it with the supplied HTML content.
+      Resolves the company slug to a numeric ID, finds the layout by name,
+      auto-detects the first RichText field, and populates it with the
+      supplied HTML content.
       Returns $true on success, $false on failure (never throws).
     #>
     param(
-        [string]$CompanyID,
+        [string]$CompanySlug,
         [string]$LayoutName,
         [string]$AssetName,
         [string]$HtmlContent
     )
     try {
-        # 1. Find the asset layout
+        # 1. Resolve company slug to numeric ID
+        Write-Action -What "Looking up company by slug: $CompanySlug" -Kind run
+        $company = Get-HuduCompanyBySlug -Slug $CompanySlug
+        if (-not $company) {
+            Write-Action -What "Company with slug '$CompanySlug' not found in Hudu." -Kind bad
+            Log "Hudu: company slug '$CompanySlug' not found"
+            return $false
+        }
+        $companyId = $company.id
+        Write-Action -What ("Found company: {0} (ID {1})" -f $company.name, $companyId) -Kind ok
+        Log ("Hudu: found company '{0}' (ID {1})" -f $company.name, $companyId)
+
+        # 2. Find the asset layout
         Write-Action -What "Looking up asset layout: $LayoutName" -Kind run
         $layout = Get-HuduAssetLayoutByName -Name $LayoutName
         if (-not $layout) {
@@ -1263,13 +1299,13 @@ function Publish-HuduAsset {
             asset = @{
                 name            = $AssetName
                 asset_layout_id = $layoutId
-                company_id      = $CompanyID
+                company_id      = $companyId
                 custom_fields   = @(
                     @{ $fieldKey = $HtmlContent }
                 )
             }
         }
-        $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$CompanyID/assets" -Body $body
+        $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$companyId/assets" -Body $body
         if ($result -and $result.asset) {
             Write-Action -What ("Asset created successfully (ID: {0})" -f $result.asset.id) -Kind ok
             Log ("Hudu: asset '{0}' created (ID {1})" -f $AssetName, $result.asset.id)
@@ -1446,7 +1482,7 @@ if ($HuduReport) {
     $missingParams = @()
     if (-not $HuduAPIKey)           { $missingParams += "-HuduAPIKey" }
     if (-not $HuduBaseURL)          { $missingParams += "-HuduBaseURL" }
-    if (-not $HuduCompanyID)         { $missingParams += "-HuduCompanyID" }
+    if (-not $HuduCompanySlug)       { $missingParams += "-HuduCompanySlug" }
     if (-not $HuduAssetLayoutName)  { $missingParams += "-HuduAssetLayoutName" }
 
     if ($missingParams.Count -gt 0) {
@@ -1462,9 +1498,9 @@ if ($HuduReport) {
         $HuduValid = $true
         Write-Action -What "Hudu integration enabled" -Kind ok
         Write-Action -What ("  Base URL: {0}" -f $HuduBaseURL) -Kind info
-        Write-Action -What ("  Company ID: {0}" -f $HuduCompanyID) -Kind info
+        Write-Action -What ("  Company slug: {0}" -f $HuduCompanySlug) -Kind info
         Write-Action -What ("  Layout: {0}" -f $HuduAssetLayoutName) -Kind info
-        Log ("Hudu: enabled - URL={0}, CompanyID={1}, Layout={2}" -f $HuduBaseURL, $HuduCompanyID, $HuduAssetLayoutName)
+        Log ("Hudu: enabled - URL={0}, Slug={1}, Layout={2}" -f $HuduBaseURL, $HuduCompanySlug, $HuduAssetLayoutName)
     }
 }
 
@@ -3282,7 +3318,7 @@ $huduBodyFragment
     $huduAssetDate = Get-Date -Format 'dd/MM/yyyy'
     $huduAssetName = "$ComputerName - $huduAssetDate"
     $huduSuccess = Publish-HuduAsset `
-        -CompanyID      $HuduCompanyID `
+        -CompanySlug    $HuduCompanySlug `
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
         -HtmlContent    $huduBodyFragment
