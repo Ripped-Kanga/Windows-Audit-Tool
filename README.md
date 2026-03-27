@@ -1,6 +1,6 @@
 # Windows-Audit-Tool
 
-A self-contained PowerShell script that audits a single Windows machine and produces a portable, single-file HTML report. No modules. No configuration. No internet access required.
+A self-contained PowerShell script that audits a single Windows machine and produces a portable, single-file HTML report. No external modules required. Optional Hudu integration uploads the report directly to your documentation platform.
 
 ---
 
@@ -212,8 +212,8 @@ Report features:
 - Windows 10 or later
 - PowerShell 5.1 or later
 - Local administrator access recommended (required for security baseline and Essential Eight checks; script continues without it)
-- No internet access required
 - No external PowerShell modules required
+- Internet access required for: self-update checks against the GitHub Releases API; Hudu integration (optional)
 
 ---
 
@@ -231,7 +231,7 @@ Report features:
 
 **Partial data beats no data.** Every section is independent. A failed WMI query, blocked command, or missing privilege produces a visible warning in the report rather than crashing the audit.
 
-**Zero-touch execution.** No configuration files, no prerequisites to install. An optional customer name prompt is the only interaction before the audit runs.
+**Minimal configuration.** No configuration files or external modules to install. Basic usage requires no setup at all. Hudu integration requires API credentials passed as parameters.
 
 **Self-contained output.** The HTML report is a single file. No viewer software, no server, no dependencies.
 
