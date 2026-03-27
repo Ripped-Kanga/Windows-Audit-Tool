@@ -791,27 +791,36 @@ function Convert-ToHuduInline {
     param([string]$L)
     # Transforms class-based HTML into inline-styled HTML for Hudu compatibility.
     # Hudu (Rails/ActionText) strips <style> blocks but preserves inline style= attributes.
-    # Uses theme-neutral colors (inherit, rgba) so the report works in both light and dark Hudu themes.
-    # Order matters: more specific patterns must be matched before generic ones.
+    # Uses theme-neutral colors (inherit, rgba) for light/dark Hudu theme compatibility.
+    #
+    # CRITICAL: Hudu's sanitizer restructures nested <div> containers around block elements
+    # (h2/h3/table get pulled out of parent divs, splitting the container). To survive this:
+    #   - Section container divs are flattened to <hr> separators (no wrapping)
+    #   - KV grids are converted from nested divs to <table> (tables survive intact)
+    # Order matters: structural transforms and specific patterns before generic ones.
 
-    # Section container - transparent bg, subtle border adapts to theme
-    $L = $L -replace "<div class='section'>", "<div style='margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; padding:20px 24px; overflow:hidden;'>"
+    # Section container - flatten to HR separator (Hudu breaks divs wrapping block elements)
+    $L = $L -replace "<div class='section'>", "<hr style='border:none; border-top:2px solid rgba(128,128,128,0.15); margin:28px 0 0;'>"
+    # Section end marker - remove (HR is void element, no close tag needed)
+    $L = $L -replace "</div><!-- /section -->", ""
 
-    # Section h2 header (always has id attribute) - inherits text color
-    $L = $L -replace "<h2 id='([^']*)'>", "<h2 id='`$1' style='margin:0 -24px 14px; padding:12px 24px; border-bottom:2px solid rgba(128,128,128,0.2); font-size:18px; font-weight:700;'>"
+    # Section h2 header (always has id attribute) - standalone block, no negative margin
+    $L = $L -replace "<h2 id='([^']*)'>", "<h2 id='`$1' style='margin:16px 0 14px; font-size:18px; font-weight:700; padding-bottom:10px; border-bottom:2px solid rgba(128,128,128,0.2);'>"
 
     # Section number badge - dark blue bg with white text works in both themes
     $L = $L -replace "<span class='sec-num'>", "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:28px; height:28px; border-radius:8px; background:#1e3a5f; color:#fff; font-size:13px; font-weight:700; margin-right:8px;'>"
 
-    # Callouts - semi-transparent tinted backgrounds, inherit text color
+    # Callouts - semi-transparent tinted backgrounds, inherit text color (single-line divs, no nesting issue)
     $L = $L -replace "<div class='callout callout-good'>", "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>"
     $L = $L -replace "<div class='callout callout-warn'>", "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #d97706; background:rgba(217,119,6,0.1);'>"
     $L = $L -replace "<div class='callout callout-bad'>",  "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #dc2626; background:rgba(220,38,38,0.1);'>"
     $L = $L -replace "<div class='callout callout-info'>", "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #2E5C6E; background:rgba(46,92,110,0.1);'>"
 
-    # KV grid - inherits text color
-    $L = $L -replace "<div class='kv'>", "<div style='display:grid; grid-template-columns:240px 1fr; gap:6px 12px; font-size:14px;'>"
-    $L = $L -replace "<div class='key'>", "<div style='opacity:0.7; font-weight:500;'>"
+    # KV grid - convert from nested divs to table (tables survive Hudu's sanitizer intact)
+    $L = $L -replace "<div class='kv'>", "<table style='width:100%; border-collapse:collapse; margin-top:6px; font-size:14px;'>"
+    $L = $L -replace "</div><!-- /kv -->", "</table>"
+    # KV rows - convert div key/value pairs to table rows (values are Html-Enc'd, no nested tags)
+    $L = $L -replace "<div class='key'>([^<]*)</div><div>([^<]*)</div>", "<tr><td style='width:240px; padding:4px 8px; opacity:0.7; font-weight:500; vertical-align:top;'>`$1</td><td style='padding:4px 8px; vertical-align:top;'>`$2</td></tr>"
 
     # Badges - keep strong semantic colors, semi-transparent backgrounds
     $L = $L -replace "<span class='badge good'>", "<span style='display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; background:rgba(5,150,105,0.15); border:1px solid rgba(5,150,105,0.3); color:#059669;'>"
@@ -874,7 +883,7 @@ function Html-StartSection {
     Html-Add ("<h2 id='{0}'><span class='sec-num'>{1}</span>{2}</h2>" -f (Html-Enc $id), $script:SectionNumber, (Html-Enc $Title))
 }
 
-function Html-EndSection { Html-Add "</div>" }
+function Html-EndSection { Html-Add "</div><!-- /section -->" }
 
 function Html-AddNote {
     param(
@@ -898,7 +907,7 @@ function Html-AddKV {
     foreach ($k in $Pairs.Keys) {
         Html-Add ("<div class='key'>{0}</div><div>{1}</div>" -f (Html-Enc $k), (Html-Enc $Pairs[$k]))
     }
-    Html-Add "</div>"
+    Html-Add "</div><!-- /kv -->"
 }
 
 function Html-StartDetails {
@@ -2934,15 +2943,53 @@ $($Html.ToString())
     Write-Host "HTML report saved to $HtmlReportPath" -ForegroundColor Green
     Log "HTML report written to $HtmlReportPath"
 
-    # ---- Hudu-compatible report (inline-styled HTML fragment, no sidebar/JS) ----
+    # ---- Hudu-compatible report (inline-styled, flat structure for ActionText compatibility) ----
+    # Hudu's ActionText sanitizer restructures nested <div> containers around block elements.
+    # All layouts here use <table> instead of nested divs to survive sanitization intact.
     Write-Host "[Final] Saving Hudu-compatible report: $HuduHtmlReportPath" -ForegroundColor Cyan
 
-    # Hudu inline TOC (replaces fixed sidebar with simple in-page list)
+    # Hudu header - table layout prevents ActionText from splitting container around h1
+    $huduUpdateLine = ""
+    if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
+        $huduUpdateLine = "<p style='margin:10px 0 0; padding:8px 14px; border-radius:8px; background:rgba(255,255,255,.15); font-size:13px; color:#fff;'>Update available: v$safeVersion &rarr; $safeLatest &mdash; <a href='$safeUrl' style='color:#fde68a;'>Download</a></p>"
+    }
+    $huduHeaderHtml = @"
+<table style='width:100%; border-collapse:collapse; border-radius:14px; overflow:hidden;'>
+<tr><td style='background:linear-gradient(135deg, #1e3a5f 0%, #2E5C6E 100%); padding:28px 32px; color:#fff;'>
+<h1 style='margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px;'>System Audit Report</h1>
+<p style='font-size:15px; opacity:0.85; margin:4px 0 0; color:#fff;'>$safeReportTitle</p>
+<p style='font-size:12px; opacity:0.8; margin:14px 0 0; padding-top:14px; border-top:1px solid rgba(255,255,255,.2); color:#fff;'>Generated: $generated &nbsp;&bull;&nbsp; Elevated: $elevText &nbsp;&bull;&nbsp; Version: v$safeVersion</p>
+$huduUpdateLine
+</td></tr>
+</table>
+"@
+
+    # Hudu score card - table layout instead of nested flexbox divs
+    $huduScoreCardHtml = ""
+    if ($Toc -and $Toc.Count -gt 0) {
+        $scoreColor2 = if ($score -ge 7) { '#059669' } elseif ($score -ge 4) { '#d97706' } else { '#dc2626' }
+        $huduScoreCardHtml = @"
+<table style='width:100%; border-collapse:collapse; margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; overflow:hidden;'>
+<tr>
+<td style='text-align:center; padding:28px 20px; width:120px; vertical-align:middle;'>
+<span style='font-size:42px; font-weight:700; color:$scoreColor2; line-height:1;'>$scoreDisplay</span><br>
+<span style='font-size:11px; opacity:0.6; text-transform:uppercase; letter-spacing:0.5px;'>out of 10</span>
+</td>
+<td style='padding:28px 32px 28px 12px; vertical-align:middle;'>
+<strong style='font-size:18px;'>System Health Score</strong><br>
+<span style='font-size:13px; opacity:0.6;'>Based on $totalCount audit modules. Each module contributes to the overall score based on its health status.</span><br><br>
+<span style='font-size:14px;'><span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#059669; vertical-align:middle;'></span> <strong>$goodCount</strong> Healthy &nbsp;&nbsp;<span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#d97706; vertical-align:middle;'></span> <strong>$warnCount</strong> Warning &nbsp;&nbsp;<span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#dc2626; vertical-align:middle;'></span> <strong>$badCount</strong> Critical</span>
+</td>
+</tr>
+</table>
+"@
+    }
+
+    # Hudu TOC - flat structure, no wrapping div (Hudu would split a div around the h2)
     $huduTocHtml = ""
     if ($Toc -and $Toc.Count -gt 0) {
         $tocSb = New-Object System.Text.StringBuilder
-        [void]$tocSb.AppendLine("<div style='margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; padding:20px 24px;'>")
-        [void]$tocSb.AppendLine("<h2 style='margin:0 0 12px; font-size:18px; font-weight:700;'>Audit Navigation</h2>")
+        [void]$tocSb.AppendLine("<h2 style='margin:24px 0 12px; font-size:18px; font-weight:700;'>Audit Navigation</h2>")
         [void]$tocSb.AppendLine("<ol style='margin:0; padding-left:20px; font-size:14px; line-height:2;'>")
         foreach ($t in $Toc) {
             $id    = Html-Enc $t.Id
@@ -2952,37 +2999,14 @@ $($Html.ToString())
             [void]$tocSb.AppendLine(("<li><a href='#{0}' style='text-decoration:none; color:inherit;'>{1}</a> <span style='display:inline-block; width:8px; height:8px; border-radius:50%; background:{2}; vertical-align:middle;'></span></li>" -f $id, $tt, $dotColor))
         }
         [void]$tocSb.AppendLine("</ol>")
-        [void]$tocSb.AppendLine("</div>")
         $huduTocHtml = $tocSb.ToString()
     }
 
-    # Hudu score card (simple HTML table instead of SVG ring)
-    $huduScoreCardHtml = ""
-    if ($Toc -and $Toc.Count -gt 0) {
-        $scoreColor2 = if ($score -ge 7) { '#059669' } elseif ($score -ge 4) { '#d97706' } else { '#dc2626' }
-        $scSb = New-Object System.Text.StringBuilder
-        [void]$scSb.AppendLine("<div style='margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; padding:28px 32px; display:flex; align-items:center; gap:32px;'>")
-        [void]$scSb.AppendLine(("<div style='text-align:center; min-width:100px;'><div style='font-size:42px; font-weight:700; color:{0}; line-height:1;'>{1}</div><div style='font-size:11px; opacity:0.6; text-transform:uppercase; letter-spacing:0.5px; margin-top:4px;'>out of 10</div></div>" -f $scoreColor2, $scoreDisplay))
-        [void]$scSb.AppendLine("<div style='flex:1;'>")
-        [void]$scSb.AppendLine("<h2 style='margin:0 0 6px; font-size:18px; font-weight:700;'>System Health Score</h2>")
-        [void]$scSb.AppendLine(("<p style='margin:0 0 14px; font-size:13px; opacity:0.6;'>Based on {0} audit modules. Each module contributes to the overall score based on its health status.</p>" -f $totalCount))
-        [void]$scSb.AppendLine("<div style='display:flex; flex-wrap:wrap; gap:16px 28px;'>")
-        [void]$scSb.AppendLine(("<div style='display:flex; align-items:center; gap:8px; font-size:14px;'><span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#059669;'></span><strong>{0}</strong> Healthy</div>" -f $goodCount))
-        [void]$scSb.AppendLine(("<div style='display:flex; align-items:center; gap:8px; font-size:14px;'><span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#d97706;'></span><strong>{0}</strong> Warning</div>" -f $warnCount))
-        [void]$scSb.AppendLine(("<div style='display:flex; align-items:center; gap:8px; font-size:14px;'><span style='display:inline-block; width:12px; height:12px; border-radius:50%; background:#dc2626;'></span><strong>{0}</strong> Critical</div>" -f $badCount))
-        [void]$scSb.AppendLine("</div>")
-        [void]$scSb.AppendLine("</div>")
-        [void]$scSb.AppendLine("</div>")
-        $huduScoreCardHtml = $scSb.ToString()
-    }
-
-    # Hudu update notice (inline-styled)
-    $huduUpdateNoticeHtml = ""
-    if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
-        $huduUpdateNoticeHtml = "<div style='margin-top:10px; padding:8px 14px; border-radius:8px; background:rgba(255,255,255,.15); font-size:13px;'>Update available: v$safeVersion &rarr; $safeLatest &mdash; <a href='$safeUrl' style='color:#fde68a;'>Download</a></div>"
-    }
-
-    # Assemble the Hudu HTML document (self-contained, no <style> block, no JS)
+    # Assemble the Hudu HTML document
+    # - Full HTML doc wrapper for browser preview, but content is designed to work
+    #   as a fragment when Hudu strips the document-level elements.
+    # - No outer <div> wrapper - Hudu provides its own container (rich_text_content).
+    # - All block layouts use <table> to survive ActionText sanitization.
     $huduContent = @"
 <!doctype html>
 <html lang="en">
@@ -2992,17 +3016,8 @@ $($Html.ToString())
 <title>System Audit Report - $safeReportTitle (Hudu)</title>
 </head>
 <body style="font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; margin:0; padding:24px; line-height:1.5;">
-<div style="max-width:1100px; margin:0 auto;">
-  <div style="background:linear-gradient(135deg, #1e3a5f 0%, #2E5C6E 100%); border-radius:14px; padding:28px 32px; color:#fff; box-shadow:0 4px 12px rgba(30,58,95,.15);">
-    <h1 style="margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px;">System Audit Report</h1>
-    <div style="font-size:15px; opacity:0.85; margin-top:4px; font-weight:400;">$safeReportTitle</div>
-    <div style="display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:14px; padding-top:14px; border-top:1px solid rgba(255,255,255,.2); font-size:12px; opacity:0.8;">
-      <span style="white-space:nowrap;">Generated: $generated</span>
-      <span style="white-space:nowrap;">Elevated: $elevText</span>
-      <span style="white-space:nowrap;">Version: v$safeVersion</span>
-    </div>
-$huduUpdateNoticeHtml
-  </div>
+
+$huduHeaderHtml
 
 $huduScoreCardHtml
 
@@ -3010,10 +3025,11 @@ $huduTocHtml
 
 $($HuduHtml.ToString())
 
-  <div style="margin-top:24px; padding-top:16px; border-top:1px solid rgba(128,128,128,0.2); opacity:0.6; font-size:12px; text-align:center;">
-    Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-  </div>
-</div>
+<hr style='border:none; border-top:1px solid rgba(128,128,128,0.2); margin:24px 0 0;'>
+<p style='opacity:0.6; font-size:12px; text-align:center; padding-top:16px;'>
+  Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+</p>
+
 </body>
 </html>
 "@
