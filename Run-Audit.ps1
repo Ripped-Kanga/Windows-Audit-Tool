@@ -1237,18 +1237,68 @@ function Get-HuduCompanyBySlug {
     return $null
 }
 
+function Add-HuduUpload {
+    <#
+      Uploads a file to Hudu and attaches it to the specified record.
+      Uses System.Net.Http for PS 5.1 compatible multipart form upload.
+      POST /api/v1/uploads with multipart/form-data.
+      Returns $true on success, $false on failure (never throws).
+    #>
+    param(
+        [string]$FilePath,
+        [int]$RecordId,
+        [string]$RecordType = "Asset"
+    )
+    try {
+        Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+        $file    = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+        $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
+        $uri     = "$baseUrl/api/v1/uploads"
+
+        $httpClient = New-Object System.Net.Http.HttpClient
+        $httpClient.DefaultRequestHeaders.Add("x-api-key", $script:_HuduAPIKey)
+
+        $multipart  = New-Object System.Net.Http.MultipartFormDataContent
+        $fileStream = [System.IO.File]::OpenRead($file.FullName)
+        $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
+        $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("text/html")
+        $multipart.Add($fileContent, "file", $file.Name)
+        $multipart.Add((New-Object System.Net.Http.StringContent($RecordId.ToString())), "upload[uploadable_id]")
+        $multipart.Add((New-Object System.Net.Http.StringContent($RecordType)), "upload[uploadable_type]")
+
+        $response = $httpClient.PostAsync($uri, $multipart).Result
+        $fileStream.Dispose()
+        $multipart.Dispose()
+        $httpClient.Dispose()
+
+        if ($response.IsSuccessStatusCode) {
+            return $true
+        }
+        $respBody = $response.Content.ReadAsStringAsync().Result
+        Write-Action -What ("Upload failed: {0} - {1}" -f $response.StatusCode, $respBody) -Kind bad
+        Log ("Hudu: upload failed - {0} {1}" -f $response.StatusCode, $respBody)
+        return $false
+    }
+    catch {
+        Write-Action -What ("Upload error: {0}" -f $_.Exception.Message) -Kind bad
+        Log ("Hudu: upload error - {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
 function Publish-HuduAsset {
     <#
       Creates a new asset in Hudu under the specified company and asset layout.
       Uses the pre-resolved numeric company ID from $_HuduCompanyId, finds the
       layout by name, auto-detects the first RichText field, and populates it
-      with the supplied HTML content.
+      with the supplied HTML content. Optionally attaches a file to the asset.
       Returns $true on success, $false on failure (never throws).
     #>
     param(
         [string]$LayoutName,
         [string]$AssetName,
-        [string]$HtmlContent
+        [string]$HtmlContent,
+        [string]$AttachmentPath
     )
     try {
         $companyId = $script:_HuduCompanyId
@@ -1297,8 +1347,22 @@ function Publish-HuduAsset {
         }
         $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$companyId/assets" -Body $body
         if ($result -and $result.asset) {
-            Write-Action -What ("Asset created successfully (ID: {0})" -f $result.asset.id) -Kind ok
-            Log ("Hudu: asset '{0}' created (ID {1})" -f $AssetName, $result.asset.id)
+            $assetId = $result.asset.id
+            Write-Action -What ("Asset created successfully (ID: {0})" -f $assetId) -Kind ok
+            Log ("Hudu: asset '{0}' created (ID {1})" -f $AssetName, $assetId)
+
+            # Attach file if path provided
+            if ($AttachmentPath -and (Test-Path -LiteralPath $AttachmentPath)) {
+                $fileName = Split-Path -Leaf $AttachmentPath
+                Write-Action -What "Attaching report: $fileName" -Kind run
+                $uploaded = Add-HuduUpload -FilePath $AttachmentPath -RecordId $assetId -RecordType "Asset"
+                if ($uploaded) {
+                    Write-Action -What "Attachment uploaded successfully" -Kind ok
+                    Log ("Hudu: attached '{0}' to asset {1}" -f $fileName, $assetId)
+                } else {
+                    Write-Action -What "Attachment upload failed (asset was still created)." -Kind warn
+                }
+            }
             return $true
         }
         # Unexpected response shape
@@ -3333,7 +3397,8 @@ $huduBodyFragment
     $huduSuccess = Publish-HuduAsset `
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
-        -HtmlContent    $huduBodyFragment
+        -HtmlContent    $huduBodyFragment `
+        -AttachmentPath $HtmlReportPath
     if ($huduSuccess) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
     } else {
