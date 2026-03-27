@@ -1240,31 +1240,20 @@ function Get-HuduCompanyBySlug {
 function Publish-HuduAsset {
     <#
       Creates a new asset in Hudu under the specified company and asset layout.
-      Resolves the company slug to a numeric ID, finds the layout by name,
-      auto-detects the first RichText field, and populates it with the
-      supplied HTML content.
+      Uses the pre-resolved numeric company ID from $_HuduCompanyId, finds the
+      layout by name, auto-detects the first RichText field, and populates it
+      with the supplied HTML content.
       Returns $true on success, $false on failure (never throws).
     #>
     param(
-        [string]$CompanySlug,
         [string]$LayoutName,
         [string]$AssetName,
         [string]$HtmlContent
     )
     try {
-        # 1. Resolve company slug to numeric ID
-        Write-Action -What "Looking up company by slug: $CompanySlug" -Kind run
-        $company = Get-HuduCompanyBySlug -Slug $CompanySlug
-        if (-not $company) {
-            Write-Action -What "Company with slug '$CompanySlug' not found in Hudu." -Kind bad
-            Log "Hudu: company slug '$CompanySlug' not found"
-            return $false
-        }
-        $companyId = $company.id
-        Write-Action -What ("Found company: {0} (ID {1})" -f $company.name, $companyId) -Kind ok
-        Log ("Hudu: found company '{0}' (ID {1})" -f $company.name, $companyId)
+        $companyId = $script:_HuduCompanyId
 
-        # 2. Find the asset layout
+        # 1. Find the asset layout
         Write-Action -What "Looking up asset layout: $LayoutName" -Kind run
         $layout = Get-HuduAssetLayoutByName -Name $LayoutName
         if (-not $layout) {
@@ -1455,24 +1444,6 @@ if ($IsElevated) {
 Write-Mode -IsElevated:$IsElevated
 
 # ------------------------- #
-# Customer Name             #
-# ------------------------- #
-if (-not $CustomerName -and -not $Silent) {
-    Write-Host ""
-    Write-Host "Enter customer / business name (or press ENTER to skip):" -ForegroundColor Cyan
-    $inputName = [System.Console]::ReadLine()
-    if ($inputName -and $inputName.Trim() -ne "") {
-        $CustomerName = $inputName.Trim()
-    }
-}
-if ($CustomerName) {
-    Write-Action -What ("Customer: {0}" -f $CustomerName) -Kind ok
-    Log ("Customer name: {0}" -f $CustomerName)
-    $HtmlReportPath     = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
-    $HuduHtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit-Hudu.html"
-}
-
-# ------------------------- #
 # Hudu Parameter Validation  #
 # ------------------------- #
 $HuduValid = $false
@@ -1505,7 +1476,45 @@ if ($HuduReport) {
         Write-Action -What ("  Company slug: {0}" -f $HuduCompanySlug) -Kind info
         Write-Action -What ("  Layout: {0}" -f $HuduAssetLayoutName) -Kind info
         Log ("Hudu: enabled - URL={0}, Slug={1}, Layout={2}" -f $HuduBaseURL, $HuduCompanySlug, $HuduAssetLayoutName)
+
+        # Resolve company name and numeric ID from slug
+        Write-Action -What "Resolving company name from Hudu..." -Kind run
+        try {
+            $huduCompany = Get-HuduCompanyBySlug -Slug $HuduCompanySlug
+            if ($huduCompany -and $huduCompany.name) {
+                $script:_HuduCompanyId = $huduCompany.id
+                $CustomerName = $huduCompany.name
+                Write-Action -What ("Company: {0} (ID {1})" -f $CustomerName, $huduCompany.id) -Kind ok
+                Log ("Hudu: resolved company '{0}' (ID {1}) from slug '{2}'" -f $CustomerName, $huduCompany.id, $HuduCompanySlug)
+            } else {
+                Write-Action -What "Could not resolve company from slug '$HuduCompanySlug'." -Kind bad
+                Log ("Hudu: slug '{0}' not found" -f $HuduCompanySlug)
+                $HuduValid = $false
+            }
+        } catch {
+            Write-Action -What ("Company lookup failed: {0}" -f $_.Exception.Message) -Kind bad
+            Log ("Hudu: company lookup failed - {0}" -f $_.Exception.Message)
+            $HuduValid = $false
+        }
     }
+}
+
+# ------------------------- #
+# Customer Name             #
+# ------------------------- #
+if (-not $CustomerName -and -not $Silent) {
+    Write-Host ""
+    Write-Host "Enter customer / business name (or press ENTER to skip):" -ForegroundColor Cyan
+    $inputName = [System.Console]::ReadLine()
+    if ($inputName -and $inputName.Trim() -ne "") {
+        $CustomerName = $inputName.Trim()
+    }
+}
+if ($CustomerName) {
+    Write-Action -What ("Customer: {0}" -f $CustomerName) -Kind ok
+    Log ("Customer name: {0}" -f $CustomerName)
+    $HtmlReportPath     = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
+    $HuduHtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit-Hudu.html"
 }
 
 # ============================================================
@@ -3322,7 +3331,6 @@ $huduBodyFragment
     $huduAssetDate = Get-Date -Format 'dd/MM/yyyy'
     $huduAssetName = "$ComputerName - $huduAssetDate"
     $huduSuccess = Publish-HuduAsset `
-        -CompanySlug    $HuduCompanySlug `
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
         -HtmlContent    $huduBodyFragment
