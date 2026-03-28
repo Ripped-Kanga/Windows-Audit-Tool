@@ -47,7 +47,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.5"
+$ScriptVersion = "1.3.2.6"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -329,6 +329,21 @@ function Get-InstalledSoftwareInventory {
             if ($null -eq $Value) { return "" }
             $s = [string]$Value
             $s = ($s -replace '\s+', ' ').Trim()
+
+            # Reverse common UTF-8-bytes-decoded-as-CP437 artifacts.
+            # These appear when winget or registry values contain Unicode punctuation
+            # that was stored/transmitted as UTF-8 but decoded using CP437.
+            # Each entry: (CP437-misread sequence) -> correct Unicode replacement.
+            # Pattern: UTF-8 byte E2 always decodes to Gamma (U+0393) in CP437,
+            #          byte 80 to C-cedilla (U+00C7), followed by a third varying byte.
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00AA, '...')  # U+2026 ellipsis        (E2 80 A6)
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00F6, ' - ')  # U+2014 em dash         (E2 80 94)
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00F4, ' - ')  # U+2013 en dash         (E2 80 93)
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00D6, "'")    # U+2019 right single q  (E2 80 99)
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00FF, "'")    # U+2018 left single q   (E2 80 98)
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x009C, '"')    # U+201C left double q   (E2 80 9C)
+            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x009D, '"')    # U+201D right double q  (E2 80 9D)
+
             return $s
         } catch {
             return ""
@@ -554,8 +569,16 @@ function Get-InstalledSoftwareInventory {
     try {
         $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
         if ($winget) {
-            # Don't pass flags that older winget builds reject
-            $raw = & $winget.Source "list" "--disable-interactivity" "--accept-source-agreements" 2>&1
+            # Winget outputs UTF-8. Force OutputEncoding to UTF-8 before capturing so
+            # Unicode characters (e.g. ellipsis in truncated names) are not decoded as CP437.
+            $prevOutputEncoding = [Console]::OutputEncoding
+            try {
+                [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                # Don't pass flags that older winget builds reject
+                $raw = & $winget.Source "list" "--disable-interactivity" "--accept-source-agreements" 2>&1
+            } finally {
+                [Console]::OutputEncoding = $prevOutputEncoding
+            }
             $lines = @($raw) | ForEach-Object { [string]$_ } | Where-Object { $_ -and $_.Trim() -ne "" }
 
             # If this looks like help/usage output, skip entirely
