@@ -235,13 +235,14 @@ There is **no automated test suite**. All validation is manual:
 
 ### Release Workflow
 When cutting a new version:
-1. Bump `$ScriptVersion` in `Run-Audit.ps1`
-2. Compile: `Invoke-ps2exe .\Run-Audit.ps1 .\Run-Audit.exe`
-3. Commit and push both files
-4. Create a GitHub Release with both assets in one command:
-   ```powershell
-   gh release create v1.2.0 .\Run-Audit.ps1 .\Run-Audit.exe --title "v1.2.0" --notes "Release notes"
-   ```
+1. Bump `$ScriptVersion` in `Run-Audit.ps1` to match the branch/tag name exactly (e.g. branch `v1.3.2` → `$ScriptVersion = "1.3.2"`)
+2. Commit and push — the GitHub Actions workflow (`.github/workflows/release.yml`) handles compilation and release creation automatically when a `v*` tag is pushed
+3. Push the tag: `git tag v1.3.2 && git push origin v1.3.2`
+
+The workflow validates that `$ScriptVersion` matches the tag before compiling, so a version mismatch will fail the build.
+
+> **For AI assistants:** `$ScriptVersion` must **always** match the branch version. When working on branch `vX.Y.Z`, ensure `$ScriptVersion = "X.Y.Z"` before any PR is merged. This is non-negotiable — the GitHub Actions release workflow will reject a mismatched version.
+
 The self-update mechanism looks for `.ps1` and `.exe` assets attached to the latest GitHub Release.
 
 ---
