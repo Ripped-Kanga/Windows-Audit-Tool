@@ -161,7 +161,7 @@ All installed Windows hotfixes and cumulative updates via `Get-HotFix`, sorted b
 Queries the Windows Update Agent (WUA) COM API directly — no PSWindowsUpdate module required. Reports update title, KB number, size, and severity for all pending updates.
 
 ### 5. Network Adapters
-All physical and virtual adapters with connection status, MAC address, IP addresses, default gateway, and DNS servers.
+All physical and virtual adapters with connection status, MAC address, link speed, media type, driver version, driver date, and manufacturer. For each connected adapter: IPv4 address with prefix length, IPv6 addresses (global and link-local), default gateways, DNS servers, DHCP status, DHCP server address, lease obtained/expires dates, and network profile (Public/Private/Domain).
 
 ### 6. SMB Shares
 All network shares with path, description, and an exposure classification: system shares (IPC$, ADMIN$), administrative drive shares (C$), and custom shares that expose data to the network.
