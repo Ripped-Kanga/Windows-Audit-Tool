@@ -1885,50 +1885,146 @@ Html-EndSection
 # [5] NETWORK ADAPTERS
 # ============================================================
 Write-Step -Index 5 -Total 13 -Title "Gathering network information..."
-Write-Action -What "Running: Network adapters + primary config" -Kind run
 Html-StartSection "Network"
 
-$nets = Safe-Invoke { Get-NetAdapter | Select-Object Name, Status, MacAddress } "Network Adapters"
+# ---- Adapter inventory ----
+Write-Action -What "Running: Get-NetAdapter (full detail)" -Kind run
+$adapters = Safe-Invoke {
+    Get-NetAdapter | Sort-Object { if ($_.Status -eq 'Up') { 0 } else { 1 } }, Name |
+    Select-Object Name, InterfaceDescription, Status, MacAddress, LinkSpeed, MediaType,
+        DriverVersion,
+        @{ N='DriverDate'; E={ if ($_.DriverDate) { $_.DriverDate.ToString('yyyy-MM-dd') } else { '' } } },
+        DriverProvider
+} "Network Adapters"
 
-if ($nets -ne "Error" -and $nets) {
-    $netList = @($nets) | Sort-Object Name
-    Write-Action -What ("Adapters found: {0}" -f $netList.Count) -Kind ok
+if ($adapters -ne "Error" -and $adapters) {
+    $adapterList = @($adapters)
+    Write-Action -What ("Adapters found: {0}" -f $adapterList.Count) -Kind ok
 
-    Html-StartDetails -Summary ("Network Adapters ({0})" -f $netList.Count) -Open
-    Html-AddTable -Items $netList -Columns @(
-        @{ Header="Name";        Property="Name" },
-        @{ Header="Status";      Property="Status" },
-        @{ Header="MAC Address"; Property="MacAddress" }
-    )
+    Html-StartDetails -Summary ("Network Adapters ({0})" -f $adapterList.Count) -Open
+    Html-AddTable -Items $adapterList -Columns @(
+        @{ Header="Name";         Property="Name" },
+        @{ Header="Description";  Property="InterfaceDescription" },
+        @{ Header="Status";       Property="Status" },
+        @{ Header="MAC Address";  Property="MacAddress" },
+        @{ Header="Speed";        Property="LinkSpeed" },
+        @{ Header="Media Type";   Property="MediaType" },
+        @{ Header="Driver";       Property="DriverVersion" },
+        @{ Header="Driver Date";  Property="DriverDate" },
+        @{ Header="Manufacturer"; Property="DriverProvider" }
+    ) -RowClass {
+        param($row)
+        if     ($row.Status -eq 'Up')           { 'sev-good' }
+        elseif ($row.Status -eq 'Disconnected') { '' }
+        else                                    { 'sev-warn' }
+    }
     Html-EndDetails
-}
-else {
+} else {
     Write-Action -What "Network adapter query failed." -Kind warn
     Html-AddNote -Text "Could not retrieve network adapter information." -Kind warn
 }
 
-$primaryCfg = Safe-Invoke {
-    Get-NetIPConfiguration | Where-Object {
-        $_.NetAdapter.Status -eq 'Up' -and $_.IPv4DefaultGateway -and $_.IPv4Address
-    } | Select-Object -First 3
-} "Primary Network Config"
-
-if ($primaryCfg -ne "Error" -and $primaryCfg) {
-    foreach ($cfg in @($primaryCfg)) {
-        $name = $cfg.InterfaceAlias
-        $ip4  = if ($cfg.IPv4Address) { ($cfg.IPv4Address.IPAddress | Select-Object -First 1) } else { "N/A" }
-        $gw4  = if ($cfg.IPv4DefaultGateway) { $cfg.IPv4DefaultGateway.NextHop } else { "N/A" }
-        $dns  = if ($cfg.DnsServer.ServerAddresses) { ($cfg.DnsServer.ServerAddresses -join ", ") } else { "N/A" }
-
-        Write-Action -What ("Primary: {0} | IPv4 {1} | GW {2}" -f $name, $ip4, $gw4) -Kind info
-
-        Html-Add ("<h3>{0}</h3>" -f (Html-Enc ("Primary Configuration: " + $name)))
-        Html-AddKV -Pairs ([ordered]@{
-            "IPv4"    = $ip4
-            "Gateway" = $gw4
-            "DNS"     = $dns
-        })
+# ---- DHCP details from WMI (keyed by adapter description for correlation) ----
+$dhcpMap = Safe-Invoke {
+    $map = @{}
+    @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True") | ForEach-Object {
+        $map[$_.Description] = $_
     }
+    $map
+} "DHCP Configuration"
+
+# ---- Per-adapter IP detail (connected adapters only) ----
+Write-Action -What "Running: Get-NetIPConfiguration -Detailed" -Kind run
+$ipConfigs = Safe-Invoke {
+    @(Get-NetIPConfiguration -Detailed | Where-Object { $_.NetAdapter.Status -eq 'Up' })
+} "Network IP Configuration"
+
+if ($ipConfigs -ne "Error" -and $ipConfigs) {
+    foreach ($cfg in $ipConfigs) {
+        $adName = $cfg.InterfaceAlias
+        $adDesc = if ($cfg.NetAdapter) { [string]$cfg.NetAdapter.InterfaceDescription } else { '' }
+
+        # IPv4 with prefix length
+        $ip4List = @($cfg.IPv4Address)
+        $ip4 = if ($ip4List.Count -gt 0) {
+            ($ip4List | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" }) -join ' | '
+        } else { 'N/A' }
+
+        # IPv6 — globals first, then link-local
+        $ip6List = @($cfg.IPv6Address | Where-Object { $_ })
+        $ip6Parts = @()
+        foreach ($a in ($ip6List | Where-Object { $_.IPAddress -notmatch '^fe80' })) {
+            $ip6Parts += "$($a.IPAddress)/$($a.PrefixLength)"
+        }
+        foreach ($a in ($ip6List | Where-Object { $_.IPAddress -match '^fe80' })) {
+            $ip6Parts += "$($a.IPAddress) (link-local)"
+        }
+        $ip6 = if ($ip6Parts) { $ip6Parts -join ' | ' } else { 'N/A' }
+
+        # Gateways
+        $gw4 = if ($cfg.IPv4DefaultGateway) {
+            (@($cfg.IPv4DefaultGateway) | ForEach-Object { $_.NextHop }) -join ', '
+        } else { 'N/A' }
+        $gw6 = if ($cfg.IPv6DefaultGateway) {
+            (@($cfg.IPv6DefaultGateway) | ForEach-Object { $_.NextHop }) -join ', '
+        } else { 'N/A' }
+
+        # DNS
+        $dns = if ($cfg.DnsServer.ServerAddresses) { $cfg.DnsServer.ServerAddresses -join ', ' } else { 'N/A' }
+
+        # DHCP status from NetIPv4Interface
+        $dhcp4 = 'N/A'
+        if ($cfg.NetIPv4Interface) {
+            $dhcp4 = if ([string]$cfg.NetIPv4Interface.Dhcp -eq 'Enabled') { 'Enabled' } else { 'Disabled' }
+        }
+
+        # DHCP server + lease dates from WMI
+        $dhcpServer = ''; $leaseObtained = ''; $leaseExpires = ''
+        if ($dhcpMap -ne "Error" -and $dhcpMap -and $adDesc -and $dhcpMap.ContainsKey($adDesc)) {
+            $wmi = $dhcpMap[$adDesc]
+            if ($wmi.DHCPEnabled) {
+                if ($wmi.DHCPServer)        { $dhcpServer    = [string]$wmi.DHCPServer }
+                if ($wmi.DHCPLeaseObtained) { $leaseObtained = $wmi.DHCPLeaseObtained.ToString('yyyy-MM-dd HH:mm') }
+                if ($wmi.DHCPLeaseExpires)  { $leaseExpires  = $wmi.DHCPLeaseExpires.ToString('yyyy-MM-dd HH:mm') }
+            }
+        }
+
+        # Network profile (Public / Private / DomainAuthenticated)
+        $netProfile = 'N/A'
+        $profResult = Safe-Invoke {
+            Get-NetConnectionProfile -InterfaceAlias $adName -ErrorAction SilentlyContinue
+        } ("Net Profile: $adName")
+        if ($profResult -ne "Error" -and $profResult) {
+            $netProfile = [string]$profResult.NetworkCategory
+        }
+
+        # Link speed
+        $speed = if ($cfg.NetAdapter -and $cfg.NetAdapter.LinkSpeed) { $cfg.NetAdapter.LinkSpeed } else { 'N/A' }
+
+        Write-Action -What ("  $adName | $ip4 | GW $gw4") -Kind info
+
+        $heading = if ($adDesc -and $adDesc -ne $adName) { "$adName — $adDesc" } else { $adName }
+        Html-Add ("<h3>{0}</h3>" -f (Html-Enc $heading))
+
+        $kv = [ordered]@{
+            "IPv4 Address"    = $ip4
+            "Default Gateway" = $gw4
+            "DNS Servers"     = $dns
+            "DHCP"            = $dhcp4
+        }
+        if ($dhcp4 -eq 'Enabled' -and $dhcpServer)  { $kv["DHCP Server"]    = $dhcpServer }
+        if ($leaseObtained)                           { $kv["Lease Obtained"] = $leaseObtained }
+        if ($leaseExpires)                            { $kv["Lease Expires"]  = $leaseExpires }
+        $kv["IPv6 Address"]    = $ip6
+        if ($gw6 -ne 'N/A')    { $kv["IPv6 Gateway"]   = $gw6 }
+        $kv["Network Profile"] = $netProfile
+        $kv["Link Speed"]      = $speed
+
+        Html-AddKV -Pairs $kv
+    }
+} elseif ($ipConfigs -eq "Error") {
+    Write-Action -What "IP configuration query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve IP configuration details." -Kind warn
 }
 
 Html-EndSection
