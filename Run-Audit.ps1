@@ -47,7 +47,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.4"
+$ScriptVersion = "1.3.2.5"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -2179,7 +2179,7 @@ if ($ipConfigs -ne "Error" -and $ipConfigs) {
             $leaseParts = @()
             if ($leaseObtained) { $leaseParts += "Obtained $leaseObtained" }
             if ($leaseExpires)  { $leaseParts += "Expires $leaseExpires" }
-            $kv["Lease"] = $leaseParts -join '  →  '
+            $kv["Lease"] = $leaseParts -join '  ->  '
         }
         $kv["IPv6 Address"]    = $ip6
         if ($gw6 -ne 'N/A')    { $kv["IPv6 Gateway"]   = $gw6 }
