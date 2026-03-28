@@ -22,13 +22,14 @@ This file provides context for AI assistants working on this codebase.
 
 ```
 Windows-Audit-Tool/
-├── Run-Audit.ps1   # Primary source — the entire tool (~2,277 lines)
-├── Run-Audit.exe   # PS2EXE compiled binary — build artifact, never edited directly
-├── README.md       # User-facing documentation
-└── LICENSE         # MIT 2025
+├── Run-Audit.ps1          # Primary source — the entire tool
+├── Run-Audit.exe          # PS2EXE compiled binary — build artifact, never edited directly
+├── RMM-Atera-Deploy.ps1   # Static Atera deploy wrapper — manages cached Run-Audit.ps1 on endpoints
+├── README.md              # User-facing documentation
+└── LICENSE                # MIT 2025
 ```
 
-**The `.ps1` is the only file you should ever edit.** The `.exe` is regenerated manually with PS2EXE after changes to the script.
+**`Run-Audit.ps1` is the primary file to edit.** The `.exe` is regenerated manually with PS2EXE after changes. `RMM-Atera-Deploy.ps1` is uploaded once to Atera and only updated when its own deploy logic changes — it does not need recompiling.
 
 ---
 
@@ -111,15 +112,23 @@ After all sections run, the script assembles the final HTML document:
 
 ---
 
-## Hardcoded Paths
+## Output Paths
+
+Report paths are determined at runtime after the elevation check — they are not hardcoded:
+
+| Context | `$ReportDir` | Report filename |
+|---|---|---|
+| Elevated (admin / SYSTEM / RMM) | `$env:TEMP` | `<ComputerName>-Audit.html` |
+| Non-elevated (user context) | `$env:USERPROFILE\Downloads` | `<ComputerName>-Audit.html` |
+| With `-CustomerName` | same as above | `<CustomerName> - <ComputerName>-Audit.html` |
 
 | Path | Purpose |
 |---|---|
-| `C:\Temp\<ComputerName>-Audit.html` | HTML report output |
-| `C:\Windows\Temp\AuditLog.txt` | Append-only operational log |
-| `C:\Temp\` | Working directory (auto-created) |
+| `$env:TEMP\<ComputerName>-Audit.html` | HTML report (elevated) |
+| `$env:USERPROFILE\Downloads\<ComputerName>-Audit.html` | HTML report (non-elevated) |
+| `C:\Windows\Temp\AuditLog.txt` | Append-only operational log (always) |
 
-These paths are **intentionally hardcoded** for predictability. Do not add configuration file support.
+`$ReportDir` is set after the elevation block. `$HtmlReportPath` and `$HuduHtmlReportPath` are derived from it. Do not add configuration file support or additional path parameters.
 
 ---
 
