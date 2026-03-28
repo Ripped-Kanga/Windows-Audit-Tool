@@ -226,8 +226,8 @@ function Write-PrivilegedGate {
 # ------------------------- #
 function Get-PendingWindowsUpdatesWUA {
     <#
-      Returns pending updates using the Windows Update Agent (WUA) API.
-      Includes a META record with ResultCode/Criteria/Count for diagnostics.
+      Returns pending, hidden, and recently-failed updates using the Windows Update Agent (WUA) API.
+      Returns a PSCustomObject with Pending, Hidden, and Failed lists plus MetaInfo diagnostics.
     #>
 
     try {
@@ -240,50 +240,65 @@ function Get-PendingWindowsUpdatesWUA {
     $session  = New-Object -ComObject Microsoft.Update.Session
     $searcher = $session.CreateUpdateSearcher()
 
-    $criteria = "IsInstalled=0 and IsHidden=0"
-    $result   = $searcher.Search($criteria)
-
-    $updates = [System.Collections.Generic.List[object]]::new()
-
-    $updates.Add([pscustomobject]@{
-        Title          = "<META>"
-        KB             = "N/A"
-        Categories     = ("ResultCode={0}; Criteria={1}; Count={2}" -f $result.ResultCode, $criteria, $result.Updates.Count)
-        Downloaded     = $false
-        Mandatory      = $false
-        RebootRequired = $false
-        EulaAccepted   = $true
-    })
-
-    for ($i = 0; $i -lt $result.Updates.Count; $i++) {
-        $u = $result.Updates.Item($i)
-
-        $kb = "N/A"
-        try {
-            if ($u.KBArticleIDs -and $u.KBArticleIDs.Count -gt 0) {
-                $kb = ($u.KBArticleIDs -join ", ")
-            }
-        } catch {}
-
-        $cats = "N/A"
-        try {
-            if ($u.Categories -and $u.Categories.Count -gt 0) {
-                $cats = (@($u.Categories) | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", "
-            }
-        } catch {}
-
-        $updates.Add([pscustomobject]@{
-            Title          = $u.Title
-            KB             = $kb
-            Categories     = $cats
-            Downloaded     = $u.IsDownloaded
-            Mandatory      = $u.IsMandatory
-            RebootRequired = $u.RebootRequired
-            EulaAccepted   = $u.EulaAccepted
-        })
+    function Get-WuaUpdateList {
+        param([string]$Criteria)
+        $res  = $searcher.Search($Criteria)
+        $list = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $res.Updates.Count; $i++) {
+            $u  = $res.Updates.Item($i)
+            $kb = "N/A"
+            try { if ($u.KBArticleIDs -and $u.KBArticleIDs.Count -gt 0) { $kb = ($u.KBArticleIDs -join ", ") } } catch {}
+            $cats = "N/A"
+            try { if ($u.Categories -and $u.Categories.Count -gt 0) { $cats = (@($u.Categories) | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", " } } catch {}
+            $list.Add([pscustomobject]@{
+                Title          = $u.Title
+                KB             = $kb
+                Categories     = $cats
+                Downloaded     = $u.IsDownloaded
+                Mandatory      = $u.IsMandatory
+                RebootRequired = $u.RebootRequired
+                EulaAccepted   = $u.EulaAccepted
+            })
+        }
+        return [pscustomobject]@{ ResultCode = $res.ResultCode; Count = $res.Updates.Count; Items = @($list) }
     }
 
-    return @($updates)
+    $pendingResult = Get-WuaUpdateList "IsInstalled=0 and IsHidden=0"
+    $hiddenResult  = Get-WuaUpdateList "IsInstalled=0 and IsHidden=1"
+
+    # Failed update history (last 30 days; ResultCode 4 = failed)
+    $failedHistory = [System.Collections.Generic.List[object]]::new()
+    try {
+        $totalHistory = $searcher.GetTotalHistoryCount()
+        if ($totalHistory -gt 0) {
+            $history = $searcher.QueryHistory(0, [Math]::Min($totalHistory, 200))
+            $cutoff  = (Get-Date).AddDays(-30)
+            for ($i = 0; $i -lt $history.Count; $i++) {
+                $h = $history.Item($i)
+                if ($h.ResultCode -eq 4 -and $h.Date -ge $cutoff) {
+                    $kb = "N/A"
+                    try { if ($h.Title -match 'KB(\d+)') { $kb = "KB$($Matches[1])" } } catch {}
+                    $failedHistory.Add([pscustomobject]@{
+                        Title      = $h.Title
+                        KB         = $kb
+                        Date       = $h.Date.ToString('yyyy-MM-dd HH:mm')
+                        HResult    = ("0x{0:X8}" -f [uint32]$h.HResult)
+                    })
+                }
+            }
+        }
+    } catch {}
+
+    return [pscustomobject]@{
+        MetaInfo = [pscustomobject]@{
+            PendingResultCode = $pendingResult.ResultCode
+            PendingCount      = $pendingResult.Count
+            HiddenCount       = $hiddenResult.Count
+        }
+        Pending = $pendingResult.Items
+        Hidden  = $hiddenResult.Items
+        Failed  = @($failedHistory)
+    }
 }
 
 # ------------------------- #
@@ -1829,22 +1844,112 @@ Html-EndSection
 # [4] PENDING WINDOWS UPDATES (WUA API)
 # ============================================================
 Write-Step -Index 4 -Total 13 -Title "Checking pending Windows Updates..."
-Write-Action -What "Running: Pending updates (WUA API)" -Kind run
 Html-StartSection "Pending Windows Updates"
 
+# ---- Last successful scan time ----
+$wuLastScan = Safe-Invoke {
+    $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Detect'
+    $val = Get-ItemProperty -Path $regPath -Name LastSuccessTime -ErrorAction SilentlyContinue
+    if ($val -and $val.LastSuccessTime) {
+        $dt   = [datetime]::Parse($val.LastSuccessTime)
+        $days = ([datetime]::Now - $dt).Days
+        [pscustomobject]@{ DateTime = $dt.ToString('yyyy-MM-dd HH:mm'); DaysAgo = $days }
+    } else { $null }
+} "WU Last Scan Time"
+
+# ---- Update source: WSUS / WUfB policy ----
+$wuPolicy = Safe-Invoke {
+    $p = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -ErrorAction SilentlyContinue
+    [pscustomobject]@{
+        WUServer                        = if ($p) { [string]$p.WUServer } else { $null }
+        UseWUServer                     = if ($p) { $p.UseWUServer } else { $null }
+        DisableWindowsUpdateAccess      = if ($p) { $p.DisableWindowsUpdateAccess } else { $null }
+        TargetGroup                     = if ($p) { [string]$p.TargetGroup } else { $null }
+        DeferQualityUpdates             = if ($p) { $p.DeferQualityUpdates } else { $null }
+        DeferQualityUpdatesPeriodInDays = if ($p) { $p.DeferQualityUpdatesPeriodInDays } else { $null }
+        DeferFeatureUpdates             = if ($p) { $p.DeferFeatureUpdates } else { $null }
+        DeferFeatureUpdatesPeriodInDays = if ($p) { $p.DeferFeatureUpdatesPeriodInDays } else { $null }
+    }
+} "WU/WUfB Policy"
+
+# ---- Pending reboot signals ----
+$rebootPending = Safe-Invoke {
+    $signals = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+        $signals.Add('Windows Update')
+    }
+    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+        $signals.Add('Component Servicing')
+    }
+    $pfro = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+    if ($pfro) { $signals.Add('File Rename Operations') }
+    [pscustomobject]@{ Pending = ($signals.Count -gt 0); Signals = ($signals -join ', ') }
+} "Pending Reboot Check"
+
+# ---- Microsoft Update service registration ----
+$muEnabled = Safe-Invoke {
+    $muGuid = '{7971f918-a847-4430-9279-4a52d1efe18d}'
+    $svcMgr = New-Object -ComObject Microsoft.Update.ServiceManager
+    $mu     = @($svcMgr.Services) | Where-Object { $_.ServiceID -eq $muGuid } | Select-Object -First 1
+    [bool]($mu -and $mu.IsRegisteredWithAU)
+} "Microsoft Update Service"
+
+Write-Action -What "Running: Pending updates (WUA API)" -Kind run
 $pendingUpdates = Safe-Invoke { Get-PendingWindowsUpdatesWUA } "Pending Windows Updates (WUA API)"
 
+# ---- Summary header table ----
+Html-Add "<table class='kv-table'><tbody>"
+
+if ($wuLastScan -ne "Error" -and $wuLastScan) {
+    $scanClass = if ($wuLastScan.DaysAgo -le 7) { '' } elseif ($wuLastScan.DaysAgo -le 30) { 'sev-warn' } else { 'sev-bad' }
+    Html-Add ("<tr class='{0}'><th>Last Scan</th><td>{1} ({2} days ago)</td></tr>" -f $scanClass, (Html-Enc $wuLastScan.DateTime), (Html-Enc $wuLastScan.DaysAgo))
+    Write-Action -What ("Last WU scan: {0} ({1} days ago)" -f $wuLastScan.DateTime, $wuLastScan.DaysAgo) -Kind $(if ($wuLastScan.DaysAgo -le 7) { "ok" } elseif ($wuLastScan.DaysAgo -le 30) { "warn" } else { "bad" })
+} else {
+    Html-Add "<tr class='sev-warn'><th>Last Scan</th><td>Could not determine</td></tr>"
+}
+
+if ($wuPolicy -ne "Error" -and $wuPolicy) {
+    if ($wuPolicy.UseWUServer -eq 1 -and $wuPolicy.WUServer) {
+        $srcText = "WSUS: $($wuPolicy.WUServer)"
+        if ($wuPolicy.TargetGroup) { $srcText += " (Target group: $($wuPolicy.TargetGroup))" }
+        Html-Add ("<tr><th>Update Source</th><td>{0}</td></tr>" -f (Html-Enc $srcText))
+    } else {
+        Html-Add "<tr><th>Update Source</th><td>Windows Update (direct / Microsoft)</td></tr>"
+    }
+    if ($wuPolicy.DisableWindowsUpdateAccess -eq 1) {
+        Html-AddNote -Text "Windows Update access is disabled by policy — users cannot manually check for updates." -Kind warn
+    }
+}
+
+if ($muEnabled -ne "Error") {
+    $muClass = if ($muEnabled) { 'sev-good' } else { 'sev-warn' }
+    $muText  = if ($muEnabled) { 'Enabled (Office and other Microsoft products included)' } else { 'Disabled (Windows only; Office and other products excluded)' }
+    Html-Add ("<tr class='{0}'><th>Microsoft Update</th><td>{1}</td></tr>" -f $muClass, (Html-Enc $muText))
+    Write-Action -What ("Microsoft Update: {0}" -f $(if ($muEnabled) { "Enabled" } else { "Disabled" })) -Kind $(if ($muEnabled) { "ok" } else { "warn" })
+}
+
+if ($rebootPending -ne "Error" -and $rebootPending) {
+    $rbClass = if ($rebootPending.Pending) { 'sev-warn' } else { '' }
+    $rbText  = if ($rebootPending.Pending) { "Yes ($($rebootPending.Signals))" } else { 'No' }
+    Html-Add ("<tr class='{0}'><th>Reboot Pending</th><td>{1}</td></tr>" -f $rbClass, (Html-Enc $rbText))
+    if ($rebootPending.Pending) {
+        Write-Action -What ("Reboot pending: {0}" -f $rebootPending.Signals) -Kind warn
+    }
+}
+
+Html-Add "</tbody></table>"
+
+# ---- Pending updates ----
 if ($pendingUpdates -eq "Error") {
     Write-Action -What "Pending updates query failed." -Kind bad
     Html-AddNote -Text "Could not query pending updates (WUA API)." -Kind bad
 }
 else {
-    $list = @($pendingUpdates)
-    $meta = $list | Where-Object { $_.Title -eq "<META>" } | Select-Object -First 1
-    $real = $list | Where-Object { $_.Title -ne "<META>" }
+    $real = $pendingUpdates.Pending
+    $meta = $pendingUpdates.MetaInfo
 
     if ($meta) {
-        Html-Add ("<p class='small'><span class='code'>WUA Search:</span> {0}</p>" -f (Html-Enc $meta.Categories))
+        Html-Add ("<p class='small'><span class='code'>WUA:</span> ResultCode={0}; Count={1}</p>" -f (Html-Enc $meta.PendingResultCode), (Html-Enc $meta.PendingCount))
     }
 
     if (-not $real -or @($real).Count -eq 0) {
@@ -1852,9 +1957,27 @@ else {
         Html-AddNote -Text "No pending updates found." -Kind good
     }
     else {
-        $count = @($real).Count
-        Write-Action -What ("Pending updates: {0}" -f $count) -Kind warn
-        Html-AddNote -Text ("Pending updates: {0}" -f $count) -Kind warn
+        $count   = @($real).Count
+        $cCrit   = @($real | Where-Object { $_.Categories -match 'Critical Updates' }).Count
+        $cSec    = @($real | Where-Object { $_.Categories -match 'Security Updates' -and $_.Categories -notmatch 'Critical Updates' }).Count
+        $cDriver = @($real | Where-Object { $_.Categories -match 'Drivers' }).Count
+        $cEula   = @($real | Where-Object { $_.EulaAccepted -eq $false }).Count
+        $cOther  = $count - $cCrit - $cSec - $cDriver
+
+        $summaryParts = [System.Collections.Generic.List[string]]::new()
+        if ($cCrit   -gt 0) { $summaryParts.Add("Critical: $cCrit") }
+        if ($cSec    -gt 0) { $summaryParts.Add("Security: $cSec") }
+        if ($cDriver -gt 0) { $summaryParts.Add("Drivers: $cDriver") }
+        if ($cOther  -gt 0) { $summaryParts.Add("Other: $cOther") }
+        $summaryStr = if ($summaryParts.Count -gt 0) { $summaryParts -join ' | ' } else { "Total: $count" }
+
+        $overallKind = if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" }
+        Write-Action -What ("Pending updates: {0} — {1}" -f $count, $summaryStr) -Kind $overallKind
+        Html-AddNote -Text ("Pending updates: {0} — {1}" -f $count, $summaryStr) -Kind $(if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" })
+
+        if ($cEula -gt 0) {
+            Html-AddNote -Text ("$cEula update(s) have not had their EULA accepted and will not install automatically.") -Kind warn
+        }
 
         $updateRows = @($real) | ForEach-Object {
             [pscustomobject]@{
@@ -1864,22 +1987,56 @@ else {
                 Downloaded     = $_.Downloaded
                 Mandatory      = $_.Mandatory
                 RebootRequired = $_.RebootRequired
+                EulaAccepted   = $_.EulaAccepted
             }
         }
 
-        Html-StartDetails -Summary ("Updates ({0})" -f $count) -Open
+        Html-StartDetails -Summary ("Pending Updates ({0})" -f $count) -Open
         Html-AddTable -Items $updateRows -Columns @(
-            @{ Header="KB";         Property="KB" },
-            @{ Header="Title";      Property="Title" },
-            @{ Header="Categories"; Property="Categories" },
-            @{ Header="Downloaded"; Property="Downloaded" },
-            @{ Header="Mandatory";  Property="Mandatory" },
-            @{ Header="Reboot";     Property="RebootRequired" }
+            @{ Header="KB";            Property="KB" },
+            @{ Header="Title";         Property="Title" },
+            @{ Header="Categories";    Property="Categories" },
+            @{ Header="Downloaded";    Property="Downloaded" },
+            @{ Header="Mandatory";     Property="Mandatory" },
+            @{ Header="Reboot";        Property="RebootRequired" },
+            @{ Header="EULA Accepted"; Property="EulaAccepted" }
         ) -RowClass {
             param($r)
-            if ($r.RebootRequired -eq $true -or $r.Mandatory -eq $true) { return 'sev-bad' }
+            if ($r.Categories -match 'Critical Updates|Security Updates') { return 'sev-bad' }
+            if ($r.RebootRequired -eq $true -or $r.Mandatory -eq $true)   { return 'sev-bad' }
             return 'sev-warn'
         }
+        Html-EndDetails
+    }
+
+    # ---- Hidden updates ----
+    $hiddenList = $pendingUpdates.Hidden
+    if ($hiddenList -and @($hiddenList).Count -gt 0) {
+        $hCount = @($hiddenList).Count
+        Write-Action -What ("Hidden updates: {0} (excluded from auto-install)" -f $hCount) -Kind warn
+        Html-AddNote -Text ("$hCount update(s) are hidden and will not install automatically. Review whether any are security-relevant.") -Kind warn
+        Html-StartDetails -Summary ("Hidden Updates ({0})" -f $hCount)
+        Html-AddTable -Items $hiddenList -Columns @(
+            @{ Header="KB";         Property="KB" },
+            @{ Header="Title";      Property="Title" },
+            @{ Header="Categories"; Property="Categories" }
+        ) -RowClass { param($r) 'sev-warn' }
+        Html-EndDetails
+    }
+
+    # ---- Failed update history (last 30 days) ----
+    $failedList = $pendingUpdates.Failed
+    if ($failedList -and @($failedList).Count -gt 0) {
+        $fCount = @($failedList).Count
+        Write-Action -What ("Failed updates (last 30 days): {0}" -f $fCount) -Kind bad
+        Html-AddNote -Text ("$fCount update installation(s) failed in the last 30 days.") -Kind bad
+        Html-StartDetails -Summary ("Failed Updates — Last 30 Days ({0})" -f $fCount)
+        Html-AddTable -Items $failedList -Columns @(
+            @{ Header="KB";      Property="KB" },
+            @{ Header="Title";   Property="Title" },
+            @{ Header="Date";    Property="Date" },
+            @{ Header="HResult"; Property="HResult" }
+        ) -RowClass { param($r) 'sev-bad' }
         Html-EndDetails
     }
 }
@@ -2017,9 +2174,13 @@ if ($ipConfigs -ne "Error" -and $ipConfigs) {
             "DNS Servers"     = $dns
             "DHCP"            = $dhcp4
         }
-        if ($dhcp4 -eq 'Enabled' -and $dhcpServer)  { $kv["DHCP Server"]    = $dhcpServer }
-        if ($leaseObtained)                           { $kv["Lease Obtained"] = $leaseObtained }
-        if ($leaseExpires)                            { $kv["Lease Expires"]  = $leaseExpires }
+        if ($dhcp4 -eq 'Enabled' -and $dhcpServer)  { $kv["DHCP Server"] = $dhcpServer }
+        if ($leaseObtained -or $leaseExpires) {
+            $leaseParts = @()
+            if ($leaseObtained) { $leaseParts += "Obtained $leaseObtained" }
+            if ($leaseExpires)  { $leaseParts += "Expires $leaseExpires" }
+            $kv["Lease"] = $leaseParts -join '  →  '
+        }
         $kv["IPv6 Address"]    = $ip6
         if ($gw6 -ne 'N/A')    { $kv["IPv6 Gateway"]   = $gw6 }
         $kv["Network Profile"] = $netProfile
@@ -2689,6 +2850,14 @@ if ($lastHotfix -ne "Error" -and $lastHotfix) {
 if ($wuAU -ne "Error" -and $wuAU) {
     Html-Add ("<tr><th>Windows Update Policy</th><td>{0}</td></tr>" -f (Html-Enc $wuAU.Description))
 }
+if ($wuPolicy -ne "Error" -and $wuPolicy) {
+    if ($wuPolicy.DeferQualityUpdates -eq 1 -and $null -ne $wuPolicy.DeferQualityUpdatesPeriodInDays) {
+        Html-Add ("<tr class='sev-warn'><th>Quality Update Deferral</th><td>{0} days (WUfB)</td></tr>" -f (Html-Enc $wuPolicy.DeferQualityUpdatesPeriodInDays))
+    }
+    if ($wuPolicy.DeferFeatureUpdates -eq 1 -and $null -ne $wuPolicy.DeferFeatureUpdatesPeriodInDays) {
+        Html-Add ("<tr><th>Feature Update Deferral</th><td>{0} days (WUfB)</td></tr>" -f (Html-Enc $wuPolicy.DeferFeatureUpdatesPeriodInDays))
+    }
+}
 Html-Add "</tbody></table>"
 Write-Action -What ("Patch currency: {0}" -f $(if ($null -ne $patchDays) { "$patchDays days since last hotfix" } else { "date unavailable" })) -Kind $(if ($patchClass -eq "sev-good") { "ok" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" })
 $e8PatchStatus = if ($patchClass -eq "sev-good") { "Current" } elseif ($patchClass -eq "sev-warn") { "Needs attention" } else { "Overdue" }
@@ -2883,7 +3052,11 @@ $wuSvc = Safe-Invoke {
     [pscustomobject]@{ Status = $s.Status; StartType = $s.StartType }
 } "Windows Update Service"
 
-$wuSvcClass = if ($wuSvc -ne "Error" -and $wuSvc -and $wuSvc.Status -eq "Running") { "sev-good" } else { "sev-warn" }
+$wuSvcClass = if ($wuSvc -ne "Error" -and $wuSvc) {
+    if ($wuSvc.StartType -eq 'Disabled') { 'sev-bad' }
+    elseif ($wuSvc.Status -eq 'Running') { 'sev-good' }
+    else { 'sev-warn' }
+} else { 'sev-warn' }
 
 Html-Add "<table class='kv-table'><tbody>"
 if ($osBuild -ne "Error" -and $osBuild) {
@@ -2899,9 +3072,13 @@ if ($lastHotfix -ne "Error" -and $lastHotfix -and $lastHotfix.HotFixID -ne "N/A"
 if ($wuSvc -ne "Error" -and $wuSvc) {
     Html-Add ("<tr class='{0}'><th>Windows Update Service</th><td>{1} (startup: {2})</td></tr>" -f $wuSvcClass, (Html-Enc $wuSvc.Status), (Html-Enc $wuSvc.StartType))
 }
+if ($muEnabled -ne "Error") {
+    $muE8Class = if ($muEnabled) { 'sev-good' } else { 'sev-warn' }
+    Html-Add ("<tr class='{0}'><th>Microsoft Update</th><td>{1}</td></tr>" -f $muE8Class, (Html-Enc $(if ($muEnabled) { 'Enabled' } else { 'Disabled (non-OS Microsoft products excluded)' })))
+}
 Html-Add "</tbody></table>"
 Write-Action -What ("OS: {0} | WU Service: {1}" -f $(if ($osBuild -ne "Error" -and $osBuild) { "$($osBuild.ProductName) $($osBuild.DisplayVersion)" } else { "unknown" }), $(if ($wuSvc -ne "Error" -and $wuSvc) { $wuSvc.Status } else { "unknown" })) -Kind info
-$e8OsPatchOk = ($wuSvc -ne "Error" -and $wuSvc -and $wuSvc.Status -eq "Running") -and ($patchClass -ne "sev-bad")
+$e8OsPatchOk = ($wuSvc -ne "Error" -and $wuSvc -and $wuSvc.Status -eq "Running" -and $wuSvc.StartType -ne 'Disabled') -and ($patchClass -ne "sev-bad")
 $e8OsStatus  = if ($e8OsPatchOk -and $patchClass -eq "sev-good") { "Current" } elseif ($e8OsPatchOk) { "Needs attention" } else { "Overdue" }
 $e8OsBadge   = if ($e8OsPatchOk -and $patchClass -eq "sev-good") { "good" } elseif ($e8OsPatchOk) { "warn" } else { "bad" }
 $e8Scores.Add([pscustomobject]@{ Control = "Patch Operating Systems"; Status = $e8OsStatus; Badge = $e8OsBadge })
