@@ -47,7 +47,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.3"
+$ScriptVersion = "1.3.2.4"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1917,7 +1917,7 @@ if ($wuPolicy -ne "Error" -and $wuPolicy) {
         Html-Add "<tr><th>Update Source</th><td>Windows Update (direct / Microsoft)</td></tr>"
     }
     if ($wuPolicy.DisableWindowsUpdateAccess -eq 1) {
-        Html-AddNote -Text "Windows Update access is disabled by policy — users cannot manually check for updates." -Kind warn
+        Html-AddNote -Text "Windows Update access is disabled by policy - users cannot manually check for updates." -Kind warn
     }
 }
 
@@ -1972,8 +1972,8 @@ else {
         $summaryStr = if ($summaryParts.Count -gt 0) { $summaryParts -join ' | ' } else { "Total: $count" }
 
         $overallKind = if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" }
-        Write-Action -What ("Pending updates: {0} — {1}" -f $count, $summaryStr) -Kind $overallKind
-        Html-AddNote -Text ("Pending updates: {0} — {1}" -f $count, $summaryStr) -Kind $(if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" })
+        Write-Action -What ("Pending updates: {0} - {1}" -f $count, $summaryStr) -Kind $overallKind
+        Html-AddNote -Text ("Pending updates: {0} - {1}" -f $count, $summaryStr) -Kind $(if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" })
 
         if ($cEula -gt 0) {
             Html-AddNote -Text ("$cEula update(s) have not had their EULA accepted and will not install automatically.") -Kind warn
@@ -2030,7 +2030,7 @@ else {
         $fCount = @($failedList).Count
         Write-Action -What ("Failed updates (last 30 days): {0}" -f $fCount) -Kind bad
         Html-AddNote -Text ("$fCount update installation(s) failed in the last 30 days.") -Kind bad
-        Html-StartDetails -Summary ("Failed Updates — Last 30 Days ({0})" -f $fCount)
+        Html-StartDetails -Summary ("Failed Updates - Last 30 Days ({0})" -f $fCount)
         Html-AddTable -Items $failedList -Columns @(
             @{ Header="KB";      Property="KB" },
             @{ Header="Title";   Property="Title" },
