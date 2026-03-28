@@ -1377,7 +1377,7 @@ function Publish-HuduAsset {
         }
         Write-Action -What ("Hudu API error: {0}" -f $errMsg) -Kind bad
         Log ("Hudu: API error - {0}" -f $errMsg)
-        Log-ExceptionDetail $_
+        Log-ExceptionDetail -Context "Publish-HuduAsset" -ErrorRecord $_
         return [pscustomobject]@{ AssetCreated = $false; FileAttached = $false }
     }
 }

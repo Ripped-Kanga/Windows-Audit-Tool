@@ -47,7 +47,7 @@ param(
 # ------------------------- #
 # Constants                 #
 # ------------------------- #
-$DeployScriptVersion = "1.0.0"
+$DeployScriptVersion = "1.0.1"
 $LogPath    = "C:\Windows\Temp\AuditDeploy.txt"
 $CachedPath = Join-Path $env:TEMP "Run-Audit.ps1"
 $ApiUrl     = "https://api.github.com/repos/Ripped-Kanga/Windows-Audit-Tool/releases/latest"
@@ -111,7 +111,7 @@ $CachedVersion = $null
 if (Test-Path -LiteralPath $CachedPath) {
     try {
         $head = Get-Content -LiteralPath $CachedPath -TotalCount 60 -ErrorAction Stop
-        $match = ($head -join "`n") | Select-String -Pattern '\$ScriptVersion\s*=\s*["'']([0-9]+\.[0-9]+\.[0-9]+)["'']'
+        $match = ($head -join "`n") | Select-String -Pattern '\$ScriptVersion\s*=\s*["'']([0-9]+(?:\.[0-9]+)+)["'']'
         if ($match) {
             $CachedVersion = $match.Matches[0].Groups[1].Value
             & $Log ("Cached script version: {0}" -f $CachedVersion)
@@ -177,7 +177,7 @@ if ($NeedDownload) {
 
             # Re-read version from freshly downloaded file
             $head = Get-Content -LiteralPath $CachedPath -TotalCount 60 -ErrorAction SilentlyContinue
-            $match = ($head -join "`n") | Select-String -Pattern '\$ScriptVersion\s*=\s*["'']([0-9]+\.[0-9]+\.[0-9]+)["'']'
+            $match = ($head -join "`n") | Select-String -Pattern '\$ScriptVersion\s*=\s*["'']([0-9]+(?:\.[0-9]+)+)["'']'
             if ($match) { $CachedVersion = $match.Matches[0].Groups[1].Value }
 
             & $Log ("Download complete: Run-Audit.ps1 v{0}" -f $CachedVersion)
