@@ -1512,10 +1512,15 @@ Write-Mode -IsElevated:$IsElevated
 # ------------------------- #
 # Report Output Paths       #
 # ------------------------- #
-# Elevated (admin / SYSTEM / RMM): land in $env:TEMP
-# Non-elevated (user context):     land in Downloads — accessible, not affected by OneDrive sync paths
-$ReportDir = if ($IsElevated) { $env:TEMP } else { "$env:USERPROFILE\Downloads" }
-if (-not (Test-Path $ReportDir)) {
+# Elevated (admin / SYSTEM / RMM): land in $env:TEMP; fall back to C:\Windows\Temp if
+# $env:TEMP is unset (can occur in some RMM SYSTEM execution contexts).
+# Non-elevated (user context): land in Downloads — accessible, not affected by OneDrive sync paths
+if ($IsElevated) {
+    $ReportDir = if ($env:TEMP) { $env:TEMP } else { "C:\Windows\Temp" }
+} else {
+    $ReportDir = if ($env:USERPROFILE) { "$env:USERPROFILE\Downloads" } else { "C:\Windows\Temp" }
+}
+if ($ReportDir -and -not (Test-Path -LiteralPath $ReportDir -ErrorAction SilentlyContinue)) {
     New-Item -ItemType Directory -Path $ReportDir -Force -ErrorAction SilentlyContinue | Out-Null
 }
 $HtmlReportPath     = Join-Path $ReportDir "${ComputerName}-Audit.html"
