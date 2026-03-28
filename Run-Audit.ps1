@@ -1396,6 +1396,7 @@ try {
 
 Log "INIT: entered main try block"
 
+if (-not $Silent) {
 # Banner - Base64 encoded to keep .ps1 pure ASCII (PS 5.1 compat)
 $BannerWindowsB64 = "4paI4paI4pWXICAgIOKWiOKWiOKVl+KWiOKWiOKVl+KWiOKWiOKWiOKVlyAgIOKWiOKWiOKVl+KWiOKWiOKWiOKWiOKWiOKWiOKVlyAg4paI4paI4paI4paI4paI4paI4pWXIOKWiOKWiOKVlyAgICDilojilojilZfilojilojilojilojilojilojilojilZcK4paI4paI4pWRICAgIOKWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKWiOKWiOKVlyAg4paI4paI4pWR4paI4paI4pWU4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWRICAgIOKWiOKWiOKVkeKWiOKWiOKVlOKVkOKVkOKVkOKVkOKVnQrilojilojilZEg4paI4pWXIOKWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKVlOKWiOKWiOKVlyDilojilojilZHilojilojilZEgIOKWiOKWiOKVkeKWiOKWiOKVkSAgIOKWiOKWiOKVkeKWiOKWiOKVkSDilojilZcg4paI4paI4pWR4paI4paI4paI4paI4paI4paI4paI4pWXCuKWiOKWiOKVkeKWiOKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKVkeKVmuKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKVkSAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWR4paI4paI4paI4pWX4paI4paI4pWR4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWRCuKVmuKWiOKWiOKWiOKVlOKWiOKWiOKWiOKVlOKVneKWiOKWiOKVkeKWiOKWiOKVkSDilZrilojilojilojilojilZHilojilojilojilojilojilojilZTilZ3ilZrilojilojilojilojilojilojilZTilZ3ilZrilojilojilojilZTilojilojilojilZTilZ3ilojilojilojilojilojilojilojilZEKIOKVmuKVkOKVkOKVneKVmuKVkOKVkOKVnSDilZrilZDilZ3ilZrilZDilZ0gIOKVmuKVkOKVkOKVkOKVneKVmuKVkOKVkOKVkOKVkOKVkOKVnSAg4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWdICDilZrilZDilZDilZ3ilZrilZDilZDilZ0g4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWd"
 $BannerToolB64 = "IOKWiOKWiOKWiOKWiOKWiOKVlyDilojilojilZcgICDilojilojilZfilojilojilojilojilojilojilZcg4paI4paI4pWX4paI4paI4paI4paI4paI4paI4paI4paI4pWXICAgIOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKVlyDilojilojilojilojilojilojilZcgIOKWiOKWiOKWiOKWiOKWiOKWiOKVlyDilojilojilZcgICAgIArilojilojilZTilZDilZDilojilojilZfilojilojilZEgICDilojilojilZHilojilojilZTilZDilZDilojilojilZfilojilojilZHilZrilZDilZDilojilojilZTilZDilZDilZ0gICAg4pWa4pWQ4pWQ4paI4paI4pWU4pWQ4pWQ4pWd4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWRICAgICAK4paI4paI4paI4paI4paI4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICDilojilojilZHilojilojilZEgICDilojilojilZEgICAgICAgICAg4paI4paI4pWRICAg4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAgICAK4paI4paI4pWU4pWQ4pWQ4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICDilojilojilZHilojilojilZEgICDilojilojilZEgICAgICAgICAg4paI4paI4pWRICAg4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWRICAgICAK4paI4paI4pWRICDilojilojilZHilZrilojilojilojilojilojilojilZTilZ3ilojilojilojilojilojilojilZTilZ3ilojilojilZEgICDilojilojilZEgICAgICAgICAg4paI4paI4pWRICAg4pWa4paI4paI4paI4paI4paI4paI4pWU4pWd4pWa4paI4paI4paI4paI4paI4paI4pWU4pWd4paI4paI4paI4paI4paI4paI4paI4pWXCuKVmuKVkOKVnSAg4pWa4pWQ4pWdIOKVmuKVkOKVkOKVkOKVkOKVkOKVnSDilZrilZDilZDilZDilZDilZDilZ0g4pWa4pWQ4pWdICAg4pWa4pWQ4pWdICAgICAgICAgIOKVmuKVkOKVnSAgICDilZrilZDilZDilZDilZDilZDilZ0gIOKVmuKVkOKVkOKVkOKVkOKVkOKVnSDilZrilZDilZDilZDilZDilZDilZDilZ0="
@@ -1434,6 +1435,7 @@ try {
 } catch { }
 Write-Host "  Starting System Audit for $ComputerName" -ForegroundColor Cyan
 Write-Host ""
+} # end if (-not $Silent) banner block
 Log "INIT: banner complete"
 Log "Audit started for $ComputerName (v$ScriptVersion)"
 
@@ -1445,12 +1447,12 @@ $WantUpdate       = $UpdateAll -or $UpdateScript -or $UpdateExe
 $WantUpdateScript = $UpdateAll -or $UpdateScript
 $WantUpdateExe    = $UpdateAll -or $UpdateExe
 
-# Check for updates
-$UpdateInfo = Test-ForUpdate
+# Check for updates - skipped in Silent mode unless an update flag was explicitly passed
+$UpdateInfo = if ($WantUpdate -or -not $Silent) { Test-ForUpdate } else { $null }
 if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
-    if ($WantUpdate -or $Silent) {
-        # Explicit update request, or -Silent mode (auto-update script only)
-        $doScript = $WantUpdateScript -or $Silent
+    if ($WantUpdate) {
+        # Explicit update request
+        $doScript = $WantUpdateScript
         $doExe    = $WantUpdateExe
 
         Write-Host ("    Updating: {0} -> {1}" -f $UpdateInfo.CurrentVersion, $UpdateInfo.LatestVersion) -ForegroundColor Cyan
