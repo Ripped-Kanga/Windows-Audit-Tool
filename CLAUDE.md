@@ -243,6 +243,20 @@ The workflow validates that `$ScriptVersion` matches the tag before compiling, s
 
 > **For AI assistants:** `$ScriptVersion` must **always** match the branch version. When working on branch `vX.Y.Z`, ensure `$ScriptVersion = "X.Y.Z"` before any PR is merged. This is non-negotiable — the GitHub Actions release workflow will reject a mismatched version.
 
+### Versioning Convention
+
+Use standard three-part semver: `major.minor.patch` (e.g. `1.3.2`).
+
+**For hotfix / sub-releases, use a fourth digit: `major.minor.patch.hotfix`** (e.g. `1.3.2.1`).
+
+Do **not** use hyphenated suffixes like `v1.3.2-1`. The self-update mechanism and `RMM-Atera-Deploy.ps1` both use `[System.Version]` for version comparison, which only accepts up to four numeric components (`major.minor.build.revision`). A hyphen causes a parse failure and falls back to unreliable string comparison.
+
+| Format | Example | `[System.Version]` | Notes |
+|---|---|---|---|
+| Three-part | `1.3.2` | ✅ | Standard release |
+| Four-part | `1.3.2.1` | ✅ | Hotfix / sub-release |
+| Hyphenated | `1.3.2-1` | ❌ | Do not use |
+
 The self-update mechanism looks for `.ps1` and `.exe` assets attached to the latest GitHub Release.
 
 ---
