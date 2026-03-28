@@ -27,6 +27,20 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "
 .\Run-Audit.exe -Silent -CustomerName "Acme Corp"
 ```
 
+**Option 3a — Atera with `RMM-Atera-Deploy.ps1` (recommended for Atera):**
+
+Upload `RMM-Atera-Deploy.ps1` once to Atera. It automatically downloads and caches the latest `Run-Audit.ps1` from GitHub Releases on each run, so you never need to update the Atera script when a new version is released.
+
+```powershell
+# Atera script body — no arguments needed for a basic run:
+# (RMM-Atera-Deploy.ps1 injects -Silent automatically)
+
+# With Hudu integration:
+-HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Audit Reports"
+```
+
+Set the Atera script execution policy to `Bypass` and the timeout to **600 seconds**. See [`RMM-Atera-Deploy.ps1`](RMM-Atera-Deploy.ps1) for full setup notes.
+
 **Option 4 — With Hudu integration (upload report directly to Hudu):**
 ```powershell
 .\Run-Audit.ps1 -HuduReport `
@@ -43,12 +57,14 @@ The script will request administrator privileges via UAC automatically in intera
 **Customer name:** In interactive mode the script prompts for a customer/business name after startup. Press ENTER to skip. In `-Silent` mode, pass `-CustomerName "Name"` to include it. When provided, the name appears in the report title, HTML heading, and output filename. When using `-HuduReport`, the customer name is automatically resolved from the Hudu company slug, so `-CustomerName` is not required.
 
 **Outputs:**
-| File | Path |
-|---|---|
-| HTML report | `C:\Temp\<CustomerName> - <ComputerName>-Audit.html` |
-| HTML report (no customer name) | `C:\Temp\<ComputerName>-Audit.html` |
-| Operational log | `C:\Windows\Temp\AuditLog.txt` |
-| Hudu preview (when `-HuduReport` used) | `C:\Temp\<CustomerName> - <ComputerName>-Audit-Hudu.html` |
+| File | Elevated (admin / SYSTEM / RMM) | Non-elevated (user context) |
+|---|---|---|
+| HTML report | `%TEMP%\<CustomerName> - <ComputerName>-Audit.html` | `%USERPROFILE%\Downloads\<CustomerName> - <ComputerName>-Audit.html` |
+| HTML report (no customer name) | `%TEMP%\<ComputerName>-Audit.html` | `%USERPROFILE%\Downloads\<ComputerName>-Audit.html` |
+| Operational log | `C:\Windows\Temp\AuditLog.txt` | `C:\Windows\Temp\AuditLog.txt` |
+| Hudu preview (when `-HuduReport` used) | `%TEMP%\<CustomerName> - <ComputerName>-Audit-Hudu.html` | `%USERPROFILE%\Downloads\<CustomerName> - <ComputerName>-Audit-Hudu.html` |
+
+> When running elevated interactively, `%TEMP%` typically resolves to `C:\Users\<user>\AppData\Local\Temp`. When running as SYSTEM (Atera, Intune), it resolves to `C:\Windows\Temp`. The Downloads folder is used for non-elevated runs because it is reliably accessible to the current user and is not subject to OneDrive sync folder path variations that affect Documents and Desktop.
 
 ---
 
@@ -77,7 +93,7 @@ The script checks the [GitHub Releases](https://github.com/Ripped-Kanga/Windows-
 
 After updating the `.ps1`, the script automatically re-launches the new version and runs the audit.
 
-**Silent mode (`-Silent`):** Script updates are applied automatically without prompting. Only the `.ps1` is updated (the `.exe` is not used in RMM/MDM deployments that invoke the script directly via `powershell.exe`).
+**Silent mode (`-Silent`):** The update check is skipped entirely. No GitHub API call is made and no update is applied. To update during a Silent deployment, pass an explicit update switch alongside `-Silent` (e.g. `.\Run-Audit.ps1 -Silent -UpdateScript` or `.\Run-Audit.ps1 -Silent -UpdateAll`). The banner is also suppressed in Silent mode — no console output is rendered until the audit sections begin.
 
 **No internet / GitHub unreachable:** The update check silently fails and the audit proceeds with the current version. Update failures never block the audit.
 
