@@ -3,7 +3,8 @@
     System Audit Script with progress output + security baseline.
 
     Output:
-      - HTML report written to C:\Temp\<COMPUTER>-Audit.html
+      - HTML report written to %TEMP%\<COMPUTER>-Audit.html (elevated)
+                            or %USERPROFILE%\Downloads\<COMPUTER>-Audit.html (non-elevated)
       - Operational log written to C:\Windows\Temp\AuditLog.txt
 #>
 
@@ -46,7 +47,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.0"
+$ScriptVersion = "1.3.2"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -56,17 +57,9 @@ if (-not $ComputerName -or $ComputerName -eq "") {
     $ComputerName = "UnknownComputer"
 }
 
-$HtmlReportPath     = "C:\Temp\${ComputerName}-Audit.html"
-$HuduHtmlReportPath = "C:\Temp\${ComputerName}-Audit-Hudu.html"
-$LogPath            = "C:\Windows\Temp\AuditLog.txt"
-
-# Ensure directories exist
-try {
-    New-Item -ItemType Directory -Path "C:\Temp" -Force -ErrorAction Stop | Out-Null
-} catch {
-    Write-Host "FATAL: Could not create C:\Temp - $_" -ForegroundColor Red
-    exit 2
-}
+$LogPath = "C:\Windows\Temp\AuditLog.txt"
+# $HtmlReportPath and $HuduHtmlReportPath are set after the elevation check,
+# once $IsElevated is known (elevated → $env:TEMP, non-elevated → Downloads).
 
 # ------------------------- #
 # Logging Helper            #
@@ -1309,7 +1302,7 @@ function Publish-HuduAsset {
         if (-not $layout) {
             Write-Action -What "Asset layout '$LayoutName' not found in Hudu." -Kind bad
             Log "Hudu: asset layout '$LayoutName' not found"
-            return $false
+            return [pscustomobject]@{ AssetCreated = $false; FileAttached = $false }
         }
         $layoutId = $layout.id
         Write-Action -What ("Found layout: {0} (ID {1})" -f $layout.name, $layoutId) -Kind ok
@@ -1326,7 +1319,7 @@ function Publish-HuduAsset {
         if (-not $richField) {
             Write-Action -What "No RichText field found in layout '$LayoutName'." -Kind bad
             Log "Hudu: no RichText field in layout '$LayoutName'"
-            return $false
+            return [pscustomobject]@{ AssetCreated = $false; FileAttached = $false }
         }
         # Hudu field keys: label lowercased, spaces to underscores
         $fieldKey = ($richField.label -replace '[^a-zA-Z0-9\s]', '' -replace '\s+', '_').ToLower()
@@ -1352,6 +1345,7 @@ function Publish-HuduAsset {
             Log ("Hudu: asset '{0}' created (ID {1})" -f $AssetName, $assetId)
 
             # Attach file if path provided
+            $fileAttached = $false
             if ($AttachmentPath -and (Test-Path -LiteralPath $AttachmentPath)) {
                 $fileName = Split-Path -Leaf $AttachmentPath
                 Write-Action -What "Attaching report: $fileName" -Kind run
@@ -1359,16 +1353,17 @@ function Publish-HuduAsset {
                 if ($uploaded) {
                     Write-Action -What "Attachment uploaded successfully" -Kind ok
                     Log ("Hudu: attached '{0}' to asset {1}" -f $fileName, $assetId)
+                    $fileAttached = $true
                 } else {
                     Write-Action -What "Attachment upload failed (asset was still created)." -Kind warn
                 }
             }
-            return $true
+            return [pscustomobject]@{ AssetCreated = $true; FileAttached = $fileAttached }
         }
         # Unexpected response shape
         Write-Action -What "Asset may have been created but response was unexpected." -Kind warn
         Log ("Hudu: unexpected response from asset create: {0}" -f ($result | ConvertTo-Json -Depth 3 -Compress))
-        return $true
+        return [pscustomobject]@{ AssetCreated = $true; FileAttached = $false }
     }
     catch {
         $errMsg = $_.Exception.Message
@@ -1383,7 +1378,7 @@ function Publish-HuduAsset {
         Write-Action -What ("Hudu API error: {0}" -f $errMsg) -Kind bad
         Log ("Hudu: API error - {0}" -f $errMsg)
         Log-ExceptionDetail $_
-        return $false
+        return [pscustomobject]@{ AssetCreated = $false; FileAttached = $false }
     }
 }
 
@@ -1515,6 +1510,19 @@ if ($IsElevated) {
 Write-Mode -IsElevated:$IsElevated
 
 # ------------------------- #
+# Report Output Paths       #
+# ------------------------- #
+# Elevated (admin / SYSTEM / RMM): land in $env:TEMP
+# Non-elevated (user context):     land in Downloads — accessible, not affected by OneDrive sync paths
+$ReportDir = if ($IsElevated) { $env:TEMP } else { "$env:USERPROFILE\Downloads" }
+if (-not (Test-Path $ReportDir)) {
+    New-Item -ItemType Directory -Path $ReportDir -Force -ErrorAction SilentlyContinue | Out-Null
+}
+$HtmlReportPath     = Join-Path $ReportDir "${ComputerName}-Audit.html"
+$HuduHtmlReportPath = Join-Path $ReportDir "${ComputerName}-Audit-Hudu.html"
+Log ("Report output directory: {0}" -f $ReportDir)
+
+# ------------------------- #
 # Hudu Parameter Validation  #
 # ------------------------- #
 $HuduValid = $false
@@ -1584,8 +1592,8 @@ if (-not $CustomerName -and -not $Silent) {
 if ($CustomerName) {
     Write-Action -What ("Customer: {0}" -f $CustomerName) -Kind ok
     Log ("Customer name: {0}" -f $CustomerName)
-    $HtmlReportPath     = "C:\Temp\${CustomerName} - ${ComputerName}-Audit.html"
-    $HuduHtmlReportPath = "C:\Temp\${CustomerName} - ${ComputerName}-Audit-Hudu.html"
+    $HtmlReportPath     = Join-Path $ReportDir "${CustomerName} - ${ComputerName}-Audit.html"
+    $HuduHtmlReportPath = Join-Path $ReportDir "${CustomerName} - ${ComputerName}-Audit-Hudu.html"
 }
 
 # ============================================================
@@ -3405,13 +3413,23 @@ $huduBodyFragment
     # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
     # These can originate from registry software entries containing embedded null bytes.
     $huduBodyFragment = $huduBodyFragment -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
-    $huduSuccess = Publish-HuduAsset `
+    $huduResult = Publish-HuduAsset `
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
         -HtmlContent    $huduBodyFragment `
         -AttachmentPath $HtmlReportPath
-    if ($huduSuccess) {
+    if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
+        if ($huduResult.FileAttached) {
+            # Both report content and file attachment succeeded — local copies are redundant
+            Remove-Item -LiteralPath $HtmlReportPath     -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $HuduHtmlReportPath -Force -ErrorAction SilentlyContinue
+            Write-Action -What "Local report files removed (content preserved in Hudu)" -Kind ok
+            Log "Hudu: local report files deleted after successful upload and attachment"
+        } else {
+            Write-Action -What "Attachment upload failed — local report files retained" -Kind warn
+            Log "Hudu: local report files retained (attachment did not succeed)"
+        }
     } else {
         Write-Host "  Hudu upload failed. The local HTML report is still available." -ForegroundColor Yellow
     }
