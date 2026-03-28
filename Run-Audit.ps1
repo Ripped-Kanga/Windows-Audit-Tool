@@ -47,7 +47,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.1"
+$ScriptVersion = "1.3.2.2"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -59,7 +59,7 @@ if (-not $ComputerName -or $ComputerName -eq "") {
 
 $LogPath = "C:\Windows\Temp\AuditLog.txt"
 # $HtmlReportPath and $HuduHtmlReportPath are set after the elevation check,
-# once $IsElevated is known (elevated → $env:TEMP, non-elevated → Downloads).
+# once $IsElevated is known (elevated -> $env:TEMP, non-elevated -> Downloads).
 
 # ------------------------- #
 # Logging Helper            #
@@ -1514,7 +1514,7 @@ Write-Mode -IsElevated:$IsElevated
 # ------------------------- #
 # Elevated (admin / SYSTEM / RMM): land in $env:TEMP; fall back to C:\Windows\Temp if
 # $env:TEMP is unset (can occur in some RMM SYSTEM execution contexts).
-# Non-elevated (user context): land in Downloads — accessible, not affected by OneDrive sync paths
+# Non-elevated (user context): land in Downloads - accessible, not affected by OneDrive sync paths
 if ($IsElevated) {
     $ReportDir = if ($env:TEMP) { $env:TEMP } else { "C:\Windows\Temp" }
 } else {
@@ -1661,7 +1661,7 @@ if ($boot -ne "Error" -and $boot) {
 
 Html-AddKV -Pairs $kv
 
-# Uptime health check — machines that haven't rebooted miss kernel-level patches
+# Uptime health check - machines that haven't rebooted miss kernel-level patches
 if ($boot -ne "Error" -and $boot) {
     if ($uptime.TotalDays -gt 30) {
         Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
@@ -1772,7 +1772,7 @@ if ($patches -ne "Error" -and $patches) {
     $patchList  = @($patches) | Sort-Object InstalledOn -Descending
     $patchCount = $patchList.Count
 
-    # Patch currency check — how recently was the last patch applied?
+    # Patch currency check - how recently was the last patch applied?
     $latestPatch = $patchList | Where-Object { $_.InstalledOn } | Select-Object -First 1
     if ($latestPatch -and $latestPatch.InstalledOn) {
         $daysSincePatch = [math]::Floor((New-TimeSpan -Start $latestPatch.InstalledOn).TotalDays)
@@ -1955,7 +1955,7 @@ if ($ipConfigs -ne "Error" -and $ipConfigs) {
             ($ip4List | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" }) -join ' | '
         } else { 'N/A' }
 
-        # IPv6 — globals first, then link-local
+        # IPv6 - globals first, then link-local
         $ip6List = @($cfg.IPv6Address | Where-Object { $_ })
         $ip6Parts = @()
         foreach ($a in ($ip6List | Where-Object { $_.IPAddress -notmatch '^fe80' })) {
@@ -2008,7 +2008,7 @@ if ($ipConfigs -ne "Error" -and $ipConfigs) {
 
         Write-Action -What ("  $adName | $ip4 | GW $gw4") -Kind info
 
-        $heading = if ($adDesc -and $adDesc -ne $adName) { "$adName — $adDesc" } else { $adName }
+        $heading = if ($adDesc -and $adDesc -ne $adName) { "$adName - $adDesc" } else { $adName }
         Html-Add ("<h3>{0}</h3>" -f (Html-Enc $heading))
 
         $kv = [ordered]@{
@@ -3510,7 +3510,7 @@ $huduBodyFragment
     Log "STEP Hudu: Uploading report to Hudu"
     $huduAssetDate = Get-Date -Format 'dd/MM/yyyy'
     $huduAssetName = "$ComputerName - $huduAssetDate"
-    # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) — they are
+    # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) - they are
     # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
     # These can originate from registry software entries containing embedded null bytes.
     $huduBodyFragment = $huduBodyFragment -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
@@ -3522,13 +3522,13 @@ $huduBodyFragment
     if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
         if ($huduResult.FileAttached) {
-            # Both report content and file attachment succeeded — local copies are redundant
+            # Both report content and file attachment succeeded - local copies are redundant
             Remove-Item -LiteralPath $HtmlReportPath     -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $HuduHtmlReportPath -Force -ErrorAction SilentlyContinue
             Write-Action -What "Local report files removed (content preserved in Hudu)" -Kind ok
             Log "Hudu: local report files deleted after successful upload and attachment"
         } else {
-            Write-Action -What "Attachment upload failed — local report files retained" -Kind warn
+            Write-Action -What "Attachment upload failed - local report files retained" -Kind warn
             Log "Hudu: local report files retained (attachment did not succeed)"
         }
     } else {
