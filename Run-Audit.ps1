@@ -952,9 +952,8 @@ function Html-AddNote {
         [string]$KbTitle
     )
     if ($Kind -in @('good','warn','bad')) { Set-SectionHealth -Status $Kind }
-    # Add to the global findings accumulator when a KB link is provided.
-    # Only KB-annotated findings are surfaced — error/diagnostic notes without a KB URL are excluded.
-    if ($Kind -in @('warn','bad') -and $KbUrl -and $script:CurrentSectionId) {
+    # Add all warn/bad findings to the global accumulator; KB link is optional and rendered where present.
+    if ($Kind -in @('warn','bad') -and $script:CurrentSectionId) {
         $script:GlobalFindings.Add([pscustomobject]@{
             Section   = $script:CurrentSectionTitle
             SectionId = $script:CurrentSectionId
