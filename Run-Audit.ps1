@@ -2764,7 +2764,7 @@ $eventLogs = Safe-Invoke {
 
 if ($eventLogs -ne "Error" -and $eventLogs) {
     $logList      = @($eventLogs)
-    $fullLogs     = @($logList | Where-Object { $_.IsFull -eq $true })
+    $fullLogs     = @($logList | Where-Object { $_.IsFull -eq $true -and $_.RetentionMode -ne 'Circular (overwrites)' })
     $disabledLogs = @($logList | Where-Object { $_.Enabled -eq $false })
 
     if ($fullLogs.Count -gt 0) {
@@ -2791,7 +2791,7 @@ if ($eventLogs -ne "Error" -and $eventLogs) {
     ) -RowClass {
         param($r)
         if ($r.Enabled -eq $false -or $r.Enabled -eq "Error") { return 'sev-bad' }
-        if ($r.IsFull -eq $true) { return 'sev-warn' }
+        if ($r.IsFull -eq $true -and $r.RetentionMode -ne 'Circular (overwrites)') { return 'sev-warn' }
         return 'sev-good'
     }
 }
