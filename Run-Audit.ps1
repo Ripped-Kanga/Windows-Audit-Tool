@@ -1688,19 +1688,12 @@ Write-Step -Index 1 -Total 13 -Title "Collecting system information..."
 Write-Action -What "Running: System Information (CIM/Registry)" -Kind run
 Html-StartSection "System Information"
 
-$kv = [ordered]@{}
-
+# --- Data collection ---
 $compName = Safe-Invoke { $env:COMPUTERNAME } "Computer Name"
-$kv["Computer Name"] = $compName
 Write-Action -What ("Computer Name: {0}" -f $compName) -Kind ok
 
 $os = Safe-Invoke { Get-CimInstance Win32_OperatingSystem } "Operating System"
-if ($os -ne "Error") {
-    $kv["Operating System"] = $os.Caption
-    $kv["OS Version"]       = $os.Version
-    $kv["Build Number"]     = $os.BuildNumber
-    $kv["Architecture"]     = $os.OSArchitecture
-
+if ($os -ne "Error" -and $os) {
     Write-Action -What ("OS: {0} (v{1}, build {2}, {3})" -f $os.Caption, $os.Version, $os.BuildNumber, $os.OSArchitecture) -Kind ok
 } else {
     Write-Action -What "Operating System: Error" -Kind warn
@@ -1710,49 +1703,44 @@ $winVer = Safe-Invoke {
     Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" |
         Select-Object -Property ReleaseId, DisplayVersion
 } "Feature Version"
-
-if ($winVer -ne "Error") {
-    $ver = if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId }
-    $kv["Windows Feature Version"] = $ver
-}
+$featureVer = if ($winVer -ne "Error" -and $winVer) { if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId } } else { $null }
 
 $cpu = Safe-Invoke {
     Get-CimInstance Win32_Processor |
         Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors
 } "CPU Info"
 
-if ($cpu -ne "Error") {
-    $kv["Processor"]          = $cpu.Name
-    $kv["Cores"]              = $cpu.NumberOfCores
-    $kv["Logical Processors"] = $cpu.NumberOfLogicalProcessors
-}
-
 $mem = Safe-Invoke { Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory } "Memory Info"
-if ($mem -ne "Error") {
-    $ramGB = [math]::Round($mem.TotalPhysicalMemory / 1GB, 2)
-    $kv["Installed RAM (GB)"] = $ramGB
-}
+$ramGB = if ($mem -ne "Error" -and $mem) { [math]::Round($mem.TotalPhysicalMemory / 1GB, 2) } else { $null }
 
-$boot = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
-if ($boot -ne "Error" -and $boot) {
-    $uptime = New-TimeSpan -Start $boot
-    $kv["Uptime"] = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
-}
-
-Html-AddKV -Pairs $kv
-
-# Uptime health check - machines that haven't rebooted miss kernel-level patches
-if ($boot -ne "Error" -and $boot) {
-    if ($uptime.TotalDays -gt 30) {
-        Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
-        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn `
-            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
-    } else {
-        Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
-    }
-}
+$boot   = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
+$uptime = if ($boot -ne "Error" -and $boot) { New-TimeSpan -Start $boot } else { $null }
 
 $disks = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
+
+# --- Operating System ---
+Html-Add "<h3>Operating System</h3>"
+$osKv = [ordered]@{ "Computer Name" = $compName }
+if ($os -ne "Error" -and $os) {
+    $osKv["Operating System"] = $os.Caption
+    if ($featureVer) { $osKv["Feature Version"] = $featureVer }
+    $osKv["Version"]          = $os.Version
+    $osKv["Build Number"]     = $os.BuildNumber
+    $osKv["Architecture"]     = $os.OSArchitecture
+}
+Html-AddKV -Pairs $osKv
+
+# --- Hardware ---
+Html-Add "<h3>Hardware</h3>"
+$hwKv = [ordered]@{}
+if ($cpu -ne "Error" -and $cpu) {
+    $hwKv["Processor"]          = $cpu.Name
+    $hwKv["Cores"]              = $cpu.NumberOfCores
+    $hwKv["Logical Processors"] = $cpu.NumberOfLogicalProcessors
+}
+if ($null -ne $ramGB) { $hwKv["Installed RAM (GB)"] = $ramGB }
+if ($hwKv.Count -gt 0) { Html-AddKV -Pairs $hwKv }
+
 if ($disks -ne "Error" -and $disks) {
     $diskList = @($disks) | ForEach-Object {
         [pscustomobject]@{
@@ -1766,6 +1754,22 @@ if ($disks -ne "Error" -and $disks) {
         @{ Header="Size (GB)"; Property="SizeGB" }
     )
     Html-EndDetails
+}
+
+# --- System Status ---
+Html-Add "<h3>System Status</h3>"
+if ($uptime) {
+    Html-AddKV -Pairs ([ordered]@{
+        "Uptime" = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
+    })
+    # Uptime health check - machines that haven't rebooted miss kernel-level patches
+    if ($uptime.TotalDays -gt 30) {
+        Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
+        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
+    } else {
+        Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
+    }
 }
 
 Html-EndSection
