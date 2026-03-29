@@ -53,7 +53,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.7"
+$ScriptVersion = "1.3.2.9"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -803,8 +803,10 @@ $Html     = New-Object System.Text.StringBuilder
 $HuduHtml = New-Object System.Text.StringBuilder
 $Toc = New-Object System.Collections.Generic.List[object]
 $SectionIdCounts = @{}
-$SectionHealth = @{}
-$CurrentSectionId = $null
+$SectionHealth       = @{}
+$GlobalFindings      = [System.Collections.Generic.List[object]]::new()
+$CurrentSectionId    = $null
+$CurrentSectionTitle = $null
 
 function Set-SectionHealth {
     param([ValidateSet('good','warn','bad')][string]$Status)
@@ -932,7 +934,8 @@ function Html-StartSection {
     param([string]$Title)
     $script:SectionNumber++
     $id = New-SectionId -Title $Title
-    $script:CurrentSectionId = $id
+    $script:CurrentSectionId    = $id
+    $script:CurrentSectionTitle = $Title
     $SectionHealth[$id] = 'good'
     $Toc.Add([pscustomobject]@{ Title = $Title; Id = $id; Number = $script:SectionNumber }) | Out-Null
     Html-Add "<div class='section'>"
@@ -944,9 +947,23 @@ function Html-EndSection { Html-Add "</details></div><!-- /section -->" }
 function Html-AddNote {
     param(
         [string]$Text,
-        [ValidateSet('info','good','warn','bad')][string]$Kind = 'info'
+        [ValidateSet('info','good','warn','bad')][string]$Kind = 'info',
+        [string]$KbUrl,
+        [string]$KbTitle
     )
     if ($Kind -in @('good','warn','bad')) { Set-SectionHealth -Status $Kind }
+    # Add to the global findings accumulator when a KB link is provided.
+    # Only KB-annotated findings are surfaced — error/diagnostic notes without a KB URL are excluded.
+    if ($Kind -in @('warn','bad') -and $KbUrl -and $script:CurrentSectionId) {
+        $script:GlobalFindings.Add([pscustomobject]@{
+            Section   = $script:CurrentSectionTitle
+            SectionId = $script:CurrentSectionId
+            Message   = $Text
+            Kind      = $Kind
+            KbUrl     = $KbUrl
+            KbTitle   = if ($KbTitle) { $KbTitle } else { $KbUrl }
+        })
+    }
     $klass = switch ($Kind) {
         'good' { 'callout callout-good' }
         'warn' { 'callout callout-warn' }
@@ -1729,7 +1746,8 @@ Html-AddKV -Pairs $kv
 if ($boot -ne "Error" -and $boot) {
     if ($uptime.TotalDays -gt 30) {
         Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
-        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn
+        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
     } else {
         Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
     }
@@ -1842,10 +1860,12 @@ if ($patches -ne "Error" -and $patches) {
         $daysSincePatch = [math]::Floor((New-TimeSpan -Start $latestPatch.InstalledOn).TotalDays)
         if ($daysSincePatch -gt 90) {
             Write-Action -What ("Last patch: {0} days ago (exceeds 90-day threshold)" -f $daysSincePatch) -Kind bad
-            Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Systems should be patched at least every 90 days." -f $daysSincePatch, $latestPatch.HotFixID) -Kind bad
+            Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Systems should be patched at least every 90 days." -f $daysSincePatch, $latestPatch.HotFixID) -Kind bad `
+                -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
         } elseif ($daysSincePatch -gt 30) {
             Write-Action -What ("Last patch: {0} days ago (exceeds 30-day threshold)" -f $daysSincePatch) -Kind warn
-            Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Consider applying recent updates." -f $daysSincePatch, $latestPatch.HotFixID) -Kind warn
+            Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Consider applying recent updates." -f $daysSincePatch, $latestPatch.HotFixID) -Kind warn `
+                -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
         } else {
             Html-AddNote -Text ("Last patch installed {0} days ago (KB: {1}). Patch currency is healthy." -f $daysSincePatch, $latestPatch.HotFixID) -Kind good
         }
@@ -1966,7 +1986,8 @@ if ($wuPolicy -ne "Error" -and $wuPolicy) {
         Html-Add "<tr><th>Update Source</th><td>Windows Update (direct / Microsoft)</td></tr>"
     }
     if ($wuPolicy.DisableWindowsUpdateAccess -eq 1) {
-        Html-AddNote -Text "Windows Update access is disabled by policy - users cannot manually check for updates." -Kind warn
+        Html-AddNote -Text "Windows Update access is disabled by policy - users cannot manually check for updates." -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/waas-wu-settings" -KbTitle "Windows Update policy settings"
     }
 }
 
@@ -2078,7 +2099,8 @@ else {
     if ($failedList -and @($failedList).Count -gt 0) {
         $fCount = @($failedList).Count
         Write-Action -What ("Failed updates (last 30 days): {0}" -f $fCount) -Kind bad
-        Html-AddNote -Text ("$fCount update installation(s) failed in the last 30 days.") -Kind bad
+        Html-AddNote -Text ("$fCount update installation(s) failed in the last 30 days.") -Kind bad `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-troubleshooting" -KbTitle "Windows Update troubleshooting"
         Html-StartDetails -Summary ("Failed Updates - Last 30 Days ({0})" -f $fCount)
         Html-AddTable -Items $failedList -Columns @(
             @{ Header="KB";      Property="KB" },
@@ -2259,7 +2281,8 @@ if ($shares -ne "Error" -and $shares) {
 
     if ($nonAdmin -and $nonAdmin.Count -gt 0) {
         Write-Action -What ("Non-admin SMB shares found: {0}" -f $nonAdmin.Count) -Kind warn
-        Html-AddNote -Text ("Non-admin SMB shares found: {0}" -f $nonAdmin.Count) -Kind warn
+        Html-AddNote -Text ("Non-admin SMB shares found: {0}" -f $nonAdmin.Count) -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/detect-enable-and-disable-smbv1-v2-v3" -KbTitle "SMB security guidance"
     }
     else {
         Write-Action -What "No non-admin SMB shares found." -Kind ok
@@ -2354,7 +2377,11 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
 
         $off = @($bitlocker) | Where-Object { $_.ProtectionStatus -ne 'On' -and $_.ProtectionStatus -ne 1 }
         if ($off.Count -gt 0) {
+            $offVols = ($off | ForEach-Object { $_.MountPoint }) -join ', '
             Write-Action -What ("BitLocker: {0} volume(s) not protected" -f $off.Count) -Kind warn
+            Html-AddNote -Text ("BitLocker protection is off on volume(s): {0}" -f $offVols) -Kind warn `
+                -KbUrl "https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/bitlocker/" `
+                -KbTitle "BitLocker overview"
         } else {
             Write-Action -What "BitLocker: Protection ON for all detected volumes" -Kind ok
         }
@@ -2388,7 +2415,8 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         Html-AddNote -Text "Secure Boot: Enabled" -Kind good
     }
     elseif ($secureBoot -eq $false) {
-        Html-AddNote -Text "Secure Boot: Disabled" -Kind warn
+        Html-AddNote -Text "Secure Boot: Disabled" -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/oem-secure-boot" -KbTitle "Secure Boot overview"
     }
     else {
         Html-AddNote -Text "Secure Boot: Not supported or unknown" -Kind info
@@ -2413,6 +2441,13 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             @{ Header="Default Inbound Action";  Property="Inbound" },
             @{ Header="Default Outbound Action"; Property="Outbound" }
         )
+        $fwOff = @($fw) | Where-Object { $_.Enabled -ne $true }
+        if ($fwOff.Count -gt 0) {
+            $fwOffNames = ($fwOff | ForEach-Object { $_.Name }) -join ', '
+            Html-AddNote -Text ("Windows Firewall disabled on profile(s): {0}" -f $fwOffNames) -Kind warn `
+                -KbUrl "https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/" `
+                -KbTitle "Windows Firewall overview"
+        }
     }
     else {
         Write-Action -What "Firewall profile query failed." -Kind warn
@@ -2515,6 +2550,13 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             @{ Header="Signatures"; Property="Signatures"; Raw=$true },
             @{ Header="State";      Property="State" }
         )
+        $avOffItems = @($avList) | Where-Object { ([UInt32]$_.productState -band 0xF000) -ne 0x1000 }
+        if ($avOffItems.Count -gt 0) {
+            $avOffNames = ($avOffItems | ForEach-Object { $_.displayName }) -join ', '
+            Html-AddNote -Text ("Anti-Virus product(s) not active: {0}" -f $avOffNames) -Kind bad `
+                -KbUrl "https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/microsoft-defender-antivirus-windows" `
+                -KbTitle "Microsoft Defender Antivirus"
+        }
     }
     else {
         Write-Action -What "Anti-Virus product query failed." -Kind warn
@@ -2567,7 +2609,8 @@ if ($localUsers -ne "Error" -and $localUsers) {
 
     if ($noPasswordReq.Count -gt 0) {
         Write-Action -What ("{0} enabled account(s) do not require a password" -f $noPasswordReq.Count) -Kind bad
-        Html-AddNote -Text ("{0} enabled account(s) do not require a password" -f $noPasswordReq.Count) -Kind bad
+        Html-AddNote -Text ("{0} enabled account(s) do not require a password" -f $noPasswordReq.Count) -Kind bad `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/password-must-meet-complexity-requirements" -KbTitle "Password complexity requirements"
     }
 
     $userRows = $userList | ForEach-Object {
@@ -2731,7 +2774,8 @@ if ($eventLogs -ne "Error" -and $eventLogs) {
     }
     if ($disabledLogs.Count -gt 0) {
         Write-Action -What ("{0} event log(s) disabled" -f $disabledLogs.Count) -Kind warn
-        Html-AddNote -Text ("{0} critical event log(s) disabled" -f $disabledLogs.Count) -Kind bad
+        Html-AddNote -Text ("{0} critical event log(s) disabled" -f $disabledLogs.Count) -Kind bad `
+            -KbUrl "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/appendix-l--events-to-monitor" -KbTitle "Windows event log monitoring"
     }
     if ($fullLogs.Count -eq 0 -and $disabledLogs.Count -eq 0) {
         Write-Action -What "All monitored event logs healthy" -Kind ok
@@ -2791,7 +2835,8 @@ if ($aadInfo -ne "Error" -and $aadInfo) {
         Html-AddNote -Text ("Device is joined to Microsoft Entra ID (Tenant: {0})." -f $(if ($aadInfo.TenantName -ne "N/A") { $aadInfo.TenantName } else { $aadInfo.TenantId })) -Kind good
     } else {
         Write-Action -What "Entra ID Joined: No" -Kind warn
-        Html-AddNote -Text "Device is not joined to Microsoft Entra ID. Most managed environments require Entra ID join for policy enforcement and conditional access." -Kind warn
+        Html-AddNote -Text "Device is not joined to Microsoft Entra ID. Most managed environments require Entra ID join for policy enforcement and conditional access." -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/entra/identity/devices/overview" -KbTitle "Microsoft Entra device identity"
     }
 }
 else {
@@ -3236,6 +3281,54 @@ foreach ($s in $e8Scores) {
     $e8Num++
 }
 [void]$scorecardHtml.AppendLine("</tbody></table>")
+
+# ---- E8 Issues Summary ----
+$e8BadItems  = @($e8Scores | Where-Object { $_.Badge -eq 'bad' })
+$e8WarnItems = @($e8Scores | Where-Object { $_.Badge -eq 'warn' })
+[void]$scorecardHtml.AppendLine("<h3>Issues Requiring Attention</h3>")
+if ($e8BadItems.Count -eq 0 -and $e8WarnItems.Count -eq 0) {
+    [void]$scorecardHtml.AppendLine("<div class='callout callout-good'>All Essential Eight controls are compliant. No critical issues or warnings identified.</div>")
+} else {
+    if ($e8BadItems.Count -gt 0) {
+        [void]$scorecardHtml.AppendLine("<div class='callout callout-bad'>")
+        [void]$scorecardHtml.AppendLine("<strong>Critical Issues</strong><ul>")
+        foreach ($item in $e8BadItems) {
+            [void]$scorecardHtml.AppendLine(("<li><strong>{0}</strong> &mdash; {1}</li>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$scorecardHtml.AppendLine("</ul></div>")
+    }
+    if ($e8WarnItems.Count -gt 0) {
+        [void]$scorecardHtml.AppendLine("<div class='callout callout-warn'>")
+        [void]$scorecardHtml.AppendLine("<strong>Warnings</strong><ul>")
+        foreach ($item in $e8WarnItems) {
+            [void]$scorecardHtml.AppendLine(("<li><strong>{0}</strong> &mdash; {1}</li>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$scorecardHtml.AppendLine("</ul></div>")
+    }
+}
+
+# Push E8 non-compliant controls to the global findings accumulator with KB links
+$e8KbMap = @{
+    'Application Control'        = @{ Url = 'https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/'; Title = 'App Control for Business' }
+    'Patch Applications'         = @{ Url = 'https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview'; Title = 'Windows Update overview' }
+    'Restrict Office Macros'     = @{ Url = 'https://learn.microsoft.com/en-us/deployoffice/security/internet-macros-blocked'; Title = 'Office macro security' }
+    'User Application Hardening' = @{ Url = 'https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/attack-surface-reduction'; Title = 'Attack Surface Reduction' }
+    'Restrict Admin Privileges'  = @{ Url = 'https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/'; Title = 'User Account Control' }
+    'Patch Operating Systems'    = @{ Url = 'https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview'; Title = 'Windows Update overview' }
+    'Multi-Factor Authentication'= @{ Url = 'https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/'; Title = 'Windows Hello for Business' }
+    'Regular Backups'            = @{ Url = 'https://learn.microsoft.com/en-us/windows-server/storage/file-server/volume-shadow-copy-service'; Title = 'Volume Shadow Copy Service' }
+}
+foreach ($item in (@($e8BadItems) + @($e8WarnItems))) {
+    $kb = $e8KbMap[$item.Control]
+    $script:GlobalFindings.Add([pscustomobject]@{
+        Section   = $script:CurrentSectionTitle
+        SectionId = $script:CurrentSectionId
+        Message   = ("{0} - {1}" -f $item.Control, $item.Status)
+        Kind      = $item.Badge
+        KbUrl     = if ($kb) { $kb.Url } else { $null }
+        KbTitle   = if ($kb) { $kb.Title } else { $null }
+    })
+}
 [void]$Html.Insert($e8ScorecardInsertPos, $scorecardHtml.ToString())
 
 # Also insert into HuduHtml with inline styles
@@ -3250,6 +3343,29 @@ foreach ($s in $e8Scores) {
     $e8Num2++
 }
 [void]$huduScorecard.AppendLine("</tbody></table>")
+
+# ---- Hudu E8 Issues Summary (flat <p> per item - avoids ActionText block-element restructuring) ----
+[void]$huduScorecard.AppendLine((Convert-ToHuduInline "<h3>Issues Requiring Attention</h3>"))
+if ($e8BadItems.Count -eq 0 -and $e8WarnItems.Count -eq 0) {
+    [void]$huduScorecard.AppendLine((Convert-ToHuduInline "<div class='callout callout-good'>All Essential Eight controls are compliant. No critical issues or warnings identified.</div>"))
+} else {
+    if ($e8BadItems.Count -gt 0) {
+        [void]$huduScorecard.AppendLine((Convert-ToHuduInline "<div class='callout callout-bad'>"))
+        [void]$huduScorecard.AppendLine("<strong>Critical Issues</strong>")
+        foreach ($item in $e8BadItems) {
+            [void]$huduScorecard.AppendLine(("<p style='margin:4px 0;'><strong>{0}</strong> &mdash; {1}</p>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$huduScorecard.AppendLine("</div>")
+    }
+    if ($e8WarnItems.Count -gt 0) {
+        [void]$huduScorecard.AppendLine((Convert-ToHuduInline "<div class='callout callout-warn'>"))
+        [void]$huduScorecard.AppendLine("<strong>Warnings</strong>")
+        foreach ($item in $e8WarnItems) {
+            [void]$huduScorecard.AppendLine(("<p style='margin:4px 0;'><strong>{0}</strong> &mdash; {1}</p>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$huduScorecard.AppendLine("</div>")
+    }
+}
 [void]$HuduHtml.Insert($e8ScorecardInsertPosHudu, $huduScorecard.ToString())
 
 # Set section health from E8 scorecard results
@@ -3336,6 +3452,38 @@ try {
         [void]$sb.AppendLine("</div>")
         [void]$sb.AppendLine("</div>")
         $scoreCardHtml = $sb.ToString()
+    }
+
+    # Build report-wide issues summary (bad/warn findings that have KB links)
+    $globalSummaryHtml = ""
+    if ($GlobalFindings.Count -gt 0) {
+        $gBad  = @($GlobalFindings | Where-Object { $_.Kind -eq 'bad' })
+        $gWarn = @($GlobalFindings | Where-Object { $_.Kind -eq 'warn' })
+        if ($gBad.Count -gt 0 -or $gWarn.Count -gt 0) {
+            $gSb = New-Object System.Text.StringBuilder
+            [void]$gSb.AppendLine("<div class='issues-summary'>")
+            [void]$gSb.AppendLine("<h2>Issues Requiring Attention</h2>")
+            if ($gBad.Count -gt 0) {
+                [void]$gSb.AppendLine("<div class='callout callout-bad'><strong>Critical Issues</strong><ul>")
+                foreach ($f in $gBad) {
+                    $kbLink  = if ($f.KbUrl) { " &rarr; <a href='{0}' target='_blank'>{1}</a>" -f (Html-Enc $f.KbUrl), (Html-Enc $f.KbTitle) } else { "" }
+                    $secLink = "<a href='#{0}'>{1}</a>" -f (Html-Enc $f.SectionId), (Html-Enc $f.Section)
+                    [void]$gSb.AppendLine(("<li><strong>{0}:</strong> {1}{2}</li>" -f $secLink, (Html-Enc $f.Message), $kbLink))
+                }
+                [void]$gSb.AppendLine("</ul></div>")
+            }
+            if ($gWarn.Count -gt 0) {
+                [void]$gSb.AppendLine("<div class='callout callout-warn'><strong>Warnings</strong><ul>")
+                foreach ($f in $gWarn) {
+                    $kbLink  = if ($f.KbUrl) { " &rarr; <a href='{0}' target='_blank'>{1}</a>" -f (Html-Enc $f.KbUrl), (Html-Enc $f.KbTitle) } else { "" }
+                    $secLink = "<a href='#{0}'>{1}</a>" -f (Html-Enc $f.SectionId), (Html-Enc $f.Section)
+                    [void]$gSb.AppendLine(("<li><strong>{0}:</strong> {1}{2}</li>" -f $secLink, (Html-Enc $f.Message), $kbLink))
+                }
+                [void]$gSb.AppendLine("</ul></div>")
+            }
+            [void]$gSb.AppendLine("</div>")
+            $globalSummaryHtml = $gSb.ToString()
+        }
     }
 
 $htmlContent = @"
@@ -3452,6 +3600,18 @@ h1{ margin:0; color:#fff; font-size:26px; font-weight:700; letter-spacing:-0.3px
   .score-card{ flex-direction:column; text-align:center; gap:20px; padding:20px; }
   .score-stats{ justify-content:center; }
 }
+
+/* ---- Issues Summary ---- */
+.issues-summary{
+  background:var(--card); border-radius:12px; padding:24px 28px;
+  border:1px solid var(--border); box-shadow:0 1px 3px rgba(0,0,0,.04);
+  margin:24px 0;
+}
+.issues-summary h2{ font-size:18px; font-weight:700; color:var(--accent); margin:0 0 14px; }
+.issues-summary .callout ul{ margin:6px 0 0 18px; padding:0; }
+.issues-summary .callout li{ margin:4px 0; font-size:13px; line-height:1.5; }
+.issues-summary .callout a{ color:inherit; text-decoration:none; font-weight:600; border-bottom:1px solid currentColor; }
+.issues-summary .callout a:hover{ opacity:0.8; }
 
 /* ---- Sections ---- */
 .section{
@@ -3584,6 +3744,8 @@ $updateNoticeHtml
   </div>
 
 $scoreCardHtml
+
+$globalSummaryHtml
 
 $($Html.ToString())
 
