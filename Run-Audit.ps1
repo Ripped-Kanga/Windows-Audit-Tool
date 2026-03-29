@@ -1797,27 +1797,44 @@ if ($apps -ne "Error" -and $apps) {
         Write-Action -What ("Applications de-duplicated: no duplicates found ({0})" -f $dedupCount) -Kind info
     }
 
-    $appsList = @($appsList) | Sort-Object DisplayName, DisplayVersion, Scope
-    $appCount = @($appsList).Count
+    $appsList   = @($appsList) | Sort-Object DisplayName, DisplayVersion, Scope
+    $appCount   = @($appsList).Count
 
-    Write-Action -What ("Applications found: {0}" -f $appCount) -Kind ok
-    Html-AddNote -Text ("Applications found: {0}" -f $appCount) -Kind info
+    $msSoftware      = @($appsList | Where-Object { $_.Publisher -match 'Microsoft Corporation' })
+    $thirdPartySoftware = @($appsList | Where-Object { $_.Publisher -notmatch 'Microsoft Corporation' })
 
-    Html-StartDetails -Summary ("Applications ({0})" -f $appCount)
-    Html-Add "<input type='text' id='sw-filter' placeholder='Filter software...' class='filter-box' onkeyup='filterSoftwareTable()'>"
-    Html-Add "<div id='sw-filter-count' class='small'></div>"
-    Html-AddTable -Items $appsList -Columns @(
+    Write-Action -What ("Applications found: {0} ({1} third-party, {2} Microsoft)" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind ok
+    Html-AddNote -Text ("Applications found: {0} — {1} third-party, {2} Microsoft" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind info
+
+    $swCols = @(
         @{ Header="Name";      Property="DisplayName" },
         @{ Header="Version";   Property="DisplayVersion" },
         @{ Header="Publisher"; Property="Publisher" },
         @{ Header="Scope";     Property="Scope" },
         @{ Header="Sources";   Property="Sources" }
     )
+
+    if ($thirdPartySoftware.Count -gt 0) {
+        Html-StartDetails -Summary ("Third-Party Software ({0})" -f $thirdPartySoftware.Count)
+        Html-Add "<input type='text' placeholder='Filter third-party software...' class='filter-box' onkeyup='filterTable(this)'>"
+        Html-Add "<div class='small'></div>"
+        Html-AddTable -Items $thirdPartySoftware -Columns $swCols
+        Html-EndDetails
+    }
+
+    if ($msSoftware.Count -gt 0) {
+        Html-StartDetails -Summary ("Microsoft Software ({0})" -f $msSoftware.Count)
+        Html-Add "<input type='text' placeholder='Filter Microsoft software...' class='filter-box' onkeyup='filterTable(this)'>"
+        Html-Add "<div class='small'></div>"
+        Html-AddTable -Items $msSoftware -Columns $swCols
+        Html-EndDetails
+    }
+
     Html-Add @"
 <script>
-function filterSoftwareTable(){
-  var f=document.getElementById('sw-filter').value.toLowerCase();
-  var tbl=document.getElementById('sw-filter').closest('details').querySelector('table');
+function filterTable(inp){
+  var f=inp.value.toLowerCase();
+  var tbl=inp.closest('details').querySelector('table');
   if(!tbl)return;
   var rows=tbl.querySelectorAll('tbody tr');
   var shown=0;
@@ -1827,12 +1844,11 @@ function filterSoftwareTable(){
     rows[i].style.display=match?'':'none';
     if(match)shown++;
   }
-  var c=document.getElementById('sw-filter-count');
+  var c=inp.nextElementSibling;
   c.textContent=f?'Showing '+shown+' of '+rows.length+' applications':'';
 }
 </script>
 "@
-    Html-EndDetails
 }
 else {
     Write-Action -What "Installed software inventory failed." -Kind warn
