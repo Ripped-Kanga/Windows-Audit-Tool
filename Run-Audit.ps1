@@ -53,7 +53,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.9"
+$ScriptVersion = "1.4.0.0"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -2970,36 +2970,70 @@ Html-Add "<h3>1. Application Control</h3>"
 
 $appLocker = Safe-Invoke {
     $policy = Get-AppLockerPolicy -Effective -ErrorAction Stop
-    $ruleCount = ($policy.RuleCollections | Measure-Object).Count
+    $collections = @($policy.RuleCollections)
+    $ruleCount   = $collections.Count
+    # Check if any collection is in Enforce mode (vs AuditOnly)
+    $enforceCount = @($collections | Where-Object { $_.EnforcementMode -eq 'Enabled' }).Count
+    $auditCount   = @($collections | Where-Object { $_.EnforcementMode -eq 'AuditOnly' }).Count
+    $modeLabel = if ($enforceCount -gt 0 -and $auditCount -eq 0) { 'Enforce' } elseif ($enforceCount -gt 0) { "Mixed (Enforce: $enforceCount, Audit: $auditCount)" } elseif ($auditCount -gt 0) { 'Audit only' } else { 'None' }
     [pscustomobject]@{
-        Configured = ($ruleCount -gt 0)
-        RuleCount  = $ruleCount
-        Detail     = if ($ruleCount -gt 0) { "AppLocker policy active ($ruleCount rule collection(s))" } else { "No AppLocker policy detected" }
+        Configured    = ($ruleCount -gt 0)
+        RuleCount     = $ruleCount
+        EnforceCount  = $enforceCount
+        ModeLabel     = $modeLabel
+        Detail        = if ($ruleCount -gt 0) { "AppLocker active ($ruleCount collection(s)) - Mode: $modeLabel" } else { "No AppLocker policy detected" }
     }
 } "AppLocker Policy"
 
 $wdac = Safe-Invoke {
-    $ciConfig = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config' -ErrorAction SilentlyContinue
-    $ciPolicy = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'  -ErrorAction SilentlyContinue
-    $found = ($null -ne $ciConfig) -or ($null -ne $ciPolicy)
+    $ciConfig  = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config' -ErrorAction SilentlyContinue
+    $ciPolicy  = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'  -ErrorAction SilentlyContinue
+    # Check for deployed SIPolicy.p7b file - strongest indicator of active WDAC policy
+    $policyFile = Test-Path "$env:WINDIR\System32\CodeIntegrity\SIPolicy.p7b" -ErrorAction SilentlyContinue
+    $found = ($null -ne $ciConfig) -or ($null -ne $ciPolicy) -or $policyFile
+    $detail = if ($policyFile) { "WDAC SIPolicy.p7b deployed" } elseif ($null -ne $ciConfig -or $null -ne $ciPolicy) { "WDAC CI registry key present (no SIPolicy.p7b found)" } else { "No WDAC policy detected" }
     [pscustomobject]@{
-        Configured = $found
-        Detail     = if ($found) { "WDAC Code Integrity policy registry key present" } else { "No WDAC policy registry key detected" }
+        Configured  = $found
+        PolicyFile  = $policyFile
+        Detail      = $detail
     }
 } "WDAC Detection"
 
-$appLockOk = ($appLocker -ne "Error") -and $appLocker -and $appLocker.Configured
-$wdacOk    = ($wdac      -ne "Error") -and $wdac      -and $wdac.Configured
-$acStatus  = if ($appLockOk -or $wdacOk) { "Detected" } else { "Not detected" }
-$acClass   = if ($appLockOk -or $wdacOk) { "sev-good" } else { "sev-bad" }
+# PowerShell execution policy (machine-level)
+$psExecPolicy = Safe-Invoke {
+    $pol = Get-ExecutionPolicy -Scope LocalMachine -ErrorAction SilentlyContinue
+    if ($null -eq $pol) { $pol = Get-ExecutionPolicy -ErrorAction SilentlyContinue }
+    $pol
+} "PS Execution Policy"
+$psExecLabel = if ($psExecPolicy -eq "Error" -or $null -eq $psExecPolicy) { "Query failed" } else { "$psExecPolicy" }
+$psExecClass = switch ($psExecPolicy) {
+    'Restricted'     { 'sev-good' }
+    'AllSigned'      { 'sev-good' }
+    'RemoteSigned'   { 'sev-warn' }
+    'Unrestricted'   { 'sev-bad'  }
+    'Bypass'         { 'sev-bad'  }
+    default          { 'sev-warn' }
+}
 
+$appLockOk   = ($appLocker -ne "Error") -and $appLocker -and $appLocker.Configured
+$appLockEnf  = $appLockOk -and $appLocker.EnforceCount -gt 0
+$wdacOk      = ($wdac -ne "Error") -and $wdac -and $wdac.Configured
+$acStatus    = if ($appLockEnf -or $wdacOk) { "Detected (Enforcing)" } elseif ($appLockOk -or $wdacOk) { "Detected (Audit only)" } else { "Not detected" }
+$acBadge     = if ($appLockEnf -or $wdacOk) { "good" } elseif ($appLockOk) { "warn" } else { "bad" }
+$acClass     = if ($acBadge -eq "good") { "sev-good" } elseif ($acBadge -eq "warn") { "sev-warn" } else { "sev-bad" }
+
+$appLockRowClass = if ($appLockEnf) { "sev-good" } elseif ($appLockOk) { "sev-warn" } else { "sev-bad" }
+$wdacRowClass    = if ($wdacOk) { "sev-good" } else { "sev-warn" }
+$appLockDetail   = if ($appLocker -ne "Error" -and $appLocker) { $appLocker.Detail } else { "Query failed" }
+$wdacDetail      = if ($wdac -ne "Error" -and $wdac) { $wdac.Detail } else { "Query failed" }
 Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>AppLocker</th><td>{1}</td></tr>" -f $acClass, (Html-Enc $(if ($appLocker -ne "Error" -and $appLocker) { $appLocker.Detail } else { "Query failed" })))
-Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f $acClass, (Html-Enc $(if ($wdac -ne "Error" -and $wdac) { $wdac.Detail } else { "Query failed" })))
-Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $(if ($appLockOk -or $wdacOk) { "good" } else { "bad" }), $acStatus)
+Html-Add ("<tr class='{0}'><th>AppLocker</th><td>{1}</td></tr>"          -f $appLockRowClass, (Html-Enc $appLockDetail))
+Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f $wdacRowClass, (Html-Enc $wdacDetail))
+Html-Add ("<tr class='{0}'><th>PowerShell Execution Policy</th><td>{1}</td></tr>" -f $psExecClass, (Html-Enc $psExecLabel))
+Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $acBadge, $acStatus)
 Html-Add "</tbody></table>"
-Write-Action -What ("Application Control: {0}" -f $acStatus) -Kind $(if ($appLockOk -or $wdacOk) { "ok" } else { "warn" })
-$e8Scores.Add([pscustomobject]@{ Control = "Application Control"; Status = $acStatus; Badge = if ($appLockOk -or $wdacOk) { "good" } else { "bad" } })
+Write-Action -What ("Application Control: {0}" -f $acStatus) -Kind $(if ($acBadge -eq "good") { "ok" } elseif ($acBadge -eq "warn") { "warn" } else { "warn" })
+$e8Scores.Add([pscustomobject]@{ Control = "Application Control"; Status = $acStatus; Badge = $acBadge })
 
 # ---- E8-2: Patch Applications ----
 Html-Add "<h3>2. Patch Applications</h3>"
@@ -3058,6 +3092,49 @@ if ($wuPolicy -ne "Error" -and $wuPolicy) {
         Html-Add ("<tr><th>Feature Update Deferral</th><td>{0} days (WUfB)</td></tr>" -f (Html-Enc $wuPolicy.DeferFeatureUpdatesPeriodInDays))
     }
 }
+# Browser version checks - Edge and Chrome registry keys
+$browserRows = [System.Collections.Generic.List[object]]::new()
+$browserPaths = @(
+    @{ Name = 'Microsoft Edge';   Key = 'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'; Val = 'pv' },
+    @{ Name = 'Microsoft Edge';   Key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'; Val = 'pv' },
+    @{ Name = 'Google Chrome';    Key = 'HKLM:\SOFTWARE\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}';         Val = 'pv' },
+    @{ Name = 'Google Chrome';    Key = 'HKLM:\SOFTWARE\WOW6432Node\Google\Update\Clients\{8A69D345-D564-463c-AFF1-A69D9E530F96}'; Val = 'pv' }
+)
+$seenBrowsers = @{}
+foreach ($bp in $browserPaths) {
+    if ($seenBrowsers[$bp.Name]) { continue }
+    $ver = Safe-Invoke {
+        (Get-ItemProperty -Path $bp.Key -Name $bp.Val -ErrorAction SilentlyContinue).($bp.Val)
+    } ("Browser version: $($bp.Name)")
+    if ($ver -ne "Error" -and $ver -and $ver -ne '0.0.0.0') {
+        $seenBrowsers[$bp.Name] = $true
+        # Parse major version for staleness check (warn if major < 3 months behind heuristic)
+        $major = 0
+        if ($ver -match '^(\d+)\.') { $major = [int]$Matches[1] }
+        # Use a rolling minimum: browsers auto-update, any version older than ~6 months is stale
+        # Edge and Chrome share similar major version cadence (~4 per year, currently ~130+)
+        # Flag warn if major version is below a reasonable floor (120 as of 2025)
+        $stale = ($major -gt 0 -and $major -lt 120)
+        $browserRows.Add([pscustomobject]@{
+            Browser  = $bp.Name
+            Version  = $ver
+            Major    = $major
+            Stale    = $stale
+        })
+    }
+}
+
+if ($browserRows.Count -gt 0) {
+    Html-Add "<h4>Installed Browsers</h4>"
+    Html-AddTable -Items $browserRows -Columns @(
+        @{ Header = "Browser";  Property = "Browser"  },
+        @{ Header = "Version";  Property = "Version"  }
+    ) -RowClass {
+        param($r)
+        if ($r.Stale) { "sev-warn" } else { "sev-good" }
+    }
+}
+
 Html-Add "</tbody></table>"
 Write-Action -What ("Patch currency: {0}" -f $(if ($null -ne $patchDays) { "$patchDays days since last hotfix" } else { "date unavailable" })) -Kind $(if ($patchClass -eq "sev-good") { "ok" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" })
 $e8PatchStatus = if ($patchClass -eq "sev-good") { "Current" } elseif ($patchClass -eq "sev-warn") { "Needs attention" } else { "Overdue" }
@@ -3076,6 +3153,11 @@ foreach ($app in $officeApps) {
     $polVal  = Safe-Invoke { (Get-ItemProperty -Path $polPath  -Name VBAWarnings -ErrorAction SilentlyContinue).VBAWarnings } "Office Macro Policy $app"
     $userVal = Safe-Invoke { (Get-ItemProperty -Path $userPath -Name VbaWarnings -ErrorAction SilentlyContinue).VbaWarnings } "Office Macro User $app"
 
+    # Internet-sourced macro block (BlockContentExecutionFromInternet = 1 blocks macros from internet-origin files)
+    $blockInternet = Safe-Invoke {
+        (Get-ItemProperty -Path $polPath -Name BlockContentExecutionFromInternet -ErrorAction SilentlyContinue).BlockContentExecutionFromInternet
+    } "Office Internet Macro Block $app"
+
     $effective = $null
     $source    = "Not configured"
     if ($polVal -ne "Error" -and $null -ne $polVal) {
@@ -3084,19 +3166,34 @@ foreach ($app in $officeApps) {
         $effective = $userVal; $source = "User setting"
     }
 
-    if ($null -ne $effective) {
+    # XL4 macro block (Excel only)
+    $xl4Block = $null
+    if ($app -eq 'Excel') {
+        $xl4Block = Safe-Invoke {
+            (Get-ItemProperty -Path $polPath -Name Excel4MacroSheets -ErrorAction SilentlyContinue).Excel4MacroSheets
+        } "XL4 Macro Block"
+    }
+
+    $blockInternetLabel = if ($blockInternet -eq "Error" -or $null -eq $blockInternet) { "" } elseif ($blockInternet -eq 1) { " | Internet macros: Blocked" } else { " | Internet macros: Allowed" }
+
+    if ($null -ne $effective -or ($app -eq 'Excel' -and $xl4Block -ne "Error" -and $null -ne $xl4Block)) {
         $label = switch ($effective) {
             1 { "Enable all macros (insecure)" }
             2 { "Disable with notification" }
             3 { "Signed macros only" }
             4 { "Disable all macros" }
-            default { "Unknown value ($effective)" }
+            default { if ($null -eq $effective) { "Not configured" } else { "Unknown value ($effective)" } }
         }
+        $xl4Label = if ($app -eq 'Excel') {
+            if ($xl4Block -eq 0) { " | XL4: Blocked" } elseif ($xl4Block -eq 1) { " | XL4: Allowed" } else { "" }
+        } else { "" }
         $officeResults.Add([pscustomobject]@{
             Application = $app
             Setting     = $effective
-            Description = $label
-            Source      = $source
+            Description = "$label$xl4Label$blockInternetLabel"
+            Source      = if ($null -ne $effective) { $source } else { "Group Policy" }
+            BadXl4      = ($app -eq 'Excel' -and $xl4Block -eq 1)
+            BadInternet = ($blockInternet -ne "Error" -and $blockInternet -eq 0)
         })
     }
 }
@@ -3108,20 +3205,21 @@ if ($officeResults.Count -gt 0) {
         @{ Header = "Source"; Property = "Source" }
     ) -RowClass {
         param($r)
-        switch ($r.Setting) {
-            1 { "sev-bad"  }
-            2 { "sev-warn" }
-            3 { "sev-good" }
-            4 { "sev-good" }
-            default { "sev-warn" }
-        }
+        if ($r.Setting -eq 1 -or $r.BadXl4 -or $r.BadInternet) { "sev-bad" }
+        elseif ($r.Setting -eq 2 -or $null -eq $r.Setting) { "sev-warn" }
+        else { "sev-good" }
     }
     Write-Action -What ("Office macro settings found for {0} application(s)" -f $officeResults.Count) -Kind info
 } else {
     Html-AddNote -Text "No Microsoft Office 2016/2019/365 macro settings detected. Office may not be installed, or no macro policy has been configured." -Kind info
     Write-Action -What "No Office macro settings detected" -Kind info
 }
-$e8MacroOk = ($officeResults.Count -gt 0) -and (@($officeResults | Where-Object { $_.Setting -eq 1 }).Count -eq 0)
+$e8MacroBad = ($officeResults.Count -gt 0) -and (
+    (@($officeResults | Where-Object { $_.Setting -eq 1 }).Count -gt 0) -or
+    (@($officeResults | Where-Object { $_.BadXl4 }).Count -gt 0) -or
+    (@($officeResults | Where-Object { $_.BadInternet }).Count -gt 0)
+)
+$e8MacroOk = ($officeResults.Count -gt 0) -and (-not $e8MacroBad)
 $e8MacroStatus = if ($officeResults.Count -eq 0) { "Not configured" } elseif ($e8MacroOk) { "Restricted" } else { "Insecure" }
 $e8MacroBadge  = if ($officeResults.Count -eq 0) { "warn" } elseif ($e8MacroOk) { "good" } else { "bad" }
 $e8Scores.Add([pscustomobject]@{ Control = "Restrict Office Macros"; Status = $e8MacroStatus; Badge = $e8MacroBadge })
@@ -3141,9 +3239,50 @@ $np = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.EnableNetworkProtection } 
 $npLabel = switch ($np) { 0 { "Disabled" } 1 { "Enabled" } 2 { "Audit mode" } default { if ($np -eq "Error") { "Query failed" } else { "Unknown ($np)" } } }
 $npClass = switch ($np) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
 
-$asrIds = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.AttackSurfaceReductionRules_Ids } else { "Error" }
-$asrCount = if ($asrIds -ne "Error" -and $asrIds) { @($asrIds).Count } else { 0 }
-$asrClass = if ($asrCount -gt 0) { "sev-good" } else { "sev-warn" }
+$asrIds    = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.AttackSurfaceReductionRules_Ids }    else { "Error" }
+$asrActions = if ($mpPref -ne "Error" -and $mpPref) { $mpPref.AttackSurfaceReductionRules_Actions } else { "Error" }
+$asrCount   = if ($asrIds -ne "Error" -and $asrIds) { @($asrIds).Count } else { 0 }
+
+# Build named rule table
+$asrRuleNames = @{
+    'be9ba2d9-53ea-4cdc-84e5-9b1eeee46550' = 'Block executable content from email/webmail'
+    'd4f940ab-401b-4efc-aadc-ad5f3c50688a' = 'Block Office apps creating child processes'
+    '3b576869-a4ec-4529-8536-b80a7769e899' = 'Block Office apps creating executable content'
+    '75668c1f-73b5-4cf0-bb93-3ecf5cb7cc84' = 'Block Office apps injecting into processes'
+    'd3e037e1-3eb8-44c8-a917-57927947596d' = 'Block JS/VBS launching downloaded executable'
+    '5beb7efe-fd9a-4556-801d-275e5ffc04cc' = 'Block execution of potentially obfuscated scripts'
+    '92e97fa1-2edf-4476-bdd6-9dd0b4dddc7b' = 'Block Win32 API calls from Office macros'
+    '01443614-cd74-433a-b99e-2ecdc07bfc25' = 'Block executable files unless trusted/signed'
+    '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b0' = 'Block credential stealing from LSASS'
+    'd1e49aac-8f56-4280-b9ba-993a6d77406c' = 'Block process creations from PSExec and WMI'
+    'b2b3f03d-6a65-4f7b-a9c7-1c7ef74a9ba4' = 'Block untrusted/unsigned USB processes'
+    '26190899-1602-49e8-8b27-eb1d0a1ce869' = 'Block Office communication apps creating child processes'
+    '7674ba52-37eb-4a4f-a9a1-f0f9a1619a2c' = 'Block Adobe Reader creating child processes'
+    'e6db77e5-3df2-4cf1-b95a-636979351e5b' = 'Block persistence through WMI event subscription'
+    'c1db55ab-c21a-4637-bb3f-a12568109d35' = 'Use advanced ransomware protection'
+    '56a863a9-875e-4185-98a7-b882c64b5ce5' = 'Block abuse of exploited vulnerable signed drivers'
+    'a8f5898e-1dc8-49a9-9878-85004b8a61e6' = 'Block Webshell creation for servers'
+    '33ddedf1-c6e0-47cb-833e-de6133960387' = 'Block rebooting in safe mode (preview)'
+    'c0033c00-d16d-4114-a5a0-dc9b3a7d2ceb' = 'Block use of copied or impersonated system tools'
+    'de01595b-e2f8-4521-b770-36fa7afc7bdd' = 'Block Lsass credential theft (1.5.0+)'
+}
+$asrRows = [System.Collections.Generic.List[object]]::new()
+if ($asrIds -ne "Error" -and $asrIds -and $asrActions -ne "Error" -and $asrActions) {
+    $idList  = @($asrIds)
+    $actList = @($asrActions)
+    for ($i = 0; $i -lt $idList.Count; $i++) {
+        $id  = $idList[$i].ToLower()
+        $act = if ($i -lt $actList.Count) { $actList[$i] } else { 0 }
+        # 0=Disabled, 1=Block, 2=Audit, 6=Warn
+        $modeLabel = switch ($act) { 0 { "Disabled" } 1 { "Block" } 2 { "Audit" } 6 { "Warn" } default { "Mode $act" } }
+        $ruleName  = if ($asrRuleNames[$id]) { $asrRuleNames[$id] } else { $id }
+        $asrRows.Add([pscustomobject]@{ Rule = $ruleName; Mode = $modeLabel; ModeVal = $act })
+    }
+}
+$asrBlockCount = @($asrRows | Where-Object { $_.ModeVal -eq 1 }).Count
+$asrAuditCount = @($asrRows | Where-Object { $_.ModeVal -eq 2 }).Count
+$asrSummary    = if ($asrCount -eq 0) { "No ASR rules configured" } elseif ($asrBlockCount -gt 0 -and $asrAuditCount -eq 0) { "$asrBlockCount rule(s) in Block mode" } elseif ($asrBlockCount -gt 0) { "$asrBlockCount Block, $asrAuditCount Audit" } else { "$asrAuditCount rule(s) in Audit mode only" }
+$asrClass = if ($asrBlockCount -gt 0) { "sev-good" } elseif ($asrAuditCount -gt 0) { "sev-warn" } else { "sev-warn" }
 
 # PS v2: elevation-gated; fall back to unknown when not admin
 $psv2Class = "sev-warn"; $psv2Label = "Could not determine (run as administrator for full check)"
@@ -3160,24 +3299,68 @@ if ($IsElevated) {
 
 # IE: check registry for IE executable or capability
 $iePresent = Safe-Invoke {
-    $ieExe = Test-Path "$env:ProgramFiles\Internet Explorer\iexplore.exe" -ErrorAction SilentlyContinue
+    $ieExe   = Test-Path "$env:ProgramFiles\Internet Explorer\iexplore.exe" -ErrorAction SilentlyContinue
     $ieExe32 = Test-Path "${env:ProgramFiles(x86)}\Internet Explorer\iexplore.exe" -ErrorAction SilentlyContinue
     $ieExe -or $ieExe32
 } "Internet Explorer Detection"
 $ieLabel = if ($iePresent -eq "Error") { "Query failed" } elseif ($iePresent) { "Present (should be disabled/removed)" } else { "Not detected (good)" }
 $ieClass  = if ($iePresent -eq "Error" -or $iePresent) { "sev-warn" } else { "sev-good" }
 
+# SmartScreen: HKLM policy key (EnableSmartScreen) and user-level AppHost key
+$smartscreen = Safe-Invoke {
+    $pol  = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'           -Name EnableSmartScreen -ErrorAction SilentlyContinue).EnableSmartScreen
+    $app  = (Get-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppHost'   -Name EnableWebContentEvaluation -ErrorAction SilentlyContinue).EnableWebContentEvaluation
+    $edge = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter' -Name EnabledV9 -ErrorAction SilentlyContinue).EnabledV9
+    [pscustomobject]@{ Policy = $pol; AppHost = $app; Edge = $edge }
+} "SmartScreen"
+$ssEnabled = $false
+$ssSource  = "Unknown"
+if ($smartscreen -ne "Error" -and $smartscreen) {
+    if ($smartscreen.Policy -eq 1) { $ssEnabled = $true; $ssSource = "Policy (on)" }
+    elseif ($smartscreen.Policy -eq 0) { $ssEnabled = $false; $ssSource = "Policy (off)" }
+    elseif ($smartscreen.AppHost -eq 1) { $ssEnabled = $true; $ssSource = "User setting (on)" }
+    else { $ssSource = "Not configured (Windows default)" }
+}
+$ssLabel = if ($smartscreen -eq "Error") { "Query failed" } else { "SmartScreen: $ssSource" }
+$ssClass  = if ($ssEnabled) { "sev-good" } elseif ($smartscreen -ne "Error" -and $smartscreen -and $smartscreen.Policy -eq 0) { "sev-bad" } else { "sev-warn" }
+
+# Windows Script Host
+$wshDisabled = Safe-Invoke {
+    $machineKey = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Script Host\Settings' -Name Enabled -ErrorAction SilentlyContinue).Enabled
+    $userKey    = (Get-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows Script Host\Settings' -Name Enabled -ErrorAction SilentlyContinue).Enabled
+    # 0 = disabled (good), 1 or absent = enabled
+    if ($machineKey -eq 0 -or $userKey -eq 0) { $true } else { $false }
+} "Windows Script Host"
+$wshLabel = if ($wshDisabled -eq "Error") { "Query failed" } elseif ($wshDisabled) { "Disabled (good)" } else { "Enabled" }
+$wshClass  = if ($wshDisabled -eq $true) { "sev-good" } else { "sev-warn" }
+
 Html-Add "<table class='kv-table'><tbody>"
 Html-Add ("<tr class='{0}'><th>Controlled Folder Access</th><td>{1}</td></tr>"     -f $cfaClass,  (Html-Enc $cfaLabel))
 Html-Add ("<tr class='{0}'><th>Network Protection</th><td>{1}</td></tr>"           -f $npClass,   (Html-Enc $npLabel))
-Html-Add ("<tr class='{0}'><th>ASR Rules Configured</th><td>{1}</td></tr>"         -f $asrClass,  (Html-Enc "$asrCount rule(s) found"))
+Html-Add ("<tr class='{0}'><th>ASR Rules</th><td>{1}</td></tr>"                    -f $asrClass,  (Html-Enc $asrSummary))
+Html-Add ("<tr class='{0}'><th>SmartScreen</th><td>{1}</td></tr>"                  -f $ssClass,   (Html-Enc $ssLabel))
+Html-Add ("<tr class='{0}'><th>Windows Script Host</th><td>{1}</td></tr>"          -f $wshClass,  (Html-Enc $wshLabel))
 Html-Add ("<tr class='{0}'><th>PowerShell v2</th><td>{1}</td></tr>"                -f $psv2Class, (Html-Enc $psv2Label))
 Html-Add ("<tr class='{0}'><th>Internet Explorer</th><td>{1}</td></tr>"            -f $ieClass,   (Html-Enc $ieLabel))
 Html-Add "</tbody></table>"
+
+# Show ASR rule breakdown if any rules are configured
+if ($asrRows.Count -gt 0) {
+    Html-StartDetails "ASR Rule Details ($asrCount rule(s))"
+    Html-AddTable -Items $asrRows -Columns @(
+        @{ Header = "Rule";  Property = "Rule" },
+        @{ Header = "Mode";  Property = "Mode" }
+    ) -RowClass {
+        param($r)
+        switch ($r.ModeVal) { 1 { "sev-good" } 2 { "sev-warn" } default { "sev-bad" } }
+    }
+    Html-EndDetails
+}
+
 Write-Action -What "User application hardening checks complete" -Kind info
-$e8HardenCount = @($cfaClass, $npClass, $asrClass, $psv2Class, $ieClass) | Where-Object { $_ -eq 'sev-good' } | Measure-Object | Select-Object -ExpandProperty Count
-$e8HardenStatus = if ($e8HardenCount -ge 4) { "Hardened" } elseif ($e8HardenCount -ge 2) { "Partial" } else { "Weak" }
-$e8HardenBadge  = if ($e8HardenCount -ge 4) { "good" } elseif ($e8HardenCount -ge 2) { "warn" } else { "bad" }
+$e8HardenCount = @($cfaClass, $npClass, $asrClass, $psv2Class, $ieClass, $ssClass, $wshClass) | Where-Object { $_ -eq 'sev-good' } | Measure-Object | Select-Object -ExpandProperty Count
+$e8HardenStatus = if ($e8HardenCount -ge 5) { "Hardened" } elseif ($e8HardenCount -ge 3) { "Partial" } else { "Weak" }
+$e8HardenBadge  = if ($e8HardenCount -ge 5) { "good" } elseif ($e8HardenCount -ge 3) { "warn" } else { "bad" }
 $e8Scores.Add([pscustomobject]@{ Control = "User Application Hardening"; Status = $e8HardenStatus; Badge = $e8HardenBadge })
 
 # ---- E8-5: Restrict Administrative Privileges ----
@@ -3214,13 +3397,45 @@ $adminMembers = if ($admins -ne "Error" -and $admins) { @($admins) } else { Safe
 $adminCount   = if ($adminMembers -ne "Error" -and $adminMembers) { $adminMembers.Count } else { $null }
 $adminClass   = if ($null -eq $adminCount) { "sev-warn" } elseif ($adminCount -le 2) { "sev-good" } elseif ($adminCount -le 4) { "sev-warn" } else { "sev-bad" }
 
+# LAPS detection: Windows LAPS (Win11 22H2+) or legacy LAPS CSE
+$laps = Safe-Invoke {
+    # Windows LAPS (built-in since Windows 11 22H2 / Server 2025)
+    $wlaps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\LAPS\Config' -ErrorAction SilentlyContinue
+    # Legacy LAPS CSE DLL
+    $legacyCse = Test-Path "$env:ProgramFiles\LAPS\CSE\AdmPwd.dll" -ErrorAction SilentlyContinue
+    $legacyCse32 = Test-Path "${env:ProgramFiles(x86)}\LAPS\CSE\AdmPwd.dll" -ErrorAction SilentlyContinue
+    # Legacy LAPS registry key
+    $legacyReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd' -ErrorAction SilentlyContinue
+    $wlapsEnabled  = ($null -ne $wlaps)
+    $legacyEnabled = ($legacyCse -or $legacyCse32 -or $null -ne $legacyReg)
+    [pscustomobject]@{
+        WindowsLaps = $wlapsEnabled
+        LegacyLaps  = $legacyEnabled
+        Detected    = ($wlapsEnabled -or $legacyEnabled)
+        Detail      = if ($wlapsEnabled) { "Windows LAPS configured" } elseif ($legacyEnabled) { "Legacy LAPS (AdmPwd) detected" } else { "LAPS not detected" }
+    }
+} "LAPS Detection"
+$lapsOk    = ($laps -ne "Error") -and $laps -and $laps.Detected
+$lapsLabel = if ($laps -eq "Error") { "Query failed" } else { $laps.Detail }
+$lapsClass = if ($lapsOk) { "sev-good" } else { "sev-warn" }
+
+# FilterAdministratorToken: when set to 1, the built-in local Administrator (RID 500)
+# is subject to UAC filtering, preventing pass-the-hash lateral movement
+$filterAdminToken = Safe-Invoke {
+    (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name FilterAdministratorToken -ErrorAction SilentlyContinue).FilterAdministratorToken
+} "FilterAdministratorToken"
+$fatLabel = if ($filterAdminToken -eq "Error") { "Query failed" } elseif ($filterAdminToken -eq 1) { "Enabled (built-in admin restricted)" } elseif ($filterAdminToken -eq 0) { "Disabled (built-in admin unrestricted)" } else { "Not set (default - built-in admin unrestricted)" }
+$fatClass = if ($filterAdminToken -eq 1) { "sev-good" } else { "sev-warn" }
+
 Html-Add "<table class='kv-table'><tbody>"
 Html-Add ("<tr class='{0}'><th>UAC Enabled (EnableLUA)</th><td>{1}</td></tr>"                   -f $uacLuaClass,      (Html-Enc $uacLuaLabel))
 Html-Add ("<tr class='{0}'><th>UAC Admin Consent Prompt</th><td>{1}</td></tr>"                  -f $uacBehaviorClass, (Html-Enc $uacBehaviorLabel))
+Html-Add ("<tr class='{0}'><th>Filter Administrator Token</th><td>{1}</td></tr>"                -f $fatClass,         (Html-Enc $fatLabel))
+Html-Add ("<tr class='{0}'><th>LAPS</th><td>{1}</td></tr>"                                      -f $lapsClass,        (Html-Enc $lapsLabel))
 Html-Add ("<tr class='{0}'><th>Local Administrator Count</th><td>{1}</td></tr>"                 -f $adminClass,       (Html-Enc $(if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" })))
 Html-Add "</tbody></table>"
-Write-Action -What ("UAC: {0} | Admin members: {1}" -f $uacLuaLabel, $(if ($null -ne $adminCount) { $adminCount } else { "unknown" })) -Kind info
-$e8AdminOk = ($uacLua -eq 1) -and ($null -ne $adminCount) -and ($adminCount -le 4)
+Write-Action -What ("UAC: {0} | LAPS: {1} | Admin members: {2}" -f $uacLuaLabel, $lapsLabel, $(if ($null -ne $adminCount) { $adminCount } else { "unknown" })) -Kind info
+$e8AdminOk = ($uacLua -eq 1) -and ($null -ne $adminCount) -and ($adminCount -le 4) -and $lapsOk
 $e8AdminStatus = if ($e8AdminOk) { "Restricted" } elseif ($uacLua -eq 1) { "Partial" } else { "Weak" }
 $e8AdminBadge  = if ($e8AdminOk) { "good" } elseif ($uacLua -eq 1) { "warn" } else { "bad" }
 $e8Scores.Add([pscustomobject]@{ Control = "Restrict Admin Privileges"; Status = $e8AdminStatus; Badge = $e8AdminBadge })
@@ -3294,13 +3509,37 @@ $wh4bPolicy = Safe-Invoke {
 $wh4bLabel = if ($wh4bPolicy -eq "Error") { "Query failed" } elseif ($wh4bPolicy -eq 1) { "Enabled via policy" } elseif ($wh4bPolicy -eq 0) { "Disabled via policy" } else { "Not configured via policy" }
 $wh4bClass = if ($wh4bPolicy -eq 1) { "sev-good" } elseif ($wh4bPolicy -eq 0) { "sev-bad" } else { "sev-warn" }
 
-# Detect Windows Hello PIN provider (presence suggests Hello is set up for at least one user)
-$helloDetected = Safe-Invoke {
-    $ngcPath = "$env:WINDIR\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc"
-    Test-Path $ngcPath -ErrorAction SilentlyContinue
-} "Windows Hello NGC Path"
-$helloLabel = if ($helloDetected -eq "Error") { "Query failed" } elseif ($helloDetected) { "NGC store present (Windows Hello likely configured)" } else { "NGC store not found" }
-$helloClass = if ($helloDetected -eq $true) { "sev-good" } else { "sev-warn" }
+# Distinguish policy-set vs actually enrolled: check for per-user NGC keys under Cryptography\NGC
+# Each enrolled user has a SID sub-key under NGC; presence = at least one user has completed WH4B/PIN enrollment
+$wh4bEnrolled = Safe-Invoke {
+    $ngcBase = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}'
+    # NGC store service path (system credential)
+    $ngcSvc  = "$env:WINDIR\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc"
+    # Per-user NGC key path
+    $ngcKey  = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{3CCD5499-87A8-4B10-A215-608888DD3B55}'
+    $svcPath = Test-Path $ngcSvc -ErrorAction SilentlyContinue
+    # Also check for user NGC SID subkeys (indicates actual enrollment, not just policy)
+    $userNgcPath = "$env:WINDIR\System32\Microsoft\Protect\Recovery"
+    $ngcSubkeys  = @(Get-ChildItem -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}' -ErrorAction SilentlyContinue)
+    $enrolledCount = $ngcSubkeys.Count
+    [pscustomobject]@{
+        NgcSvcPresent  = $svcPath
+        EnrolledCount  = $enrolledCount
+        Enrolled       = ($svcPath -or $enrolledCount -gt 0)
+    }
+} "WH4B Enrollment Detection"
+
+# Determine enrollment vs policy distinction
+$wh4bActuallyEnrolled = ($wh4bEnrolled -ne "Error") -and $wh4bEnrolled -and $wh4bEnrolled.Enrolled
+$wh4bEnrolledLabel = if ($wh4bEnrolled -eq "Error") { "Query failed" } elseif ($wh4bActuallyEnrolled) { "Enrolled (NGC credential store present)" } else { "Not enrolled (NGC store absent)" }
+$wh4bEnrolledClass = if ($wh4bActuallyEnrolled) { "sev-good" } elseif ($wh4bPolicy -eq 1) { "sev-warn" } else { "sev-warn" }
+
+# Correlate with Entra ID join status from dsregcmd (reuse $dsregLines if available)
+$wh4bEntraCorrelated = $false
+if ($dsregLines -ne "Error" -and $dsregLines) {
+    $wh4bRegLine = $dsregLines | Where-Object { $_ -match 'NgcSet\s*:\s*YES' }
+    if ($wh4bRegLine) { $wh4bEntraCorrelated = $true }
+}
 
 $smartcards = Safe-Invoke {
     @(Get-PnpDevice -Class SmartCardReader -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' })
@@ -3316,15 +3555,19 @@ $cachedLabel = if ($cachedCreds -eq "Error") { "Query failed" } elseif ($null -n
 $cachedClass = if ($cachedCreds -eq "Error" -or $null -eq $cachedCreds) { "sev-warn" } elseif ([int]$cachedCreds -eq 0) { "sev-good" } elseif ([int]$cachedCreds -le 2) { "sev-warn" } else { "sev-bad" }
 
 Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>Windows Hello for Business Policy</th><td>{1}</td></tr>" -f $wh4bClass,    (Html-Enc $wh4bLabel))
-Html-Add ("<tr class='{0}'><th>Windows Hello (NGC store)</th><td>{1}</td></tr>"          -f $helloClass,   (Html-Enc $helloLabel))
-Html-Add ("<tr class='{0}'><th>Smartcard Readers</th><td>{1}</td></tr>"                  -f $scClass,      (Html-Enc $scLabel))
-Html-Add ("<tr class='{0}'><th>Cached Domain Credentials</th><td>{1}</td></tr>"          -f $cachedClass,  (Html-Enc $cachedLabel))
+Html-Add ("<tr class='{0}'><th>Windows Hello for Business Policy</th><td>{1}</td></tr>"  -f $wh4bClass,         (Html-Enc $wh4bLabel))
+Html-Add ("<tr class='{0}'><th>Windows Hello Enrollment</th><td>{1}</td></tr>"           -f $wh4bEnrolledClass, (Html-Enc $wh4bEnrolledLabel))
+if ($wh4bEntraCorrelated) {
+    Html-Add ("<tr class='sev-good'><th>dsregcmd NgcSet</th><td>YES - Windows Hello confirmed via Entra ID join status</td></tr>")
+}
+Html-Add ("<tr class='{0}'><th>Smartcard Readers</th><td>{1}</td></tr>"                  -f $scClass,           (Html-Enc $scLabel))
+Html-Add ("<tr class='{0}'><th>Cached Domain Credentials</th><td>{1}</td></tr>"          -f $cachedClass,       (Html-Enc $cachedLabel))
 Html-Add "</tbody></table>"
-Write-Action -What ("MFA signals: WH4B policy=$wh4bLabel | Smartcards=$scCount") -Kind info
-$e8MfaOk = ($wh4bPolicy -eq 1) -or ($helloDetected -eq $true) -or ($scCount -gt 0)
-$e8MfaStatus = if ($e8MfaOk) { "Signals present" } else { "Not detected" }
-$e8MfaBadge  = if ($e8MfaOk) { "good" } else { "warn" }
+Write-Action -What ("MFA signals: WH4B policy=$wh4bLabel | Enrolled=$wh4bActuallyEnrolled | Smartcards=$scCount") -Kind info
+$e8MfaOk = $wh4bActuallyEnrolled -or $wh4bEntraCorrelated -or ($scCount -gt 0)
+$e8MfaPartial = (-not $e8MfaOk) -and ($wh4bPolicy -eq 1)
+$e8MfaStatus = if ($e8MfaOk) { "Enrolled" } elseif ($e8MfaPartial) { "Policy set, not enrolled" } else { "Not detected" }
+$e8MfaBadge  = if ($e8MfaOk) { "good" } elseif ($e8MfaPartial) { "warn" } else { "warn" }
 $e8Scores.Add([pscustomobject]@{ Control = "Multi-Factor Authentication"; Status = $e8MfaStatus; Badge = $e8MfaBadge })
 
 # ---- E8-8: Regular Backups ----
@@ -3332,11 +3575,26 @@ Html-Add "<h3>8. Regular Backups</h3>"
 
 $shadowCopies = Safe-Invoke { @(Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction Stop) } "VSS Shadow Copies"
 $scCopies     = if ($shadowCopies -ne "Error" -and $shadowCopies) { $shadowCopies } else { @() }
-$scClass8     = if ($scCopies.Count -gt 0) { "sev-good" } else { "sev-warn" }
 
 $newestShadow = if ($scCopies.Count -gt 0) {
     ($scCopies | Sort-Object InstallDate -Descending | Select-Object -First 1).InstallDate
 } else { $null }
+
+# VSS snapshot age assessment
+$vssDaysOld = $null
+if ($null -ne $newestShadow) {
+    $vssDaysOld = ([datetime]::UtcNow - [datetime]$newestShadow).Days
+}
+$scClass8 = if ($scCopies.Count -eq 0) { "sev-warn" } elseif ($null -ne $vssDaysOld -and $vssDaysOld -le 1) { "sev-good" } elseif ($null -ne $vssDaysOld -and $vssDaysOld -le 7) { "sev-warn" } else { "sev-bad" }
+
+# VSS service status
+$vssSvc = Safe-Invoke {
+    $s = Get-Service -Name VSS -ErrorAction Stop
+    [pscustomobject]@{ Status = $s.Status; StartType = $s.StartType }
+} "VSS Service"
+$vssSvcClass = if ($vssSvc -ne "Error" -and $vssSvc) {
+    if ($vssSvc.StartType -eq 'Disabled') { "sev-bad" } elseif ($vssSvc.Status -eq "Running" -or $vssSvc.StartType -eq "Manual") { "sev-good" } else { "sev-warn" }
+} else { "sev-warn" }
 
 $fileHistory = Safe-Invoke {
     $fhKey = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileHistory' -ErrorAction SilentlyContinue
@@ -3356,23 +3614,59 @@ $oneDriveRunning = Safe-Invoke {
 $odLabel = if ($oneDriveRunning -eq "Error") { "Query failed" } elseif ($oneDriveRunning) { "Running" } else { "Not running" }
 $odClass = if ($oneDriveRunning -eq $true) { "sev-good" } else { "sev-warn" }
 
+# Third-party backup agent detection from installed software list
+$backupAgentKeywords = @('Veeam', 'Acronis', 'Backblaze', 'CrashPlan', 'Carbonite', 'Datto', 'StorageCraft',
+    'Backup Exec', 'ARCserve', 'Commvault', 'Druva', 'IDrive', 'Macrium', 'AOMEI',
+    'Cobian', 'Iperius', 'NovaBACKUP', 'Altaro', 'MSP360', 'Cloudberry', 'N-able Backup',
+    'Cove Data Protection', 'Azure Backup', 'Windows Server Backup')
+$thirdPartyBackupAgents = [System.Collections.Generic.List[object]]::new()
+if ($appsList -ne "Error" -and $appsList) {
+    foreach ($kw in $backupAgentKeywords) {
+        $match = @($appsList | Where-Object { $_.DisplayName -match [regex]::Escape($kw) })
+        foreach ($m in $match) {
+            $thirdPartyBackupAgents.Add([pscustomobject]@{ Product = $m.DisplayName; Version = $m.DisplayVersion })
+        }
+    }
+}
+$tpBackupDetected = $thirdPartyBackupAgents.Count -gt 0
+$tpBackupLabel = if ($tpBackupDetected) { "$($thirdPartyBackupAgents.Count) agent(s) detected" } else { "None detected in software inventory" }
+$tpBackupClass = if ($tpBackupDetected) { "sev-good" } else { "sev-warn" }
+
+# VSS age label
+$vssAgeLabel = if ($scCopies.Count -eq 0) { "No snapshots" } elseif ($null -ne $vssDaysOld) { "$($scCopies.Count) snapshot(s); newest $vssDaysOld day(s) ago" } else { "$($scCopies.Count) snapshot(s); age unknown" }
+
 Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>VSS Shadow Copies</th><td>{1}</td></tr>" -f $scClass8, (Html-Enc "$($scCopies.Count) snapshot(s) found$(if ($newestShadow) { '; newest: ' + $newestShadow } else { '' })"))
-Html-Add ("<tr class='{0}'><th>File History</th><td>{1}</td></tr>"      -f $fhClass,  (Html-Enc $fhLabel))
-Html-Add ("<tr class='{0}'><th>OneDrive</th><td>{1}</td></tr>"           -f $odClass,  (Html-Enc $odLabel))
+Html-Add ("<tr class='{0}'><th>VSS Shadow Copies</th><td>{1}</td></tr>"         -f $scClass8,       (Html-Enc $vssAgeLabel))
+if ($vssSvc -ne "Error" -and $vssSvc) {
+    Html-Add ("<tr class='{0}'><th>VSS Service</th><td>{1} (startup: {2})</td></tr>" -f $vssSvcClass, (Html-Enc $vssSvc.Status), (Html-Enc $vssSvc.StartType))
+}
+Html-Add ("<tr class='{0}'><th>Third-Party Backup Agent</th><td>{1}</td></tr>"  -f $tpBackupClass,  (Html-Enc $tpBackupLabel))
+Html-Add ("<tr class='{0}'><th>File History</th><td>{1}</td></tr>"              -f $fhClass,        (Html-Enc $fhLabel))
+Html-Add ("<tr class='{0}'><th>OneDrive</th><td>{1}</td></tr>"                  -f $odClass,        (Html-Enc $odLabel))
 Html-Add "</tbody></table>"
 
+if ($thirdPartyBackupAgents.Count -gt 0) {
+    Html-StartDetails "Detected Backup Agents"
+    Html-AddTable -Items $thirdPartyBackupAgents -Columns @(
+        @{ Header = "Product"; Property = "Product" },
+        @{ Header = "Version"; Property = "Version" }
+    )
+    Html-EndDetails
+}
+
 if ($backupTasks -ne "Error" -and $backupTasks -and @($backupTasks).Count -gt 0) {
+    Html-StartDetails "Windows Backup Scheduled Tasks"
     Html-AddTable -Items $backupTasks -Columns @(
         @{ Header = "Task";      Property = "TaskName"    },
         @{ Header = "State";     Property = "State"       },
         @{ Header = "Last Run";  Property = "LastRunTime" }
     )
+    Html-EndDetails
 }
-Write-Action -What ("Backups: VSS copies=$($scCopies.Count) | File History=$fhLabel | OneDrive=$odLabel") -Kind $(if ($scCopies.Count -gt 0) { "ok" } else { "warn" })
-$e8BackupOk = ($scCopies.Count -gt 0) -or ($fileHistory -eq 1) -or ($oneDriveRunning -eq $true)
+Write-Action -What ("Backups: VSS=$($scCopies.Count) snapshot(s) | 3rd-party=$tpBackupLabel | File History=$fhLabel | OneDrive=$odLabel") -Kind $(if ($scCopies.Count -gt 0 -or $tpBackupDetected) { "ok" } else { "warn" })
+$e8BackupOk = ($scCopies.Count -gt 0 -and $null -ne $vssDaysOld -and $vssDaysOld -le 7) -or ($fileHistory -eq 1) -or ($oneDriveRunning -eq $true) -or $tpBackupDetected
 $e8BackupStatus = if ($e8BackupOk) { "Detected" } else { "Not detected" }
-$e8BackupBadge  = if ($e8BackupOk) { "good" } else { "warn" }
+$e8BackupBadge  = if ($e8BackupOk) { "good" } elseif (($scCopies.Count -gt 0) -or ($fileHistory -eq 1) -or ($oneDriveRunning -eq $true)) { "warn" } else { "warn" }
 $e8Scores.Add([pscustomobject]@{ Control = "Regular Backups"; Status = $e8BackupStatus; Badge = $e8BackupBadge })
 
 # ---- E8 Summary Scorecard (inserted at top of section) ----
