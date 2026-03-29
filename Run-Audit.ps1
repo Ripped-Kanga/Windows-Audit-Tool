@@ -2621,17 +2621,19 @@ else {
 Html-EndSection
 
 # ============================================================
-# [9] LOCAL USER ACCOUNTS
+# [9] USER ACCOUNTS
 # ============================================================
-Write-Step -Index 9 -Total 13 -Title "Enumerating local user accounts..."
-Write-Action -What "Running: Local user accounts (Get-LocalUser)" -Kind run
-Html-StartSection "Local User Accounts"
+Write-Step -Index 9 -Total 13 -Title "Enumerating user accounts..."
+Write-Action -What "Running: Local user accounts (Get-LocalUser) + Entra ID profiles (ProfileList registry)" -Kind run
+Html-StartSection "User Accounts"
 
+# --- Local Accounts ---
+Html-Add "<h3>Local Accounts</h3>"
 $localUsers = Safe-Invoke { Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordRequired, PasswordLastSet, AccountExpires, Description } "Local User Accounts"
 
 if ($localUsers -ne "Error" -and $localUsers) {
-    $userList = @($localUsers) | Sort-Object Name
-    $userCount = $userList.Count
+    $userList     = @($localUsers) | Sort-Object Name
+    $userCount    = $userList.Count
     $enabledCount = @($userList | Where-Object { $_.Enabled -eq $true }).Count
     $noPasswordReq = @($userList | Where-Object { $_.Enabled -eq $true -and $_.PasswordRequired -eq $false })
 
@@ -2655,7 +2657,7 @@ if ($localUsers -ne "Error" -and $localUsers) {
         }
     }
 
-    Html-StartDetails -Summary ("Accounts ({0})" -f $userCount) -Open
+    Html-StartDetails -Summary ("Local Accounts ({0})" -f $userCount) -Open
     Html-AddTable -Items $userRows -Columns @(
         @{ Header="Name";              Property="Name" },
         @{ Header="Enabled";           Property="Enabled" },
@@ -2674,6 +2676,58 @@ if ($localUsers -ne "Error" -and $localUsers) {
 else {
     Write-Action -What "Local user accounts query failed." -Kind warn
     Html-AddNote -Text "Could not retrieve local user accounts." -Kind warn
+}
+
+# --- Entra ID (Azure AD) Accounts ---
+# SIDs in the S-1-12-1-* namespace are assigned to Entra ID accounts on Windows devices.
+Html-Add "<h3>Entra ID Accounts</h3>"
+$entraAccounts = Safe-Invoke {
+    $results = [System.Collections.Generic.List[object]]::new()
+    $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+    foreach ($profileKey in Get-ChildItem $profileListPath -ErrorAction Stop) {
+        $sid = $profileKey.PSChildName
+        if ($sid -notmatch '^S-1-12-1-') { continue }
+        $profilePath = $profileKey.GetValue("ProfileImagePath")
+        $username    = if ($profilePath) { Split-Path $profilePath -Leaf } else { $sid }
+
+        # ProfileLoadTimeLow / ProfileLoadTimeHigh form a 64-bit Windows FILETIME
+        $timeLow  = $profileKey.GetValue("ProfileLoadTimeLow")
+        $timeHigh = $profileKey.GetValue("ProfileLoadTimeHigh")
+        $lastSignIn = if ($null -ne $timeLow -and $null -ne $timeHigh) {
+            try {
+                $ft = ([Int64][UInt32]$timeHigh -shl 32) -bor [Int64][UInt32]$timeLow
+                if ($ft -gt 0) { [DateTime]::FromFileTime($ft).ToString("yyyy-MM-dd HH:mm") } else { "Unknown" }
+            } catch { "Unknown" }
+        } else { "Unknown" }
+
+        $results.Add([pscustomobject]@{
+            Account     = $username
+            LastSignIn  = $lastSignIn
+            ProfilePath = $profilePath
+        })
+    }
+    @($results)
+} "Entra ID Accounts"
+
+if ($entraAccounts -ne "Error" -and $entraAccounts -and $entraAccounts.Count -gt 0) {
+    $entraList = @($entraAccounts) | Sort-Object Account
+    Write-Action -What ("Entra ID accounts with profiles on this machine: {0}" -f $entraList.Count) -Kind ok
+    Html-AddNote -Text ("Entra ID accounts with profiles on this machine: {0}" -f $entraList.Count) -Kind info
+    Html-StartDetails -Summary ("Entra ID Accounts ({0})" -f $entraList.Count) -Open
+    Html-AddTable -Items $entraList -Columns @(
+        @{ Header="Account";      Property="Account" },
+        @{ Header="Last Sign-In"; Property="LastSignIn" },
+        @{ Header="Profile Path"; Property="ProfilePath" }
+    )
+    Html-EndDetails
+}
+elseif ($entraAccounts -eq "Error") {
+    Write-Action -What "Entra ID account profile query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve Entra ID account profiles." -Kind warn
+}
+else {
+    Write-Action -What "No Entra ID account profiles found on this machine." -Kind info
+    Html-AddNote -Text "No Entra ID account profiles found on this machine." -Kind info
 }
 
 Html-EndSection
