@@ -2531,23 +2531,18 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             }
 
             [pscustomobject]@{
-                Product    = $_.displayName
-                Status     = $statusBadge
-                Engine     = $engine
-                Signatures = if ($sig -eq "UpToDate") { "<span class='badge good'>Up-to-date</span>" }
-                             elseif ($sig -eq "OutOfDate") { "<span class='badge warn'>Out-of-date</span>" }
-                             else { "<span class='badge warn'>Unknown</span>" }
-                State      = ("0x{0:X6}" -f [int]$state)
+                Product             = $_.displayName
+                RealtimeProtection  = $statusBadge
+                Signatures          = if ($sig -eq "UpToDate") { "<span class='badge good'>Up-to-date</span>" }
+                                      elseif ($sig -eq "OutOfDate") { "<span class='badge bad'>Out-of-date</span>" }
+                                      else { "<span class='badge warn'>Unknown</span>" }
             }
         }
 
-
         Html-AddTable -Items $avRows -Columns @(
-            @{ Header="Product";    Property="Product" },
-            @{ Header="Status";     Property="Status"; Raw=$true },
-            @{ Header="Engine";     Property="Engine" },
-            @{ Header="Signatures"; Property="Signatures"; Raw=$true },
-            @{ Header="State";      Property="State" }
+            @{ Header="Product";                Property="Product" },
+            @{ Header="Real-time Protection";   Property="RealtimeProtection"; Raw=$true },
+            @{ Header="Signatures";             Property="Signatures"; Raw=$true }
         )
         $avOffItems = @($avList) | Where-Object { ([UInt32]$_.productState -band 0xF000) -ne 0x1000 }
         if ($avOffItems.Count -gt 0) {
