@@ -1337,7 +1337,8 @@ function Publish-HuduAsset {
         [string]$LayoutName,
         [string]$AssetName,
         [string]$HtmlContent,
-        [string]$AttachmentPath
+        [string]$AttachmentPath,
+        [double]$HealthScore = 0
     )
     try {
         $companyId = $script:_HuduCompanyId
@@ -1372,16 +1373,34 @@ function Publish-HuduAsset {
         Write-Action -What ("Target field: {0} -> {1}" -f $richField.label, $fieldKey) -Kind info
         Log ("Hudu: using field '{0}' (key '{1}')" -f $richField.label, $fieldKey)
 
+        # 2b. Find the optional Health Score (Number) field for the asset list view column.
+        # Skips with a warning if the field does not exist on the layout.
+        $scoreFieldKey = $null
+        foreach ($f in @($layout.fields)) {
+            if ($f.label -eq 'Health Score') {
+                $scoreFieldKey = ($f.label -replace '[^a-zA-Z0-9\s]', '' -replace '\s+', '_').ToLower()
+                break
+            }
+        }
+        if ($scoreFieldKey) {
+            Write-Action -What ("Health Score field found: {0}" -f $scoreFieldKey) -Kind info
+            Log ("Hudu: Health Score field found (key '{0}')" -f $scoreFieldKey)
+        } else {
+            Write-Action -What "No 'Health Score' field found in layout - score will not be written to list view." -Kind warn
+            Log "Hudu: 'Health Score' field not found in layout '$LayoutName' - skipping score field"
+        }
+
         # 3. Create the asset
         Write-Action -What "Creating asset: $AssetName" -Kind run
+        $customFields = [System.Collections.Generic.List[object]]::new()
+        $customFields.Add(@{ $fieldKey = $HtmlContent })
+        if ($scoreFieldKey) { $customFields.Add(@{ $scoreFieldKey = $HealthScore }) }
         $body = @{
             asset = @{
                 name            = $AssetName
                 asset_layout_id = $layoutId
                 company_id      = $companyId
-                custom_fields   = @(
-                    @{ $fieldKey = $HtmlContent }
-                )
+                custom_fields   = $customFields.ToArray()
             }
         }
         $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$companyId/assets" -Body $body
@@ -3503,6 +3522,7 @@ try {
     }
 
     # Build system health score card (replaces TOC position in main content)
+    $score = 0  # safe default; overwritten below when sections are present
     $scoreCardHtml = ""
     if ($Toc -and $Toc.Count -gt 0) {
         $goodCount = @($SectionHealth.Values | Where-Object { $_ -eq 'good' }).Count
@@ -4025,7 +4045,8 @@ $huduBodyFragment
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
         -HtmlContent    $huduBodyFragment `
-        -AttachmentPath $HtmlReportPath
+        -AttachmentPath $HtmlReportPath `
+        -HealthScore    $score
     if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
         if ($huduResult.FileAttached) {
