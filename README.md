@@ -4,6 +4,8 @@ A self-contained PowerShell script that audits a single Windows machine and prod
 
 ---
 
+![Windows Audit Tool - Audit System Health Score](assets/screenshots/WAT-Audit-Report-SHS.png)
+
 ## Quick Start
 
 **Download the script:**
