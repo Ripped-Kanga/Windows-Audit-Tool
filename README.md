@@ -168,7 +168,7 @@ The audit runs 13 sequential sections. Each section fails independently — a pr
 Operating system, edition, build number, install date, uptime, CPU model and core count, total RAM, and attached disk drives with size and model.
 
 ### 2. Installed Software
-Merged inventory from all available sources: HKLM and HKCU uninstall registry keys (both 64-bit and WOW6432Node), per-user registry hives including offline NTUSER.DAT files, AppX/Store packages, and Winget. Automatically deduplicates across sources, merging scope and origin metadata. Includes an interactive search/filter bar in the report.
+Merged inventory from all available sources: HKLM and HKCU uninstall registry keys (both 64-bit and WOW6432Node), per-user registry hives including offline NTUSER.DAT files, AppX/Store packages, and Winget. Automatically deduplicates across sources, merging scope and origin metadata. Displayed as two separate tables — **Microsoft software** and **Third-Party software** — each with an independent interactive search/filter bar.
 
 ### 3. Patches / Hotfixes
 All installed Windows hotfixes and cumulative updates via `Get-HotFix`, sorted by install date.
@@ -196,8 +196,8 @@ Installed printers with driver name, port, and whether they are shared.
 | Anti-Virus Products | All SecurityCenter2-registered AV products with engine and signature status; deduplicated by product name so multi-component suites (e.g. Sophos Intercept X) appear as a single entry |
 | Local Administrators | All members of the local Administrators group |
 
-### 9. Local User Accounts
-All local user accounts with enabled/disabled status, password requirements, last logon time, password age, and description. Accounts that don't require a password are flagged.
+### 9. User Accounts
+Local user accounts (enabled/disabled status, password requirements, last logon time, password age, description — accounts without a required password are flagged) and a separate sub-section for **Entra ID accounts** that have signed into this machine, pulled from the ProfileList registry.
 
 ### 10. Startup Programs
 Programs configured to run at startup from registry Run/RunOnce keys (HKLM and HKCU) and WMI `Win32_StartupCommand`, with automatic deduplication across sources.
@@ -213,14 +213,14 @@ Read-only checks mapped to all eight ASD Essential Eight mitigation strategies, 
 
 | Strategy | Checks performed |
 |---|---|
-| Application Control | AppLocker effective policy rule count; WDAC Code Integrity registry key presence |
-| Patch Applications | Days since most recent hotfix; Windows Update automatic update policy |
-| Restrict Office Macros | `VbaWarnings` registry value per Office app (Word, Excel, PowerPoint, Outlook, Access) — reads Group Policy setting first, user setting as fallback |
-| User Application Hardening | Controlled Folder Access state; Network Protection state; ASR rule count; PowerShell v2 optional feature status; Internet Explorer presence |
-| Restrict Admin Privileges | UAC `EnableLUA` flag; `ConsentPromptBehaviorAdmin` level; local administrator count |
-| Patch Operating Systems | OS build and feature version; days since last patch; Windows Update service state |
-| Multi-Factor Authentication | Windows Hello for Business policy; NGC credential store presence; smartcard reader detection; cached domain credential count |
-| Regular Backups | VSS shadow copy count and newest snapshot date; File History registry flag; Windows Backup scheduled tasks; OneDrive process detection |
+| Application Control | AppLocker enforcement mode (Enforce vs Audit-only vs Not configured); WDAC SIPolicy.p7b file presence and CI registry key; PowerShell machine-level execution policy |
+| Patch Applications | Days since most recent hotfix; Windows Update automatic update policy; WUfB deferral settings; installed Edge and Chrome version from registry (flags versions below a staleness threshold) |
+| Restrict Office Macros | `VbaWarnings` per app (Word, Excel, PowerPoint, Outlook, Access) via Group Policy then user setting; Excel XL4 macro block (`Excel4MacroSheets`); internet-sourced macro block (`BlockContentExecutionFromInternet`) per app |
+| User Application Hardening | Controlled Folder Access; Network Protection; ASR rules with per-rule mode (Block/Audit/Disabled) and named rule descriptions in a collapsible detail table; SmartScreen policy state; Windows Script Host disabled check; PowerShell v2 status; Internet Explorer presence |
+| Restrict Admin Privileges | UAC `EnableLUA`; `ConsentPromptBehaviorAdmin` level; `FilterAdministratorToken` (built-in admin RID-500 restriction); LAPS detection (Windows LAPS registry key, legacy AdmPwd CSE, and legacy policy key); local administrator count |
+| Patch Operating Systems | OS build and feature version; days since last patch; Windows Update service state; Microsoft Update registration (non-OS Microsoft products included) |
+| Multi-Factor Authentication | Windows Hello for Business policy (Enabled/Disabled/Not configured); NGC store enrollment check to distinguish policy-set vs actually enrolled; dsregcmd `NgcSet` correlation for Entra-joined machines; smartcard reader detection; cached domain credential count |
+| Regular Backups | VSS shadow copy count with newest snapshot age in days (flags stale or absent snapshots); VSS service status; third-party backup agent detection from installed software (Veeam, Acronis, Datto, Backblaze, and 20+ others); File History registry flag; OneDrive process detection; Windows Backup scheduled tasks |
 
 ---
 
