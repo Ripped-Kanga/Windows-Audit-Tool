@@ -40,8 +40,8 @@ Windows-Audit-Tool/
 ### 1. Bootstrap / Global Setup
 - Defines `$ScriptVersion` (e.g. `"1.1.0"`) — used for update checks and displayed in console + HTML report
 - Sets `$ErrorActionPreference = "Stop"` globally
-- Defines `$ComputerName`, `$HtmlReportPath` (`C:\Temp\<ComputerName>-Audit.html`), `$LogPath` (`C:\Windows\Temp\AuditLog.txt`)
-- Creates `C:\Temp\` if it does not exist
+- Defines `$ComputerName` and bootstrap `$LogPath` (`C:\Windows\Temp\AuditLog.txt` — used only until `$ScriptDir` is resolved inside the main try block)
+- Final `$LogPath`, `$ReportDir`, `$HtmlReportPath`, and `$HuduHtmlReportPath` are set in the Output Directory Routing block after `$IsRmmMode` is determined
 
 ### 2. Core Helper Functions
 
@@ -114,21 +114,15 @@ After all sections run, the script assembles the final HTML document:
 
 ## Output Paths
 
-Report paths are determined at runtime after the elevation check — they are not hardcoded:
+Output paths are determined at runtime based on deployment context (`$IsRmmMode`), not elevation:
 
-| Context | `$ReportDir` | Report filename |
+| Context | `$ReportDir` | `$LogPath` |
 |---|---|---|
-| Elevated (admin / SYSTEM / RMM) | `$env:TEMP` | `<ComputerName>-Audit.html` |
-| Non-elevated (user context) | `$env:USERPROFILE\Downloads` | `<ComputerName>-Audit.html` |
+| RMM/Silent OR running from `C:\Program Files\...` | `C:\Program Files\Windows Audit Tool\Results` | `C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt` |
+| Interactive (non-silent, not in Program Files) | `<script-dir>\Windows Audit Tool\` | `<script-dir>\Windows Audit Tool\AuditLog.txt` |
 | With `-CustomerName` | same as above | `<CustomerName> - <ComputerName>-Audit.html` |
 
-| Path | Purpose |
-|---|---|
-| `$env:TEMP\<ComputerName>-Audit.html` | HTML report (elevated) |
-| `$env:USERPROFILE\Downloads\<ComputerName>-Audit.html` | HTML report (non-elevated) |
-| `C:\Windows\Temp\AuditLog.txt` | Append-only operational log (always) |
-
-`$ReportDir` is set after the elevation block. `$HtmlReportPath` and `$HuduHtmlReportPath` are derived from it. Do not add configuration file support or additional path parameters.
+`$IsRmmMode` is `$true` when `-Silent` is passed OR when `$ScriptDir` starts with `C:\Program Files`. Both `$ScriptDir` and `$IsRmmMode` are resolved early in the main `try` block. `$LogPath` starts as a bootstrap path (`C:\Windows\Temp\AuditLog.txt`) for the first few log lines, then is updated to its final value after the output directory routing block. `$HtmlReportPath` and `$HuduHtmlReportPath` are derived from `$ReportDir`. Do not add configuration file support or additional path parameters.
 
 ---
 
@@ -206,9 +200,9 @@ The script auto-requests elevation via UAC if not already admin. If the user dec
 .\Run-Audit.ps1 -UpdateExe       # download .exe only, then run audit
 ```
 
-**Check outputs:**
-- HTML report: `C:\Temp\<ComputerName>-Audit.html`
-- Operational log: `C:\Windows\Temp\AuditLog.txt`
+**Check outputs (interactive mode, run from e.g. Desktop):**
+- HTML report: `<script-dir>\Windows Audit Tool\<ComputerName>-Audit.html`
+- Operational log: `<script-dir>\Windows Audit Tool\AuditLog.txt`
 
 ### Recompiling the .exe
 After editing `Run-Audit.ps1`, regenerate the binary:
