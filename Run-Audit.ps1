@@ -3903,16 +3903,19 @@ $huduUpdateLine
 </table>
 "@
 
-    # Hudu score card - table layout instead of nested flexbox divs
+    # Hudu score card - SVG ring with inline styles + plain-number fallback.
+    # SVG uses only presentation attributes and inline styles (no CSS classes) so it requires
+    # no <style> block. If Hudu's ActionText sanitiser strips <svg> entirely the fallback
+    # <span> below the SVG remains visible as the score indicator.
     $huduScoreCardHtml = ""
     if ($Toc -and $Toc.Count -gt 0) {
         $scoreColor2 = if ($score -ge 7) { '#059669' } elseif ($score -ge 4) { '#d97706' } else { '#dc2626' }
         $huduScoreCardHtml = @"
 <table style='width:100%; border-collapse:collapse; margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; overflow:hidden;'>
 <tr>
-<td style='text-align:center; padding:28px 20px; width:120px; vertical-align:middle;'>
-<span style='font-size:42px; font-weight:700; color:$scoreColor2; line-height:1;'>$scoreDisplay</span><br>
-<span style='font-size:11px; opacity:0.6; text-transform:uppercase; letter-spacing:0.5px;'>out of 10</span>
+<td style='text-align:center; padding:28px 20px; width:140px; vertical-align:middle;'>
+<svg viewBox='0 0 120 120' width='120' height='120' style='display:block; margin:0 auto;'><circle cx='60' cy='60' r='52' fill='none' stroke='#e2e8f0' stroke-width='8'/><circle cx='60' cy='60' r='52' fill='none' stroke='$scoreColor2' stroke-width='8' stroke-linecap='round' stroke-dasharray='$circumference' stroke-dashoffset='$offset' transform='rotate(-90 60 60)'/><text x='60' y='54' text-anchor='middle' style='font-size:22px; font-weight:700; fill:$scoreColor2;'>$scoreDisplay</text><text x='60' y='72' text-anchor='middle' style='font-size:10px; fill:#64748b;'>out of 10</text></svg>
+<span style='font-size:13px; font-weight:700; color:$scoreColor2; display:block; margin-top:6px;'>$scoreDisplay / 10</span>
 </td>
 <td style='padding:28px 32px 28px 12px; vertical-align:middle;'>
 <strong style='font-size:18px;'>System Health Score</strong><br>
