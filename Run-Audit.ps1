@@ -53,7 +53,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.7"
+$ScriptVersion = "1.3.2.8"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -3236,6 +3236,31 @@ foreach ($s in $e8Scores) {
     $e8Num++
 }
 [void]$scorecardHtml.AppendLine("</tbody></table>")
+
+# ---- E8 Issues Summary ----
+$e8BadItems  = @($e8Scores | Where-Object { $_.Badge -eq 'bad' })
+$e8WarnItems = @($e8Scores | Where-Object { $_.Badge -eq 'warn' })
+[void]$scorecardHtml.AppendLine("<h3>Issues Requiring Attention</h3>")
+if ($e8BadItems.Count -eq 0 -and $e8WarnItems.Count -eq 0) {
+    [void]$scorecardHtml.AppendLine("<div class='callout callout-good'>All Essential Eight controls are compliant. No critical issues or warnings identified.</div>")
+} else {
+    if ($e8BadItems.Count -gt 0) {
+        [void]$scorecardHtml.AppendLine("<div class='callout callout-bad'>")
+        [void]$scorecardHtml.AppendLine("<strong>Critical Issues</strong><ul>")
+        foreach ($item in $e8BadItems) {
+            [void]$scorecardHtml.AppendLine(("<li><strong>{0}</strong> &mdash; {1}</li>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$scorecardHtml.AppendLine("</ul></div>")
+    }
+    if ($e8WarnItems.Count -gt 0) {
+        [void]$scorecardHtml.AppendLine("<div class='callout callout-warn'>")
+        [void]$scorecardHtml.AppendLine("<strong>Warnings</strong><ul>")
+        foreach ($item in $e8WarnItems) {
+            [void]$scorecardHtml.AppendLine(("<li><strong>{0}</strong> &mdash; {1}</li>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$scorecardHtml.AppendLine("</ul></div>")
+    }
+}
 [void]$Html.Insert($e8ScorecardInsertPos, $scorecardHtml.ToString())
 
 # Also insert into HuduHtml with inline styles
@@ -3250,6 +3275,29 @@ foreach ($s in $e8Scores) {
     $e8Num2++
 }
 [void]$huduScorecard.AppendLine("</tbody></table>")
+
+# ---- Hudu E8 Issues Summary (flat <p> per item - avoids ActionText block-element restructuring) ----
+[void]$huduScorecard.AppendLine((Convert-ToHuduInline "<h3>Issues Requiring Attention</h3>"))
+if ($e8BadItems.Count -eq 0 -and $e8WarnItems.Count -eq 0) {
+    [void]$huduScorecard.AppendLine((Convert-ToHuduInline "<div class='callout callout-good'>All Essential Eight controls are compliant. No critical issues or warnings identified.</div>"))
+} else {
+    if ($e8BadItems.Count -gt 0) {
+        [void]$huduScorecard.AppendLine((Convert-ToHuduInline "<div class='callout callout-bad'>"))
+        [void]$huduScorecard.AppendLine("<strong>Critical Issues</strong>")
+        foreach ($item in $e8BadItems) {
+            [void]$huduScorecard.AppendLine(("<p style='margin:4px 0;'><strong>{0}</strong> &mdash; {1}</p>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$huduScorecard.AppendLine("</div>")
+    }
+    if ($e8WarnItems.Count -gt 0) {
+        [void]$huduScorecard.AppendLine((Convert-ToHuduInline "<div class='callout callout-warn'>"))
+        [void]$huduScorecard.AppendLine("<strong>Warnings</strong>")
+        foreach ($item in $e8WarnItems) {
+            [void]$huduScorecard.AppendLine(("<p style='margin:4px 0;'><strong>{0}</strong> &mdash; {1}</p>" -f (Html-Enc $item.Control), (Html-Enc $item.Status)))
+        }
+        [void]$huduScorecard.AppendLine("</div>")
+    }
+}
 [void]$HuduHtml.Insert($e8ScorecardInsertPosHudu, $huduScorecard.ToString())
 
 # Set section health from E8 scorecard results
