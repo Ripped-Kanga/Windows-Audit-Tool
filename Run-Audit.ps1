@@ -1748,12 +1748,11 @@ if ($disks -ne "Error" -and $disks) {
             SizeGB = [math]::Round($_.Size / 1GB, 2)
         }
     }
-    Html-StartDetails -Summary ("Physical Disks ({0})" -f $diskList.Count)
+    Html-Add "<h4>Physical Disks</h4>"
     Html-AddTable -Items $diskList -Columns @(
         @{ Header="Model"; Property="Model" },
         @{ Header="Size (GB)"; Property="SizeGB" }
     )
-    Html-EndDetails
 }
 
 # --- System Status ---
