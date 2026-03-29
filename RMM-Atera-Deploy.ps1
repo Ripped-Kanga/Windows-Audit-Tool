@@ -11,11 +11,11 @@
     ATERA SETUP NOTES
       - Set execution policy to Bypass in the Atera script configuration
       - Recommended script timeout: 600 seconds (10 minutes) — covers GitHub fetch + full audit
-      - Runs as SYSTEM; $env:TEMP resolves to C:\Windows\Temp
-        Cached script:  C:\Windows\Temp\Run-Audit.ps1
+      - Runs as SYSTEM
+        Cached script:  C:\Program Files\Windows Audit Tool\Scripts\Run-Audit.ps1
         Deploy log:     C:\Windows\Temp\AuditDeploy.txt
-        Audit log:      C:\Windows\Temp\AuditLog.txt
-        Audit report:   C:\Windows\Temp\<ComputerName>-Audit.html
+        Audit log:      C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt
+        Audit report:   C:\Program Files\Windows Audit Tool\Results\<ComputerName>-Audit.html
 
     PARAMETERS
       Pass only what you need. -Silent is always injected automatically.
@@ -49,8 +49,14 @@ param(
 # ------------------------- #
 $DeployScriptVersion = "1.0.1"
 $LogPath    = "C:\Windows\Temp\AuditDeploy.txt"
-$CachedPath = Join-Path $env:TEMP "Run-Audit.ps1"
+$CachedDir  = "C:\Program Files\Windows Audit Tool\Scripts"
+$CachedPath = Join-Path $CachedDir "Run-Audit.ps1"
 $ApiUrl     = "https://api.github.com/repos/Ripped-Kanga/Windows-Audit-Tool/releases/latest"
+
+# Ensure the Scripts directory exists before any read/write against $CachedPath
+if (-not (Test-Path -LiteralPath $CachedDir -ErrorAction SilentlyContinue)) {
+    New-Item -ItemType Directory -Path $CachedDir -Force -ErrorAction SilentlyContinue | Out-Null
+}
 
 # TLS 1.2 required by GitHub API (PS 5.1 may default to TLS 1.0)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
