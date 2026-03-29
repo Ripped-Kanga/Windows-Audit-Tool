@@ -64,7 +64,7 @@ if (-not $ComputerName -or $ComputerName -eq "") {
 }
 
 $LogPath = "C:\Windows\Temp\AuditLog.txt"
-# Bootstrap log path — used only until $ScriptDir and $IsRmmMode are resolved inside the main try block.
+# Bootstrap log path - used only until $ScriptDir and $IsRmmMode are resolved inside the main try block.
 # $HtmlReportPath, $HuduHtmlReportPath, $ReportDir, and final $LogPath are all set there.
 
 # ------------------------- #
@@ -1804,7 +1804,7 @@ if ($apps -ne "Error" -and $apps) {
     $thirdPartySoftware = @($appsList | Where-Object { $_.Publisher -notmatch 'Microsoft Corporation' })
 
     Write-Action -What ("Applications found: {0} ({1} third-party, {2} Microsoft)" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind ok
-    Html-AddNote -Text ("Applications found: {0} — {1} third-party, {2} Microsoft" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind info
+    Html-AddNote -Text ("Applications found: {0} ({1} third-party, {2} Microsoft)" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind info
 
     $swCols = @(
         @{ Header="Name";      Property="DisplayName" },
@@ -2564,7 +2564,7 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
     # --- Defender ---
     # Third-party AV active = any non-Defender product with real-time protection on (0x1000).
     # When that is the case and Defender's own real-time protection is off (passive mode),
-    # the Defender detail table is irrelevant — show a brief passive-mode note instead.
+    # the Defender detail table is irrelevant - show a brief passive-mode note instead.
     $thirdPartyAvActive = @($avList | Where-Object {
         $_.displayName -notmatch 'Windows Defender|Microsoft Defender' -and
         ([UInt32]$_.productState -band 0xF000) -eq 0x1000
@@ -2578,8 +2578,8 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
                 $_.displayName -notmatch 'Windows Defender|Microsoft Defender' -and
                 ([UInt32]$_.productState -band 0xF000) -eq 0x1000
             } | ForEach-Object { $_.displayName }) -join ', '
-            Write-Action -What "Defender passive — third-party AV active: $activeAvNames" -Kind info
-            Html-AddNote -Text "Windows Defender is in passive mode. $activeAvNames is the active antivirus — Defender details are not applicable." -Kind info
+            Write-Action -What "Defender passive - third-party AV active: $activeAvNames" -Kind info
+            Html-AddNote -Text "Windows Defender is in passive mode. $activeAvNames is the active antivirus - Defender details are not applicable." -Kind info
         } else {
             Html-AddKV -Pairs ([ordered]@{
                 "Real-time protection"         = $def.RealTimeProtectionEnabled
