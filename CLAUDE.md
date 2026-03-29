@@ -205,15 +205,7 @@ The script auto-requests elevation via UAC if not already admin. If the user dec
 - Operational log: `<script-dir>\Windows Audit Tool\AuditLog.txt`
 
 ### Recompiling the .exe
-After editing `Run-Audit.ps1`, regenerate the binary:
-```powershell
-# Install PS2EXE if not already present
-Install-Module ps2exe -Scope CurrentUser
-
-# Compile
-Invoke-ps2exe .\Run-Audit.ps1 .\Run-Audit.exe
-```
-Commit both `Run-Audit.ps1` and `Run-Audit.exe` together.
+**The `.exe` is compiled automatically by GitHub Actions** — no manual PS2EXE step is ever required. The workflow (`.github/workflows/release.yml`) compiles and attaches the binary when a `v*` tag is pushed. Do not run PS2EXE locally or flag missing recompilation as a TODO.
 
 ### Testing
 There is **no automated test suite**. All validation is manual:
@@ -224,7 +216,7 @@ There is **no automated test suite**. All validation is manual:
 
 ### Git Workflow
 - Branch from `main`
-- Keep commits focused; commit both `.ps1` and `.exe` when the binary is updated
+- Keep commits focused; only `Run-Audit.ps1` needs to be committed — the `.exe` is produced by CI
 - PRs used for significant features or changes
 
 ### Release Workflow
