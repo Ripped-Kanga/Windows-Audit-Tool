@@ -64,7 +64,7 @@ if (-not $ComputerName -or $ComputerName -eq "") {
 }
 
 $LogPath = "C:\Windows\Temp\AuditLog.txt"
-# Bootstrap log path — used only until $ScriptDir and $IsRmmMode are resolved inside the main try block.
+# Bootstrap log path - used only until $ScriptDir and $IsRmmMode are resolved inside the main try block.
 # $HtmlReportPath, $HuduHtmlReportPath, $ReportDir, and final $LogPath are all set there.
 
 # ------------------------- #
@@ -952,9 +952,8 @@ function Html-AddNote {
         [string]$KbTitle
     )
     if ($Kind -in @('good','warn','bad')) { Set-SectionHealth -Status $Kind }
-    # Add to the global findings accumulator when a KB link is provided.
-    # Only KB-annotated findings are surfaced — error/diagnostic notes without a KB URL are excluded.
-    if ($Kind -in @('warn','bad') -and $KbUrl -and $script:CurrentSectionId) {
+    # Add all warn/bad findings to the global accumulator; KB link is optional and rendered where present.
+    if ($Kind -in @('warn','bad') -and $script:CurrentSectionId) {
         $script:GlobalFindings.Add([pscustomobject]@{
             Section   = $script:CurrentSectionTitle
             SectionId = $script:CurrentSectionId
@@ -1338,7 +1337,8 @@ function Publish-HuduAsset {
         [string]$LayoutName,
         [string]$AssetName,
         [string]$HtmlContent,
-        [string]$AttachmentPath
+        [string]$AttachmentPath,
+        [double]$HealthScore = 0
     )
     try {
         $companyId = $script:_HuduCompanyId
@@ -1373,16 +1373,37 @@ function Publish-HuduAsset {
         Write-Action -What ("Target field: {0} -> {1}" -f $richField.label, $fieldKey) -Kind info
         Log ("Hudu: using field '{0}' (key '{1}')" -f $richField.label, $fieldKey)
 
+        # 2b. Find the optional Health Score (Number) field for the asset list view column.
+        # Skips with a warning if the field does not exist on the layout.
+        $scoreFieldKey = $null
+        foreach ($f in @($layout.fields)) {
+            if ($f.label -eq 'Health Score') {
+                $scoreFieldKey = ($f.label -replace '[^a-zA-Z0-9\s]', '' -replace '\s+', '_').ToLower()
+                break
+            }
+        }
+        if ($scoreFieldKey) {
+            Write-Action -What ("Health Score field found: {0}" -f $scoreFieldKey) -Kind info
+            Log ("Hudu: Health Score field found (key '{0}')" -f $scoreFieldKey)
+        } else {
+            Write-Action -What "No 'Health Score' field found in layout - score will not be written to list view." -Kind warn
+            Log "Hudu: 'Health Score' field not found in layout '$LayoutName' - skipping score field"
+        }
+
         # 3. Create the asset
         Write-Action -What "Creating asset: $AssetName" -Kind run
+        $customFields = [System.Collections.Generic.List[object]]::new()
+        $customFields.Add(@{ $fieldKey = $HtmlContent })
+        # Format as an invariant-culture string ("7.5") for the Text field.
+        # Avoids locale-dependent decimal separators that would corrupt the value on
+        # European-locale machines when ConvertTo-Json serialises the payload.
+        if ($scoreFieldKey) { $customFields.Add(@{ $scoreFieldKey = $HealthScore.ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture) }) }
         $body = @{
             asset = @{
                 name            = $AssetName
                 asset_layout_id = $layoutId
                 company_id      = $companyId
-                custom_fields   = @(
-                    @{ $fieldKey = $HtmlContent }
-                )
+                custom_fields   = $customFields.ToArray()
             }
         }
         $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$companyId/assets" -Body $body
@@ -1689,19 +1710,12 @@ Write-Step -Index 1 -Total 13 -Title "Collecting system information..."
 Write-Action -What "Running: System Information (CIM/Registry)" -Kind run
 Html-StartSection "System Information"
 
-$kv = [ordered]@{}
-
+# --- Data collection ---
 $compName = Safe-Invoke { $env:COMPUTERNAME } "Computer Name"
-$kv["Computer Name"] = $compName
 Write-Action -What ("Computer Name: {0}" -f $compName) -Kind ok
 
 $os = Safe-Invoke { Get-CimInstance Win32_OperatingSystem } "Operating System"
-if ($os -ne "Error") {
-    $kv["Operating System"] = $os.Caption
-    $kv["OS Version"]       = $os.Version
-    $kv["Build Number"]     = $os.BuildNumber
-    $kv["Architecture"]     = $os.OSArchitecture
-
+if ($os -ne "Error" -and $os) {
     Write-Action -What ("OS: {0} (v{1}, build {2}, {3})" -f $os.Caption, $os.Version, $os.BuildNumber, $os.OSArchitecture) -Kind ok
 } else {
     Write-Action -What "Operating System: Error" -Kind warn
@@ -1711,49 +1725,44 @@ $winVer = Safe-Invoke {
     Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" |
         Select-Object -Property ReleaseId, DisplayVersion
 } "Feature Version"
-
-if ($winVer -ne "Error") {
-    $ver = if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId }
-    $kv["Windows Feature Version"] = $ver
-}
+$featureVer = if ($winVer -ne "Error" -and $winVer) { if ($winVer.DisplayVersion) { $winVer.DisplayVersion } else { $winVer.ReleaseId } } else { $null }
 
 $cpu = Safe-Invoke {
     Get-CimInstance Win32_Processor |
         Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors
 } "CPU Info"
 
-if ($cpu -ne "Error") {
-    $kv["Processor"]          = $cpu.Name
-    $kv["Cores"]              = $cpu.NumberOfCores
-    $kv["Logical Processors"] = $cpu.NumberOfLogicalProcessors
-}
-
 $mem = Safe-Invoke { Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory } "Memory Info"
-if ($mem -ne "Error") {
-    $ramGB = [math]::Round($mem.TotalPhysicalMemory / 1GB, 2)
-    $kv["Installed RAM (GB)"] = $ramGB
-}
+$ramGB = if ($mem -ne "Error" -and $mem) { [math]::Round($mem.TotalPhysicalMemory / 1GB, 2) } else { $null }
 
-$boot = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
-if ($boot -ne "Error" -and $boot) {
-    $uptime = New-TimeSpan -Start $boot
-    $kv["Uptime"] = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
-}
-
-Html-AddKV -Pairs $kv
-
-# Uptime health check - machines that haven't rebooted miss kernel-level patches
-if ($boot -ne "Error" -and $boot) {
-    if ($uptime.TotalDays -gt 30) {
-        Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
-        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn `
-            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
-    } else {
-        Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
-    }
-}
+$boot   = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
+$uptime = if ($boot -ne "Error" -and $boot) { New-TimeSpan -Start $boot } else { $null }
 
 $disks = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
+
+# --- Operating System ---
+Html-Add "<h3>Operating System</h3>"
+$osKv = [ordered]@{ "Computer Name" = $compName }
+if ($os -ne "Error" -and $os) {
+    $osKv["Operating System"] = $os.Caption
+    if ($featureVer) { $osKv["Feature Version"] = $featureVer }
+    $osKv["Version"]          = $os.Version
+    $osKv["Build Number"]     = $os.BuildNumber
+    $osKv["Architecture"]     = $os.OSArchitecture
+}
+Html-AddKV -Pairs $osKv
+
+# --- Hardware ---
+Html-Add "<h3>Hardware</h3>"
+$hwKv = [ordered]@{}
+if ($cpu -ne "Error" -and $cpu) {
+    $hwKv["Processor"]          = $cpu.Name
+    $hwKv["Cores"]              = $cpu.NumberOfCores
+    $hwKv["Logical Processors"] = $cpu.NumberOfLogicalProcessors
+}
+if ($null -ne $ramGB) { $hwKv["Installed RAM (GB)"] = $ramGB }
+if ($hwKv.Count -gt 0) { Html-AddKV -Pairs $hwKv }
+
 if ($disks -ne "Error" -and $disks) {
     $diskList = @($disks) | ForEach-Object {
         [pscustomobject]@{
@@ -1761,12 +1770,27 @@ if ($disks -ne "Error" -and $disks) {
             SizeGB = [math]::Round($_.Size / 1GB, 2)
         }
     }
-    Html-StartDetails -Summary ("Physical Disks ({0})" -f $diskList.Count)
+    Html-Add "<h4>Physical Disks</h4>"
     Html-AddTable -Items $diskList -Columns @(
         @{ Header="Model"; Property="Model" },
         @{ Header="Size (GB)"; Property="SizeGB" }
     )
-    Html-EndDetails
+}
+
+# --- System Status ---
+Html-Add "<h3>System Status</h3>"
+if ($uptime) {
+    Html-AddKV -Pairs ([ordered]@{
+        "Uptime" = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
+    })
+    # Uptime health check - machines that haven't rebooted miss kernel-level patches
+    if ($uptime.TotalDays -gt 30) {
+        Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
+        Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
+    } else {
+        Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
+    }
 }
 
 Html-EndSection
@@ -1794,27 +1818,44 @@ if ($apps -ne "Error" -and $apps) {
         Write-Action -What ("Applications de-duplicated: no duplicates found ({0})" -f $dedupCount) -Kind info
     }
 
-    $appsList = @($appsList) | Sort-Object DisplayName, DisplayVersion, Scope
-    $appCount = @($appsList).Count
+    $appsList   = @($appsList) | Sort-Object DisplayName, DisplayVersion, Scope
+    $appCount   = @($appsList).Count
 
-    Write-Action -What ("Applications found: {0}" -f $appCount) -Kind ok
-    Html-AddNote -Text ("Applications found: {0}" -f $appCount) -Kind info
+    $msSoftware      = @($appsList | Where-Object { $_.Publisher -match 'Microsoft Corporation' })
+    $thirdPartySoftware = @($appsList | Where-Object { $_.Publisher -notmatch 'Microsoft Corporation' })
 
-    Html-StartDetails -Summary ("Applications ({0})" -f $appCount)
-    Html-Add "<input type='text' id='sw-filter' placeholder='Filter software...' class='filter-box' onkeyup='filterSoftwareTable()'>"
-    Html-Add "<div id='sw-filter-count' class='small'></div>"
-    Html-AddTable -Items $appsList -Columns @(
+    Write-Action -What ("Applications found: {0} ({1} third-party, {2} Microsoft)" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind ok
+    Html-AddNote -Text ("Applications found: {0} ({1} third-party, {2} Microsoft)" -f $appCount, $thirdPartySoftware.Count, $msSoftware.Count) -Kind info
+
+    $swCols = @(
         @{ Header="Name";      Property="DisplayName" },
         @{ Header="Version";   Property="DisplayVersion" },
         @{ Header="Publisher"; Property="Publisher" },
         @{ Header="Scope";     Property="Scope" },
         @{ Header="Sources";   Property="Sources" }
     )
+
+    if ($thirdPartySoftware.Count -gt 0) {
+        Html-StartDetails -Summary ("Third-Party Software ({0})" -f $thirdPartySoftware.Count)
+        Html-Add "<input type='text' placeholder='Filter third-party software...' class='filter-box' onkeyup='filterTable(this)'>"
+        Html-Add "<div class='small'></div>"
+        Html-AddTable -Items $thirdPartySoftware -Columns $swCols
+        Html-EndDetails
+    }
+
+    if ($msSoftware.Count -gt 0) {
+        Html-StartDetails -Summary ("Microsoft Software ({0})" -f $msSoftware.Count)
+        Html-Add "<input type='text' placeholder='Filter Microsoft software...' class='filter-box' onkeyup='filterTable(this)'>"
+        Html-Add "<div class='small'></div>"
+        Html-AddTable -Items $msSoftware -Columns $swCols
+        Html-EndDetails
+    }
+
     Html-Add @"
 <script>
-function filterSoftwareTable(){
-  var f=document.getElementById('sw-filter').value.toLowerCase();
-  var tbl=document.getElementById('sw-filter').closest('details').querySelector('table');
+function filterTable(inp){
+  var f=inp.value.toLowerCase();
+  var tbl=inp.closest('details').querySelector('table');
   if(!tbl)return;
   var rows=tbl.querySelectorAll('tbody tr');
   var shown=0;
@@ -1824,12 +1865,11 @@ function filterSoftwareTable(){
     rows[i].style.display=match?'':'none';
     if(match)shown++;
   }
-  var c=document.getElementById('sw-filter-count');
+  var c=inp.nextElementSibling;
   c.textContent=f?'Showing '+shown+' of '+rows.length+' applications':'';
 }
 </script>
 "@
-    Html-EndDetails
 }
 else {
     Write-Action -What "Installed software inventory failed." -Kind warn
@@ -2454,23 +2494,6 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         Html-AddNote -Text "Could not retrieve firewall settings." -Kind warn
     }
 
-    # --- Defender ---
-    Html-Add "<h3>Windows Defender</h3>"
-    $def = Safe-Invoke { Get-MpComputerStatus } "Defender Status"
-    if ($def -ne "Error" -and $def) {
-        Html-AddKV -Pairs ([ordered]@{
-            "Real-time protection"         = $def.RealTimeProtectionEnabled
-            "Antivirus signature version"  = $def.AntivirusSignatureVersion
-            "Last quick scan"              = $def.LastQuickScanEndTime
-            "Last full scan"               = $def.LastFullScanEndTime
-        })
-    }
-    else {
-        Write-Action -What "Defender status query failed." -Kind warn
-        Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
-    }
-
-
     # --- Anti-Virus Products ---
     Html-Add "<h3>Anti-Virus Products</h3>"
     $av = Safe-Invoke {
@@ -2478,6 +2501,7 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             Select-Object displayName, productState
     } "AntiVirus Products"
 
+    $avList = @()
     if ($av -ne "Error" -and $av) {
         # Deduplicate by displayName - enterprise suites (e.g. Sophos Intercept X) register
         # multiple sub-components under the same product name in SecurityCenter2.
@@ -2532,23 +2556,18 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             }
 
             [pscustomobject]@{
-                Product    = $_.displayName
-                Status     = $statusBadge
-                Engine     = $engine
-                Signatures = if ($sig -eq "UpToDate") { "<span class='badge good'>Up-to-date</span>" }
-                             elseif ($sig -eq "OutOfDate") { "<span class='badge warn'>Out-of-date</span>" }
-                             else { "<span class='badge warn'>Unknown</span>" }
-                State      = ("0x{0:X6}" -f [int]$state)
+                Product             = $_.displayName
+                RealtimeProtection  = $statusBadge
+                Signatures          = if ($sig -eq "UpToDate") { "<span class='badge good'>Up-to-date</span>" }
+                                      elseif ($sig -eq "OutOfDate") { "<span class='badge bad'>Out-of-date</span>" }
+                                      else { "<span class='badge warn'>Unknown</span>" }
             }
         }
 
-
         Html-AddTable -Items $avRows -Columns @(
-            @{ Header="Product";    Property="Product" },
-            @{ Header="Status";     Property="Status"; Raw=$true },
-            @{ Header="Engine";     Property="Engine" },
-            @{ Header="Signatures"; Property="Signatures"; Raw=$true },
-            @{ Header="State";      Property="State" }
+            @{ Header="Product";                Property="Product" },
+            @{ Header="Real-time Protection";   Property="RealtimeProtection"; Raw=$true },
+            @{ Header="Signatures";             Property="Signatures"; Raw=$true }
         )
         $avOffItems = @($avList) | Where-Object { ([UInt32]$_.productState -band 0xF000) -ne 0x1000 }
         if ($avOffItems.Count -gt 0) {
@@ -2561,6 +2580,39 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
     else {
         Write-Action -What "Anti-Virus product query failed." -Kind warn
         Html-AddNote -Text "Could not retrieve Anti-Virus products (Security Center)." -Kind warn
+    }
+
+    # --- Defender ---
+    # Third-party AV active = any non-Defender product with real-time protection on (0x1000).
+    # When that is the case and Defender's own real-time protection is off (passive mode),
+    # the Defender detail table is irrelevant - show a brief passive-mode note instead.
+    $thirdPartyAvActive = @($avList | Where-Object {
+        $_.displayName -notmatch 'Windows Defender|Microsoft Defender' -and
+        ([UInt32]$_.productState -band 0xF000) -eq 0x1000
+    }).Count -gt 0
+
+    Html-Add "<h3>Windows Defender</h3>"
+    $def = Safe-Invoke { Get-MpComputerStatus } "Defender Status"
+    if ($def -ne "Error" -and $def) {
+        if ($thirdPartyAvActive -and -not $def.RealTimeProtectionEnabled) {
+            $activeAvNames = ($avList | Where-Object {
+                $_.displayName -notmatch 'Windows Defender|Microsoft Defender' -and
+                ([UInt32]$_.productState -band 0xF000) -eq 0x1000
+            } | ForEach-Object { $_.displayName }) -join ', '
+            Write-Action -What "Defender passive - third-party AV active: $activeAvNames" -Kind info
+            Html-AddNote -Text "Windows Defender is in passive mode. $activeAvNames is the active antivirus - Defender details are not applicable." -Kind info
+        } else {
+            Html-AddKV -Pairs ([ordered]@{
+                "Real-time protection"         = $def.RealTimeProtectionEnabled
+                "Antivirus signature version"  = $def.AntivirusSignatureVersion
+                "Last quick scan"              = $def.LastQuickScanEndTime
+                "Last full scan"               = $def.LastFullScanEndTime
+            })
+        }
+    }
+    else {
+        Write-Action -What "Defender status query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
     }
 
     # --- Local Administrators ---
@@ -2590,17 +2642,19 @@ else {
 Html-EndSection
 
 # ============================================================
-# [9] LOCAL USER ACCOUNTS
+# [9] USER ACCOUNTS
 # ============================================================
-Write-Step -Index 9 -Total 13 -Title "Enumerating local user accounts..."
-Write-Action -What "Running: Local user accounts (Get-LocalUser)" -Kind run
-Html-StartSection "Local User Accounts"
+Write-Step -Index 9 -Total 13 -Title "Enumerating user accounts..."
+Write-Action -What "Running: Local user accounts (Get-LocalUser) + Entra ID profiles (ProfileList registry)" -Kind run
+Html-StartSection "User Accounts"
 
+# --- Local Accounts ---
+Html-Add "<h3>Local Accounts</h3>"
 $localUsers = Safe-Invoke { Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordRequired, PasswordLastSet, AccountExpires, Description } "Local User Accounts"
 
 if ($localUsers -ne "Error" -and $localUsers) {
-    $userList = @($localUsers) | Sort-Object Name
-    $userCount = $userList.Count
+    $userList     = @($localUsers) | Sort-Object Name
+    $userCount    = $userList.Count
     $enabledCount = @($userList | Where-Object { $_.Enabled -eq $true }).Count
     $noPasswordReq = @($userList | Where-Object { $_.Enabled -eq $true -and $_.PasswordRequired -eq $false })
 
@@ -2624,7 +2678,7 @@ if ($localUsers -ne "Error" -and $localUsers) {
         }
     }
 
-    Html-StartDetails -Summary ("Accounts ({0})" -f $userCount) -Open
+    Html-StartDetails -Summary ("Local Accounts ({0})" -f $userCount) -Open
     Html-AddTable -Items $userRows -Columns @(
         @{ Header="Name";              Property="Name" },
         @{ Header="Enabled";           Property="Enabled" },
@@ -2643,6 +2697,58 @@ if ($localUsers -ne "Error" -and $localUsers) {
 else {
     Write-Action -What "Local user accounts query failed." -Kind warn
     Html-AddNote -Text "Could not retrieve local user accounts." -Kind warn
+}
+
+# --- Entra ID (Azure AD) Accounts ---
+# SIDs in the S-1-12-1-* namespace are assigned to Entra ID accounts on Windows devices.
+Html-Add "<h3>Entra ID Accounts</h3>"
+$entraAccounts = Safe-Invoke {
+    $results = [System.Collections.Generic.List[object]]::new()
+    $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+    foreach ($profileKey in Get-ChildItem $profileListPath -ErrorAction Stop) {
+        $sid = $profileKey.PSChildName
+        if ($sid -notmatch '^S-1-12-1-') { continue }
+        $profilePath = $profileKey.GetValue("ProfileImagePath")
+        $username    = if ($profilePath) { Split-Path $profilePath -Leaf } else { $sid }
+
+        # ProfileLoadTimeLow / ProfileLoadTimeHigh form a 64-bit Windows FILETIME
+        $timeLow  = $profileKey.GetValue("ProfileLoadTimeLow")
+        $timeHigh = $profileKey.GetValue("ProfileLoadTimeHigh")
+        $lastSignIn = if ($null -ne $timeLow -and $null -ne $timeHigh) {
+            try {
+                $ft = ([Int64][UInt32]$timeHigh -shl 32) -bor [Int64][UInt32]$timeLow
+                if ($ft -gt 0) { [DateTime]::FromFileTime($ft).ToString("yyyy-MM-dd HH:mm") } else { "Unknown" }
+            } catch { "Unknown" }
+        } else { "Unknown" }
+
+        $results.Add([pscustomobject]@{
+            Account     = $username
+            LastSignIn  = $lastSignIn
+            ProfilePath = $profilePath
+        })
+    }
+    @($results)
+} "Entra ID Accounts"
+
+if ($entraAccounts -ne "Error" -and $entraAccounts -and $entraAccounts.Count -gt 0) {
+    $entraList = @($entraAccounts) | Sort-Object Account
+    Write-Action -What ("Entra ID accounts with profiles on this machine: {0}" -f $entraList.Count) -Kind ok
+    Html-AddNote -Text ("Entra ID accounts with profiles on this machine: {0}" -f $entraList.Count) -Kind info
+    Html-StartDetails -Summary ("Entra ID Accounts ({0})" -f $entraList.Count) -Open
+    Html-AddTable -Items $entraList -Columns @(
+        @{ Header="Account";      Property="Account" },
+        @{ Header="Last Sign-In"; Property="LastSignIn" },
+        @{ Header="Profile Path"; Property="ProfilePath" }
+    )
+    Html-EndDetails
+}
+elseif ($entraAccounts -eq "Error") {
+    Write-Action -What "Entra ID account profile query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve Entra ID account profiles." -Kind warn
+}
+else {
+    Write-Action -What "No Entra ID account profiles found on this machine." -Kind info
+    Html-AddNote -Text "No Entra ID account profiles found on this machine." -Kind info
 }
 
 Html-EndSection
@@ -2765,7 +2871,7 @@ $eventLogs = Safe-Invoke {
 
 if ($eventLogs -ne "Error" -and $eventLogs) {
     $logList      = @($eventLogs)
-    $fullLogs     = @($logList | Where-Object { $_.IsFull -eq $true })
+    $fullLogs     = @($logList | Where-Object { $_.IsFull -eq $true -and $_.RetentionMode -ne 'Circular (overwrites)' })
     $disabledLogs = @($logList | Where-Object { $_.Enabled -eq $false })
 
     if ($fullLogs.Count -gt 0) {
@@ -2792,7 +2898,7 @@ if ($eventLogs -ne "Error" -and $eventLogs) {
     ) -RowClass {
         param($r)
         if ($r.Enabled -eq $false -or $r.Enabled -eq "Error") { return 'sev-bad' }
-        if ($r.IsFull -eq $true) { return 'sev-warn' }
+        if ($r.IsFull -eq $true -and $r.RetentionMode -ne 'Circular (overwrites)') { return 'sev-warn' }
         return 'sev-good'
     }
 }
@@ -3419,6 +3525,7 @@ try {
     }
 
     # Build system health score card (replaces TOC position in main content)
+    $score = 0  # safe default; overwritten below when sections are present
     $scoreCardHtml = ""
     if ($Toc -and $Toc.Count -gt 0) {
         $goodCount = @($SectionHealth.Values | Where-Object { $_ -eq 'good' }).Count
@@ -3818,16 +3925,19 @@ $huduUpdateLine
 </table>
 "@
 
-    # Hudu score card - table layout instead of nested flexbox divs
+    # Hudu score card - SVG ring with inline styles + plain-number fallback.
+    # SVG uses only presentation attributes and inline styles (no CSS classes) so it requires
+    # no <style> block. If Hudu's ActionText sanitiser strips <svg> entirely the fallback
+    # <span> below the SVG remains visible as the score indicator.
     $huduScoreCardHtml = ""
     if ($Toc -and $Toc.Count -gt 0) {
         $scoreColor2 = if ($score -ge 7) { '#059669' } elseif ($score -ge 4) { '#d97706' } else { '#dc2626' }
         $huduScoreCardHtml = @"
 <table style='width:100%; border-collapse:collapse; margin-top:16px; border:1px solid rgba(128,128,128,0.2); border-radius:14px; overflow:hidden;'>
 <tr>
-<td style='text-align:center; padding:28px 20px; width:120px; vertical-align:middle;'>
-<span style='font-size:42px; font-weight:700; color:$scoreColor2; line-height:1;'>$scoreDisplay</span><br>
-<span style='font-size:11px; opacity:0.6; text-transform:uppercase; letter-spacing:0.5px;'>out of 10</span>
+<td style='text-align:center; padding:28px 20px; width:140px; vertical-align:middle;'>
+<svg viewBox='0 0 120 120' width='120' height='120' style='display:block; margin:0 auto;'><circle cx='60' cy='60' r='52' fill='none' stroke='#e2e8f0' stroke-width='8'/><circle cx='60' cy='60' r='52' fill='none' stroke='$scoreColor2' stroke-width='8' stroke-linecap='round' stroke-dasharray='$circumference' stroke-dashoffset='$offset' transform='rotate(-90 60 60)'/><text x='60' y='54' text-anchor='middle' style='font-size:22px; font-weight:700; fill:$scoreColor2;'>$scoreDisplay</text><text x='60' y='72' text-anchor='middle' style='font-size:10px; fill:#64748b;'>out of 10</text></svg>
+<span style='font-size:13px; font-weight:700; color:$scoreColor2; display:block; margin-top:6px;'>$scoreDisplay / 10</span>
 </td>
 <td style='padding:28px 32px 28px 12px; vertical-align:middle;'>
 <strong style='font-size:18px;'>System Health Score</strong><br>
@@ -3856,11 +3966,43 @@ $huduUpdateLine
         $huduTocHtml = $tocSb.ToString()
     }
 
+    # Hudu report-wide issues summary (uses <p> not <ul><li> - ActionText sanitizer restructures block elements inside divs)
+    $huduGlobalSummaryHtml = ""
+    if ($GlobalFindings.Count -gt 0) {
+        $gBad2  = @($GlobalFindings | Where-Object { $_.Kind -eq 'bad' })
+        $gWarn2 = @($GlobalFindings | Where-Object { $_.Kind -eq 'warn' })
+        if ($gBad2.Count -gt 0 -or $gWarn2.Count -gt 0) {
+            $gHuduSb = New-Object System.Text.StringBuilder
+            [void]$gHuduSb.AppendLine((Convert-ToHuduInline "<h2>Issues Requiring Attention</h2>"))
+            if ($gBad2.Count -gt 0) {
+                [void]$gHuduSb.AppendLine((Convert-ToHuduInline "<div class='callout callout-bad'>"))
+                [void]$gHuduSb.AppendLine("<strong>Critical Issues</strong>")
+                foreach ($f in $gBad2) {
+                    $kbLink2 = if ($f.KbUrl) { " &rarr; <a href='{0}' target='_blank'>{1}</a>" -f (Html-Enc $f.KbUrl), (Html-Enc $f.KbTitle) } else { "" }
+                    [void]$gHuduSb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1}{2}</p>" -f (Html-Enc $f.Section), (Html-Enc $f.Message), $kbLink2))
+                }
+                [void]$gHuduSb.AppendLine("</div>")
+            }
+            if ($gWarn2.Count -gt 0) {
+                [void]$gHuduSb.AppendLine((Convert-ToHuduInline "<div class='callout callout-warn'>"))
+                [void]$gHuduSb.AppendLine("<strong>Warnings</strong>")
+                foreach ($f in $gWarn2) {
+                    $kbLink2 = if ($f.KbUrl) { " &rarr; <a href='{0}' target='_blank'>{1}</a>" -f (Html-Enc $f.KbUrl), (Html-Enc $f.KbTitle) } else { "" }
+                    [void]$gHuduSb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1}{2}</p>" -f (Html-Enc $f.Section), (Html-Enc $f.Message), $kbLink2))
+                }
+                [void]$gHuduSb.AppendLine("</div>")
+            }
+            $huduGlobalSummaryHtml = $gHuduSb.ToString()
+        }
+    }
+
     # Build Hudu HTML body fragment (used for both file preview and API upload)
     $huduBodyFragment = @"
 $huduHeaderHtml
 
 $huduScoreCardHtml
+
+$huduGlobalSummaryHtml
 
 $huduTocHtml
 
@@ -3906,7 +4048,8 @@ $huduBodyFragment
         -LayoutName     $HuduAssetLayoutName `
         -AssetName      $huduAssetName `
         -HtmlContent    $huduBodyFragment `
-        -AttachmentPath $HtmlReportPath
+        -AttachmentPath $HtmlReportPath `
+        -HealthScore    $score
     if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
         if ($huduResult.FileAttached) {
