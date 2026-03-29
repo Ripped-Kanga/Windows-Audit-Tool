@@ -1394,10 +1394,10 @@ function Publish-HuduAsset {
         Write-Action -What "Creating asset: $AssetName" -Kind run
         $customFields = [System.Collections.Generic.List[object]]::new()
         $customFields.Add(@{ $fieldKey = $HtmlContent })
-        # Cast to [int] - ConvertTo-Json serialises [double] using the current culture's decimal
-        # separator (e.g. "7,5" on European locales), which is invalid JSON. Integers are
-        # always locale-safe. The decimal score is already visible in the HTML report body.
-        if ($scoreFieldKey) { $customFields.Add(@{ $scoreFieldKey = [int][math]::Round($HealthScore) }) }
+        # Format as an invariant-culture string ("7.5") for the Text field.
+        # Avoids locale-dependent decimal separators that would corrupt the value on
+        # European-locale machines when ConvertTo-Json serialises the payload.
+        if ($scoreFieldKey) { $customFields.Add(@{ $scoreFieldKey = $HealthScore.ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture) }) }
         $body = @{
             asset = @{
                 name            = $AssetName
