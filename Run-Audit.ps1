@@ -2453,23 +2453,6 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         Html-AddNote -Text "Could not retrieve firewall settings." -Kind warn
     }
 
-    # --- Defender ---
-    Html-Add "<h3>Windows Defender</h3>"
-    $def = Safe-Invoke { Get-MpComputerStatus } "Defender Status"
-    if ($def -ne "Error" -and $def) {
-        Html-AddKV -Pairs ([ordered]@{
-            "Real-time protection"         = $def.RealTimeProtectionEnabled
-            "Antivirus signature version"  = $def.AntivirusSignatureVersion
-            "Last quick scan"              = $def.LastQuickScanEndTime
-            "Last full scan"               = $def.LastFullScanEndTime
-        })
-    }
-    else {
-        Write-Action -What "Defender status query failed." -Kind warn
-        Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
-    }
-
-
     # --- Anti-Virus Products ---
     Html-Add "<h3>Anti-Virus Products</h3>"
     $av = Safe-Invoke {
@@ -2477,6 +2460,7 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
             Select-Object displayName, productState
     } "AntiVirus Products"
 
+    $avList = @()
     if ($av -ne "Error" -and $av) {
         # Deduplicate by displayName - enterprise suites (e.g. Sophos Intercept X) register
         # multiple sub-components under the same product name in SecurityCenter2.
@@ -2555,6 +2539,39 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
     else {
         Write-Action -What "Anti-Virus product query failed." -Kind warn
         Html-AddNote -Text "Could not retrieve Anti-Virus products (Security Center)." -Kind warn
+    }
+
+    # --- Defender ---
+    # Third-party AV active = any non-Defender product with real-time protection on (0x1000).
+    # When that is the case and Defender's own real-time protection is off (passive mode),
+    # the Defender detail table is irrelevant — show a brief passive-mode note instead.
+    $thirdPartyAvActive = @($avList | Where-Object {
+        $_.displayName -notmatch 'Windows Defender|Microsoft Defender' -and
+        ([UInt32]$_.productState -band 0xF000) -eq 0x1000
+    }).Count -gt 0
+
+    Html-Add "<h3>Windows Defender</h3>"
+    $def = Safe-Invoke { Get-MpComputerStatus } "Defender Status"
+    if ($def -ne "Error" -and $def) {
+        if ($thirdPartyAvActive -and -not $def.RealTimeProtectionEnabled) {
+            $activeAvNames = ($avList | Where-Object {
+                $_.displayName -notmatch 'Windows Defender|Microsoft Defender' -and
+                ([UInt32]$_.productState -band 0xF000) -eq 0x1000
+            } | ForEach-Object { $_.displayName }) -join ', '
+            Write-Action -What "Defender passive — third-party AV active: $activeAvNames" -Kind info
+            Html-AddNote -Text "Windows Defender is in passive mode. $activeAvNames is the active antivirus — Defender details are not applicable." -Kind info
+        } else {
+            Html-AddKV -Pairs ([ordered]@{
+                "Real-time protection"         = $def.RealTimeProtectionEnabled
+                "Antivirus signature version"  = $def.AntivirusSignatureVersion
+                "Last quick scan"              = $def.LastQuickScanEndTime
+                "Last full scan"               = $def.LastFullScanEndTime
+            })
+        }
+    }
+    else {
+        Write-Action -What "Defender status query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
     }
 
     # --- Local Administrators ---
