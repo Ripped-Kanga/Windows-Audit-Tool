@@ -57,14 +57,28 @@ The script will request administrator privileges via UAC automatically in intera
 **Customer name:** In interactive mode the script prompts for a customer/business name after startup. Press ENTER to skip. In `-Silent` mode, pass `-CustomerName "Name"` to include it. When provided, the name appears in the report title, HTML heading, and output filename. When using `-HuduReport`, the customer name is automatically resolved from the Hudu company slug, so `-CustomerName` is not required.
 
 **Outputs:**
-| File | Elevated (admin / SYSTEM / RMM) | Non-elevated (user context) |
-|---|---|---|
-| HTML report | `%TEMP%\<CustomerName> - <ComputerName>-Audit.html` | `%USERPROFILE%\Downloads\<CustomerName> - <ComputerName>-Audit.html` |
-| HTML report (no customer name) | `%TEMP%\<ComputerName>-Audit.html` | `%USERPROFILE%\Downloads\<ComputerName>-Audit.html` |
-| Operational log | `C:\Windows\Temp\AuditLog.txt` | `C:\Windows\Temp\AuditLog.txt` |
-| Hudu preview (when `-HuduReport` used) | `%TEMP%\<CustomerName> - <ComputerName>-Audit-Hudu.html` | `%USERPROFILE%\Downloads\<CustomerName> - <ComputerName>-Audit-Hudu.html` |
 
-> When running elevated interactively, `%TEMP%` typically resolves to `C:\Users\<user>\AppData\Local\Temp`. When running as SYSTEM (Atera, Intune), it resolves to `C:\Windows\Temp`. The Downloads folder is used for non-elevated runs because it is reliably accessible to the current user and is not subject to OneDrive sync folder path variations that affect Documents and Desktop.
+Output paths are determined by deployment context, not elevation level.
+
+**RMM / Silent mode** (when `-Silent` is passed, or the script runs from `C:\Program Files\...`):
+| File | Path |
+|---|---|
+| HTML report | `C:\Program Files\Windows Audit Tool\Results\<ComputerName>-Audit.html` |
+| HTML report (with customer name) | `C:\Program Files\Windows Audit Tool\Results\<CustomerName> - <ComputerName>-Audit.html` |
+| Hudu preview (when `-HuduReport` used) | `C:\Program Files\Windows Audit Tool\Results\<ComputerName>-Audit-Hudu.html` |
+| Operational log | `C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt` |
+
+**Interactive mode** (run from any other location):
+| File | Path |
+|---|---|
+| HTML report | `<script-dir>\Windows Audit Tool\<ComputerName>-Audit.html` |
+| HTML report (with customer name) | `<script-dir>\Windows Audit Tool\<CustomerName> - <ComputerName>-Audit.html` |
+| Hudu preview (when `-HuduReport` used) | `<script-dir>\Windows Audit Tool\<ComputerName>-Audit-Hudu.html` |
+| Operational log | `<script-dir>\Windows Audit Tool\AuditLog.txt` |
+
+> The first few log entries written before the output directory is resolved always land in `C:\Windows\Temp\AuditLog.txt` (the bootstrap log). Once the deployment context is determined, logging continues at the final path above. The `Windows Audit Tool` output subdirectory is created automatically if it does not exist.
+
+> When using `RMM-Atera-Deploy.ps1`, the script is cached at `C:\Program Files\Windows Audit Tool\Scripts\Run-Audit.ps1` and runs from that path, so RMM mode is activated automatically.
 
 ---
 

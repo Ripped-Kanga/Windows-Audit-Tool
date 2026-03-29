@@ -3,9 +3,15 @@
     System Audit Script with progress output + security baseline.
 
     Output:
-      - HTML report written to %TEMP%\<COMPUTER>-Audit.html (elevated)
-                            or %USERPROFILE%\Downloads\<COMPUTER>-Audit.html (non-elevated)
-      - Operational log written to C:\Windows\Temp\AuditLog.txt
+      RMM / Silent mode (or running from C:\Program Files\...):
+        HTML report  ->  C:\Program Files\Windows Audit Tool\Results\<COMPUTER>-Audit.html
+        Audit log    ->  C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt
+      Interactive mode (run from any other location):
+        HTML report  ->  <script-dir>\Windows Audit Tool\<COMPUTER>-Audit.html
+        Audit log    ->  <script-dir>\Windows Audit Tool\AuditLog.txt
+
+      Bootstrap log (first few lines, before paths are resolved):
+        C:\Windows\Temp\AuditLog.txt
 #>
 
 param(
@@ -47,7 +53,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.3.2.6"
+$ScriptVersion = "1.3.2.7"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -58,8 +64,8 @@ if (-not $ComputerName -or $ComputerName -eq "") {
 }
 
 $LogPath = "C:\Windows\Temp\AuditLog.txt"
-# $HtmlReportPath and $HuduHtmlReportPath are set after the elevation check,
-# once $IsElevated is known (elevated -> $env:TEMP, non-elevated -> Downloads).
+# Bootstrap log path — used only until $ScriptDir and $IsRmmMode are resolved inside the main try block.
+# $HtmlReportPath, $HuduHtmlReportPath, $ReportDir, and final $LogPath are all set there.
 
 # ------------------------- #
 # Logging Helper            #
@@ -1093,18 +1099,11 @@ function Invoke-SelfUpdate {
         [switch]$IncludeExe
     )
 
-    # Determine the directory containing the running script/exe
-    $scriptDir = $null
-    $runningAsExe = $false
-    if ($PSCommandPath) {
-        $scriptDir = Split-Path -Parent $PSCommandPath
-    } else {
-        $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
-        $scriptDir = Split-Path -Parent $exePath
-        $runningAsExe = $true
-    }
+    # Use the script-level $ScriptDir resolved at startup
+    $localScriptDir = $ScriptDir
+    $runningAsExe   = -not [bool]$PSCommandPath
 
-    if (-not $scriptDir) {
+    if (-not $localScriptDir) {
         Log "Self-update: could not determine script directory"
         Write-Action -What "Update failed: could not determine script directory" -Kind warn
         return $false
@@ -1114,7 +1113,7 @@ function Invoke-SelfUpdate {
 
     # Download .ps1
     if ($IncludeScript -and $UpdateInfo.Ps1DownloadUrl) {
-        $ps1Target = Join-Path $scriptDir "Run-Audit.ps1"
+        $ps1Target = Join-Path $localScriptDir "Run-Audit.ps1"
         try {
             Write-Action -What "Downloading Run-Audit.ps1..." -Kind run
             Invoke-WebRequest -Uri $UpdateInfo.Ps1DownloadUrl -OutFile $ps1Target -TimeoutSec 30 -ErrorAction Stop
@@ -1129,8 +1128,8 @@ function Invoke-SelfUpdate {
 
     # Download .exe
     if ($IncludeExe -and $UpdateInfo.ExeDownloadUrl) {
-        $exeTarget = Join-Path $scriptDir "Run-Audit.exe"
-        $exeTemp   = Join-Path $scriptDir "Run-Audit.exe.update"
+        $exeTarget = Join-Path $localScriptDir "Run-Audit.exe"
+        $exeTemp   = Join-Path $localScriptDir "Run-Audit.exe.update"
 
         if ($runningAsExe) {
             # Running exe is locked - download to temp file for manual swap
@@ -1167,18 +1166,11 @@ function Invoke-PendingExeSwap {
       If a previous update left a Run-Audit.exe.update file (because the exe
       was locked), swap it into place now before the audit starts.
     #>
-    $scriptDir = $null
-    if ($PSCommandPath) {
-        $scriptDir = Split-Path -Parent $PSCommandPath
-    } else {
-        $exePath = Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0])
-        $scriptDir = Split-Path -Parent $exePath
-    }
+    $localScriptDir = $ScriptDir
+    if (-not $localScriptDir) { return }
 
-    if (-not $scriptDir) { return }
-
-    $pending = Join-Path $scriptDir "Run-Audit.exe.update"
-    $target  = Join-Path $scriptDir "Run-Audit.exe"
+    $pending = Join-Path $localScriptDir "Run-Audit.exe.update"
+    $target  = Join-Path $localScriptDir "Run-Audit.exe"
 
     if (Test-Path -LiteralPath $pending) {
         try {
@@ -1429,6 +1421,24 @@ try {
 
 Log "INIT: entered main try block"
 
+# Resolve the directory containing the running script or .exe.
+# $PSCommandPath is populated for .ps1; for a PS2EXE .exe it is $null.
+$ScriptDir = $null
+if ($PSCommandPath) {
+    $ScriptDir = Split-Path -Parent $PSCommandPath
+} else {
+    try {
+        $ScriptDir = Split-Path -Parent (Convert-Path -LiteralPath ([Environment]::GetCommandLineArgs()[0]))
+    } catch {
+        $ScriptDir = $null
+    }
+}
+Log ("ScriptDir resolved: {0}" -f $(if ($ScriptDir) { $ScriptDir } else { '(null)' }))
+
+# RMM mode: -Silent was passed, OR the script is running from a Program Files path.
+$IsRmmMode = $Silent -or ($ScriptDir -and $ScriptDir -like 'C:\Program Files*')
+Log ("Deployment mode: {0}" -f $(if ($IsRmmMode) { 'RMM/Silent' } else { 'Interactive' }))
+
 if (-not $Silent) {
 # Banner - Base64 encoded to keep .ps1 pure ASCII (PS 5.1 compat)
 $BannerWindowsB64 = "4paI4paI4pWXICAgIOKWiOKWiOKVl+KWiOKWiOKVl+KWiOKWiOKWiOKVlyAgIOKWiOKWiOKVl+KWiOKWiOKWiOKWiOKWiOKWiOKVlyAg4paI4paI4paI4paI4paI4paI4pWXIOKWiOKWiOKVlyAgICDilojilojilZfilojilojilojilojilojilojilojilZcK4paI4paI4pWRICAgIOKWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKWiOKWiOKVlyAg4paI4paI4pWR4paI4paI4pWU4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4pWQ4paI4paI4pWX4paI4paI4pWRICAgIOKWiOKWiOKVkeKWiOKWiOKVlOKVkOKVkOKVkOKVkOKVnQrilojilojilZEg4paI4pWXIOKWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKVlOKWiOKWiOKVlyDilojilojilZHilojilojilZEgIOKWiOKWiOKVkeKWiOKWiOKVkSAgIOKWiOKWiOKVkeKWiOKWiOKVkSDilojilZcg4paI4paI4pWR4paI4paI4paI4paI4paI4paI4paI4pWXCuKWiOKWiOKVkeKWiOKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKVkeKWiOKWiOKVkeKVmuKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKVkSAg4paI4paI4pWR4paI4paI4pWRICAg4paI4paI4pWR4paI4paI4pWR4paI4paI4paI4pWX4paI4paI4pWR4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWRCuKVmuKWiOKWiOKWiOKVlOKWiOKWiOKWiOKVlOKVneKWiOKWiOKVkeKWiOKWiOKVkSDilZrilojilojilojilojilZHilojilojilojilojilojilojilZTilZ3ilZrilojilojilojilojilojilojilZTilZ3ilZrilojilojilojilZTilojilojilojilZTilZ3ilojilojilojilojilojilojilojilZEKIOKVmuKVkOKVkOKVneKVmuKVkOKVkOKVnSDilZrilZDilZ3ilZrilZDilZ0gIOKVmuKVkOKVkOKVkOKVneKVmuKVkOKVkOKVkOKVkOKVkOKVnSAg4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWdICDilZrilZDilZDilZ3ilZrilZDilZDilZ0g4pWa4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWd"
@@ -1547,20 +1557,36 @@ if ($IsElevated) {
 
 Write-Mode -IsElevated:$IsElevated
 
-# ------------------------- #
-# Report Output Paths       #
-# ------------------------- #
-# Elevated (admin / SYSTEM / RMM): land in $env:TEMP; fall back to C:\Windows\Temp if
-# $env:TEMP is unset (can occur in some RMM SYSTEM execution contexts).
-# Non-elevated (user context): land in Downloads - accessible, not affected by OneDrive sync paths
-if ($IsElevated) {
-    $ReportDir = if ($env:TEMP) { $env:TEMP } else { "C:\Windows\Temp" }
+# ------------------------------------ #
+# Output Directory Routing             #
+# ------------------------------------ #
+# RMM/Silent (or running from C:\Program Files\...):
+#   Reports -> C:\Program Files\Windows Audit Tool\Results\
+#   Logs    -> C:\Program Files\Windows Audit Tool\Logs\
+# Interactive (any other location):
+#   Reports -> <script-dir>\Windows Audit Tool\
+#   Logs    -> <script-dir>\Windows Audit Tool\
+if ($IsRmmMode) {
+    $ProgramFilesBase = "C:\Program Files\Windows Audit Tool"
+    $ReportDir        = Join-Path $ProgramFilesBase "Results"
+    $LogDir           = Join-Path $ProgramFilesBase "Logs"
 } else {
-    $ReportDir = if ($env:USERPROFILE) { "$env:USERPROFILE\Downloads" } else { "C:\Windows\Temp" }
+    $OutputBase = Join-Path (if ($ScriptDir) { $ScriptDir } else { $env:USERPROFILE }) "Windows Audit Tool"
+    $ReportDir  = $OutputBase
+    $LogDir     = $OutputBase
 }
-if ($ReportDir -and -not (Test-Path -LiteralPath $ReportDir -ErrorAction SilentlyContinue)) {
-    New-Item -ItemType Directory -Path $ReportDir -Force -ErrorAction SilentlyContinue | Out-Null
+
+foreach ($dir in @($ReportDir, $LogDir)) {
+    if ($dir -and -not (Test-Path -LiteralPath $dir -ErrorAction SilentlyContinue)) {
+        New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null
+    }
 }
+
+# Update $LogPath to its final destination now that the output directory is resolved.
+# The first few startup log entries already landed in the bootstrap path (C:\Windows\Temp\AuditLog.txt).
+$LogPath = Join-Path $LogDir "AuditLog.txt"
+Log ("Log continued at final path: {0}" -f $LogPath)
+
 $HtmlReportPath     = Join-Path $ReportDir "${ComputerName}-Audit.html"
 $HuduHtmlReportPath = Join-Path $ReportDir "${ComputerName}-Audit-Hudu.html"
 Log ("Report output directory: {0}" -f $ReportDir)
