@@ -3855,11 +3855,43 @@ $huduUpdateLine
         $huduTocHtml = $tocSb.ToString()
     }
 
+    # Hudu report-wide issues summary (uses <p> not <ul><li> - ActionText sanitizer restructures block elements inside divs)
+    $huduGlobalSummaryHtml = ""
+    if ($GlobalFindings.Count -gt 0) {
+        $gBad2  = @($GlobalFindings | Where-Object { $_.Kind -eq 'bad' })
+        $gWarn2 = @($GlobalFindings | Where-Object { $_.Kind -eq 'warn' })
+        if ($gBad2.Count -gt 0 -or $gWarn2.Count -gt 0) {
+            $gHuduSb = New-Object System.Text.StringBuilder
+            [void]$gHuduSb.AppendLine((Convert-ToHuduInline "<h2>Issues Requiring Attention</h2>"))
+            if ($gBad2.Count -gt 0) {
+                [void]$gHuduSb.AppendLine((Convert-ToHuduInline "<div class='callout callout-bad'>"))
+                [void]$gHuduSb.AppendLine("<strong>Critical Issues</strong>")
+                foreach ($f in $gBad2) {
+                    $kbLink2 = if ($f.KbUrl) { " &rarr; <a href='{0}' target='_blank'>{1}</a>" -f (Html-Enc $f.KbUrl), (Html-Enc $f.KbTitle) } else { "" }
+                    [void]$gHuduSb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1}{2}</p>" -f (Html-Enc $f.Section), (Html-Enc $f.Message), $kbLink2))
+                }
+                [void]$gHuduSb.AppendLine("</div>")
+            }
+            if ($gWarn2.Count -gt 0) {
+                [void]$gHuduSb.AppendLine((Convert-ToHuduInline "<div class='callout callout-warn'>"))
+                [void]$gHuduSb.AppendLine("<strong>Warnings</strong>")
+                foreach ($f in $gWarn2) {
+                    $kbLink2 = if ($f.KbUrl) { " &rarr; <a href='{0}' target='_blank'>{1}</a>" -f (Html-Enc $f.KbUrl), (Html-Enc $f.KbTitle) } else { "" }
+                    [void]$gHuduSb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1}{2}</p>" -f (Html-Enc $f.Section), (Html-Enc $f.Message), $kbLink2))
+                }
+                [void]$gHuduSb.AppendLine("</div>")
+            }
+            $huduGlobalSummaryHtml = $gHuduSb.ToString()
+        }
+    }
+
     # Build Hudu HTML body fragment (used for both file preview and API upload)
     $huduBodyFragment = @"
 $huduHeaderHtml
 
 $huduScoreCardHtml
+
+$huduGlobalSummaryHtml
 
 $huduTocHtml
 
