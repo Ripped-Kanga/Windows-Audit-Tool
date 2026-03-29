@@ -2975,10 +2975,7 @@ $appLocker = Safe-Invoke {
     # Check if any collection is in Enforce mode (vs AuditOnly)
     $enforceCount = @($collections | Where-Object { $_.EnforcementMode -eq 'Enabled' }).Count
     $auditCount   = @($collections | Where-Object { $_.EnforcementMode -eq 'AuditOnly' }).Count
-    $modeLabel    = if ($enforceCount -gt 0 -and $auditCount -eq 0) { 'Enforce' }
-                    elseif ($enforceCount -gt 0) { "Mixed (Enforce: $enforceCount, Audit: $auditCount)" }
-                    elseif ($auditCount -gt 0)   { 'Audit only' }
-                    else                          { 'None' }
+    $modeLabel = if ($enforceCount -gt 0 -and $auditCount -eq 0) { 'Enforce' } elseif ($enforceCount -gt 0) { "Mixed (Enforce: $enforceCount, Audit: $auditCount)" } elseif ($auditCount -gt 0) { 'Audit only' } else { 'None' }
     [pscustomobject]@{
         Configured    = ($ruleCount -gt 0)
         RuleCount     = $ruleCount
@@ -2994,9 +2991,7 @@ $wdac = Safe-Invoke {
     # Check for deployed SIPolicy.p7b file - strongest indicator of active WDAC policy
     $policyFile = Test-Path "$env:WINDIR\System32\CodeIntegrity\SIPolicy.p7b" -ErrorAction SilentlyContinue
     $found = ($null -ne $ciConfig) -or ($null -ne $ciPolicy) -or $policyFile
-    $detail = if ($policyFile) { "WDAC SIPolicy.p7b deployed" }
-              elseif ($null -ne $ciConfig -or $null -ne $ciPolicy) { "WDAC CI registry key present (no SIPolicy.p7b found)" }
-              else { "No WDAC policy detected" }
+    $detail = if ($policyFile) { "WDAC SIPolicy.p7b deployed" } elseif ($null -ne $ciConfig -or $null -ne $ciPolicy) { "WDAC CI registry key present (no SIPolicy.p7b found)" } else { "No WDAC policy detected" }
     [pscustomobject]@{
         Configured  = $found
         PolicyFile  = $policyFile
@@ -3010,8 +3005,7 @@ $psExecPolicy = Safe-Invoke {
     if ($null -eq $pol) { $pol = Get-ExecutionPolicy -ErrorAction SilentlyContinue }
     $pol
 } "PS Execution Policy"
-$psExecLabel = if ($psExecPolicy -eq "Error" -or $null -eq $psExecPolicy) { "Query failed" }
-               else { "$psExecPolicy" }
+$psExecLabel = if ($psExecPolicy -eq "Error" -or $null -eq $psExecPolicy) { "Query failed" } else { "$psExecPolicy" }
 $psExecClass = switch ($psExecPolicy) {
     'Restricted'     { 'sev-good' }
     'AllSigned'      { 'sev-good' }
@@ -3028,9 +3022,13 @@ $acStatus    = if ($appLockEnf -or $wdacOk) { "Detected (Enforcing)" } elseif ($
 $acBadge     = if ($appLockEnf -or $wdacOk) { "good" } elseif ($appLockOk) { "warn" } else { "bad" }
 $acClass     = if ($acBadge -eq "good") { "sev-good" } elseif ($acBadge -eq "warn") { "sev-warn" } else { "sev-bad" }
 
+$appLockRowClass = if ($appLockEnf) { "sev-good" } elseif ($appLockOk) { "sev-warn" } else { "sev-bad" }
+$wdacRowClass    = if ($wdacOk) { "sev-good" } else { "sev-warn" }
+$appLockDetail   = if ($appLocker -ne "Error" -and $appLocker) { $appLocker.Detail } else { "Query failed" }
+$wdacDetail      = if ($wdac -ne "Error" -and $wdac) { $wdac.Detail } else { "Query failed" }
 Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>AppLocker</th><td>{1}</td></tr>" -f (if ($appLockEnf) { "sev-good" } elseif ($appLockOk) { "sev-warn" } else { "sev-bad" }), (Html-Enc $(if ($appLocker -ne "Error" -and $appLocker) { $appLocker.Detail } else { "Query failed" })))
-Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f (if ($wdacOk) { "sev-good" } else { "sev-warn" }), (Html-Enc $(if ($wdac -ne "Error" -and $wdac) { $wdac.Detail } else { "Query failed" })))
+Html-Add ("<tr class='{0}'><th>AppLocker</th><td>{1}</td></tr>"          -f $appLockRowClass, (Html-Enc $appLockDetail))
+Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f $wdacRowClass, (Html-Enc $wdacDetail))
 Html-Add ("<tr class='{0}'><th>PowerShell Execution Policy</th><td>{1}</td></tr>" -f $psExecClass, (Html-Enc $psExecLabel))
 Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $acBadge, $acStatus)
 Html-Add "</tbody></table>"
@@ -3176,9 +3174,7 @@ foreach ($app in $officeApps) {
         } "XL4 Macro Block"
     }
 
-    $blockInternetLabel = if ($blockInternet -eq "Error" -or $null -eq $blockInternet) { "" }
-                          elseif ($blockInternet -eq 1) { " | Internet macros: Blocked" }
-                          else { " | Internet macros: Allowed" }
+    $blockInternetLabel = if ($blockInternet -eq "Error" -or $null -eq $blockInternet) { "" } elseif ($blockInternet -eq 1) { " | Internet macros: Blocked" } else { " | Internet macros: Allowed" }
 
     if ($null -ne $effective -or ($app -eq 'Excel' -and $xl4Block -ne "Error" -and $null -ne $xl4Block)) {
         $label = switch ($effective) {
@@ -3285,10 +3281,7 @@ if ($asrIds -ne "Error" -and $asrIds -and $asrActions -ne "Error" -and $asrActio
 }
 $asrBlockCount = @($asrRows | Where-Object { $_.ModeVal -eq 1 }).Count
 $asrAuditCount = @($asrRows | Where-Object { $_.ModeVal -eq 2 }).Count
-$asrSummary    = if ($asrCount -eq 0) { "No ASR rules configured" }
-                 elseif ($asrBlockCount -gt 0 -and $asrAuditCount -eq 0) { "$asrBlockCount rule(s) in Block mode" }
-                 elseif ($asrBlockCount -gt 0) { "$asrBlockCount Block, $asrAuditCount Audit" }
-                 else { "$asrAuditCount rule(s) in Audit mode only" }
+$asrSummary    = if ($asrCount -eq 0) { "No ASR rules configured" } elseif ($asrBlockCount -gt 0 -and $asrAuditCount -eq 0) { "$asrBlockCount rule(s) in Block mode" } elseif ($asrBlockCount -gt 0) { "$asrBlockCount Block, $asrAuditCount Audit" } else { "$asrAuditCount rule(s) in Audit mode only" }
 $asrClass = if ($asrBlockCount -gt 0) { "sev-good" } elseif ($asrAuditCount -gt 0) { "sev-warn" } else { "sev-warn" }
 
 # PS v2: elevation-gated; fall back to unknown when not admin
@@ -3419,9 +3412,7 @@ $laps = Safe-Invoke {
         WindowsLaps = $wlapsEnabled
         LegacyLaps  = $legacyEnabled
         Detected    = ($wlapsEnabled -or $legacyEnabled)
-        Detail      = if ($wlapsEnabled) { "Windows LAPS configured" }
-                      elseif ($legacyEnabled) { "Legacy LAPS (AdmPwd) detected" }
-                      else { "LAPS not detected" }
+        Detail      = if ($wlapsEnabled) { "Windows LAPS configured" } elseif ($legacyEnabled) { "Legacy LAPS (AdmPwd) detected" } else { "LAPS not detected" }
     }
 } "LAPS Detection"
 $lapsOk    = ($laps -ne "Error") -and $laps -and $laps.Detected
@@ -3433,10 +3424,7 @@ $lapsClass = if ($lapsOk) { "sev-good" } else { "sev-warn" }
 $filterAdminToken = Safe-Invoke {
     (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name FilterAdministratorToken -ErrorAction SilentlyContinue).FilterAdministratorToken
 } "FilterAdministratorToken"
-$fatLabel = if ($filterAdminToken -eq "Error") { "Query failed" }
-            elseif ($filterAdminToken -eq 1) { "Enabled (built-in admin restricted)" }
-            elseif ($filterAdminToken -eq 0) { "Disabled (built-in admin unrestricted)" }
-            else { "Not set (default - built-in admin unrestricted)" }
+$fatLabel = if ($filterAdminToken -eq "Error") { "Query failed" } elseif ($filterAdminToken -eq 1) { "Enabled (built-in admin restricted)" } elseif ($filterAdminToken -eq 0) { "Disabled (built-in admin unrestricted)" } else { "Not set (default - built-in admin unrestricted)" }
 $fatClass = if ($filterAdminToken -eq 1) { "sev-good" } else { "sev-warn" }
 
 Html-Add "<table class='kv-table'><tbody>"
@@ -3543,12 +3531,8 @@ $wh4bEnrolled = Safe-Invoke {
 
 # Determine enrollment vs policy distinction
 $wh4bActuallyEnrolled = ($wh4bEnrolled -ne "Error") -and $wh4bEnrolled -and $wh4bEnrolled.Enrolled
-$wh4bEnrolledLabel = if ($wh4bEnrolled -eq "Error") { "Query failed" }
-                     elseif ($wh4bActuallyEnrolled) { "Enrolled (NGC credential store present)" }
-                     else { "Not enrolled (NGC store absent)" }
-$wh4bEnrolledClass = if ($wh4bActuallyEnrolled) { "sev-good" }
-                     elseif ($wh4bPolicy -eq 1) { "sev-warn" }
-                     else { "sev-warn" }
+$wh4bEnrolledLabel = if ($wh4bEnrolled -eq "Error") { "Query failed" } elseif ($wh4bActuallyEnrolled) { "Enrolled (NGC credential store present)" } else { "Not enrolled (NGC store absent)" }
+$wh4bEnrolledClass = if ($wh4bActuallyEnrolled) { "sev-good" } elseif ($wh4bPolicy -eq 1) { "sev-warn" } else { "sev-warn" }
 
 # Correlate with Entra ID join status from dsregcmd (reuse $dsregLines if available)
 $wh4bEntraCorrelated = $false
@@ -3601,10 +3585,7 @@ $vssDaysOld = $null
 if ($null -ne $newestShadow) {
     $vssDaysOld = ([datetime]::UtcNow - [datetime]$newestShadow).Days
 }
-$scClass8 = if ($scCopies.Count -eq 0) { "sev-warn" }
-            elseif ($null -ne $vssDaysOld -and $vssDaysOld -le 1) { "sev-good" }
-            elseif ($null -ne $vssDaysOld -and $vssDaysOld -le 7) { "sev-warn" }
-            else { "sev-bad" }
+$scClass8 = if ($scCopies.Count -eq 0) { "sev-warn" } elseif ($null -ne $vssDaysOld -and $vssDaysOld -le 1) { "sev-good" } elseif ($null -ne $vssDaysOld -and $vssDaysOld -le 7) { "sev-warn" } else { "sev-bad" }
 
 # VSS service status
 $vssSvc = Safe-Invoke {
@@ -3652,9 +3633,7 @@ $tpBackupLabel = if ($tpBackupDetected) { "$($thirdPartyBackupAgents.Count) agen
 $tpBackupClass = if ($tpBackupDetected) { "sev-good" } else { "sev-warn" }
 
 # VSS age label
-$vssAgeLabel = if ($scCopies.Count -eq 0) { "No snapshots" }
-               elseif ($null -ne $vssDaysOld) { "$($scCopies.Count) snapshot(s); newest $vssDaysOld day(s) ago" }
-               else { "$($scCopies.Count) snapshot(s); age unknown" }
+$vssAgeLabel = if ($scCopies.Count -eq 0) { "No snapshots" } elseif ($null -ne $vssDaysOld) { "$($scCopies.Count) snapshot(s); newest $vssDaysOld day(s) ago" } else { "$($scCopies.Count) snapshot(s); age unknown" }
 
 Html-Add "<table class='kv-table'><tbody>"
 Html-Add ("<tr class='{0}'><th>VSS Shadow Copies</th><td>{1}</td></tr>"         -f $scClass8,       (Html-Enc $vssAgeLabel))
