@@ -222,8 +222,13 @@ There is **no automated test suite**. All validation is manual:
 ### Release Workflow
 When cutting a new version:
 1. Bump `$ScriptVersion` in `Run-Audit.ps1` to match the branch/tag name exactly (e.g. branch `v1.3.2` → `$ScriptVersion = "1.3.2"`)
-2. Commit and push — the GitHub Actions workflow (`.github/workflows/release.yml`) handles compilation and release creation automatically when a `v*` tag is pushed
-3. Push the tag: `git tag v1.3.2 && git push origin v1.3.2`
+2. Commit, push branch, open PR, merge to main
+3. Push an annotated tag with a brief change summary — the Action creates the release and compiles the `.exe`:
+   ```
+   git tag -a v1.3.2 -m "Brief summary of changes" && git push origin refs/tags/v1.3.2
+   ```
+
+> **Never use `gh release create`** — the Action creates the release automatically from the tag. A manually created release will conflict and break the workflow.
 
 The workflow validates that `$ScriptVersion` matches the tag before compiling, so a version mismatch will fail the build.
 
