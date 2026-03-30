@@ -717,7 +717,7 @@ function Get-InstalledSoftwareInventory {
             Log ("Installed Software sample (first 20): {0}" -f (($sample | ForEach-Object { $_.DisplayName }) -join " | "))
             foreach ($s in $sample) {
                 try {
-                    $props = $s.PSObject.Properties | ForEach-Object { "{0}={1}" -f $_.Name, (if ($_.Value) { $_.Value.GetType().Name } else { "null" }) }
+                    $props = $s.PSObject.Properties | ForEach-Object { "{0}={1}" -f $_.Name, $(if ($_.Value) { $_.Value.GetType().Name } else { "null" }) }
                     Log ("Installed Software row types: {0}" -f ($props -join ", "))
                 } catch { }
             }
@@ -1696,7 +1696,7 @@ if ($IsRmmMode) {
     $ReportDir        = Join-Path $ProgramFilesBase "Results"
     $LogDir           = Join-Path $ProgramFilesBase "Logs"
 } else {
-    $OutputBase = Join-Path (if ($ScriptDir) { $ScriptDir } else { $env:USERPROFILE }) "Windows Audit Tool"
+    $OutputBase = Join-Path $(if ($ScriptDir) { $ScriptDir } else { $env:USERPROFILE }) "Windows Audit Tool"
     $ReportDir  = $OutputBase
     $LogDir     = $OutputBase
 }
@@ -3167,7 +3167,7 @@ Html-StartKvTable
 if ($lastHotfix -ne "Error" -and $lastHotfix) {
     Html-AddKvRow -Key "Most Recent Hotfix"    -Value $lastHotfix.HotFixID  -RowClass $patchClass
     Html-AddKvRow -Key "Installed On"          -Value $lastHotfix.InstalledOn -RowClass $patchClass
-    Html-AddKvRow -Key "Days Since Last Patch" -Value (if ($null -ne $patchDays) { "$patchDays days" } else { "Unknown" }) -RowClass $patchClass
+    Html-AddKvRow -Key "Days Since Last Patch" -Value $(if ($null -ne $patchDays) { "$patchDays days" } else { "Unknown" }) -RowClass $patchClass
 } else {
     Html-AddKvRow -Key "Most Recent Hotfix" -Value "Could not retrieve" -RowClass "sev-warn"
 }
@@ -3522,7 +3522,7 @@ Html-AddKvRow -Key "UAC Enabled (EnableLUA)"       -Value $uacLuaLabel      -Row
 Html-AddKvRow -Key "UAC Admin Consent Prompt"      -Value $uacBehaviorLabel -RowClass $uacBehaviorClass
 Html-AddKvRow -Key "Filter Administrator Token"    -Value $fatLabel         -RowClass $fatClass
 Html-AddKvRow -Key "LAPS"                          -Value $lapsLabel        -RowClass $lapsClass
-Html-AddKvRow -Key "Local Administrator Count"     -Value (if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" }) -RowClass $adminClass
+Html-AddKvRow -Key "Local Administrator Count"     -Value $(if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" }) -RowClass $adminClass
 Html-EndKvTable
 Write-Action -What ("UAC: {0} | LAPS: {1} | Admin members: {2}" -f $uacLuaLabel, $lapsLabel, $(if ($null -ne $adminCount) { $adminCount } else { "unknown" })) -Kind info
 $e8AdminOk = ($uacLua -eq 1) -and ($null -ne $adminCount) -and ($adminCount -le 4) -and $lapsOk
@@ -3579,7 +3579,7 @@ if ($wuSvc -ne "Error" -and $wuSvc) {
 }
 if ($muEnabled -ne "Error") {
     $muE8Class = if ($muEnabled) { 'sev-good' } else { 'sev-warn' }
-    Html-AddKvRow -Key "Microsoft Update" -Value (if ($muEnabled) { 'Enabled' } else { 'Disabled (non-OS Microsoft products excluded)' }) -RowClass $muE8Class
+    Html-AddKvRow -Key "Microsoft Update" -Value $(if ($muEnabled) { 'Enabled' } else { 'Disabled (non-OS Microsoft products excluded)' }) -RowClass $muE8Class
 }
 Html-EndKvTable
 Write-Action -What ("OS: {0} | WU Service: {1}" -f $(if ($osBuild -ne "Error" -and $osBuild) { "$($osBuild.ProductName) $($osBuild.DisplayVersion)" } else { "unknown" }), $(if ($wuSvc -ne "Error" -and $wuSvc) { $wuSvc.Status } else { "unknown" })) -Kind info
