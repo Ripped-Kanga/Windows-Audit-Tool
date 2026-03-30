@@ -33,13 +33,25 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "
 
 Upload `RMM-Atera-Deploy.ps1` once to Atera. It automatically downloads and caches the latest `Run-Audit.ps1` from GitHub Releases on each run, so you never need to update the Atera script when a new version is released.
 
+The deploy script is designed to be scheduled as a **daily Atera automation**. It includes a monthly guard check: the script scans the audit log (`C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt`) for a successful completion entry timestamped in the current calendar month. If found, it exits immediately with code `3` and reports `Audit already completed this month` — no GitHub calls, no audit run. This works correctly for both standard and Hudu deployments (Hudu deletes the local HTML report after upload, but the log entry is always written). On the first run each month, the audit proceeds normally. Pass `-ForceRun` to skip the guard and run unconditionally.
+
 ```powershell
 # Atera script body — no arguments needed for a basic run:
 # (RMM-Atera-Deploy.ps1 injects -Silent automatically)
 
+# Force a run even if an audit already completed this month:
+-ForceRun
+
 # With Hudu integration:
 -HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Audit Reports"
 ```
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Audit completed successfully |
+| `1` | GitHub unreachable and no cached script available |
+| `2` | Download failed and no cached script available |
+| `3` | Audit already completed this month — skipped (override with `-ForceRun`) |
 
 Set the Atera script execution policy to `Bypass` and the timeout to **600 seconds**. See [`RMM-Atera-Deploy.ps1`](RMM-Atera-Deploy.ps1) for full setup notes.
 
