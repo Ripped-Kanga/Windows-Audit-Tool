@@ -5,12 +5,18 @@
     PURPOSE
       Upload this script once to Atera (Devices > Scripts). It manages a locally-cached
       copy of Run-Audit.ps1 on the endpoint, keeps it current from GitHub Releases, then
-      invokes it. You never need to update this script in Atera — only Run-Audit.ps1 is
+      invokes it. You never need to update this script in Atera -- only Run-Audit.ps1 is
       versioned and updated.
+
+      Designed to run as a daily Atera scheduled automation. A monthly guard check prevents
+      the audit from running more than once per calendar month. If an audit report already
+      exists in the Results directory with a write date in the current month, the script
+      exits with code 3 and reports the skip reason. Use -ForceRun to override.
 
     ATERA SETUP NOTES
       - Set execution policy to Bypass in the Atera script configuration
-      - Recommended script timeout: 600 seconds (10 minutes) — covers GitHub fetch + full audit
+      - Recommended script timeout: 600 seconds (10 minutes) -- covers GitHub fetch + full audit
+      - Recommended run schedule: daily (the monthly guard prevents redundant runs)
       - Runs as SYSTEM
         Cached script:  C:\Program Files\Windows Audit Tool\Scripts\Run-Audit.ps1
         Deploy log:     C:\Windows\Temp\AuditDeploy.txt
@@ -19,17 +25,19 @@
 
     PARAMETERS
       Pass only what you need. -Silent is always injected automatically.
+      -ForceRun              Skip the monthly guard check and run the audit regardless.
       Example (Hudu deployment):
         -HuduReport -HuduAPIKey "key" -HuduBaseURL "https://..." -HuduCompanySlug "abc123" -HuduAssetLayoutName "Audit Reports"
 
     EXIT CODES
       0  Audit completed (pass-through from Run-Audit.ps1)
-      1  GitHub unreachable AND no cached Run-Audit.ps1 found — cannot proceed
-      2  Download failed AND no cached Run-Audit.ps1 found — cannot proceed
+      1  GitHub unreachable AND no cached Run-Audit.ps1 found -- cannot proceed
+      2  Download failed AND no cached Run-Audit.ps1 found -- cannot proceed
+      3  Audit already completed this month -- no action taken (use -ForceRun to override)
       Non-zero values from Run-Audit.ps1 are passed through as-is.
 
     LIMITATION
-      No file locking — running two Atera jobs simultaneously against the same endpoint
+      No file locking -- running two Atera jobs simultaneously against the same endpoint
       is unsupported and may cause a corrupted cache file.
 #>
 
@@ -41,16 +49,18 @@ param(
     [string]$HuduAPIKey,
     [string]$HuduBaseURL,
     [string]$HuduCompanySlug,
-    [string]$HuduAssetLayoutName
+    [string]$HuduAssetLayoutName,
+    [switch]$ForceRun
 )
 
 # ------------------------- #
 # Constants                 #
 # ------------------------- #
-$DeployScriptVersion = "1.0.1"
+$DeployScriptVersion = "1.1.0"
 $LogPath    = "C:\Windows\Temp\AuditDeploy.txt"
 $CachedDir  = "C:\Program Files\Windows Audit Tool\Scripts"
 $CachedPath = Join-Path $CachedDir "Run-Audit.ps1"
+$ResultsDir = "C:\Program Files\Windows Audit Tool\Results"
 $ApiUrl     = "https://api.github.com/repos/Ripped-Kanga/Windows-Audit-Tool/releases/latest"
 
 # Ensure the Scripts directory exists before any read/write against $CachedPath
@@ -75,7 +85,35 @@ $Log = {
 & $Log ("Cache path: {0}" -f $CachedPath)
 
 # ------------------------- #
-# GitHub API — latest ver   #
+# Monthly guard check       #
+# ------------------------- #
+if (-not $ForceRun) {
+    $thisYearMon = (Get-Date).ToString("yyyy-MM")
+    $priorReport = $null
+
+    if (Test-Path -LiteralPath $ResultsDir -ErrorAction SilentlyContinue) {
+        $priorReport = Get-ChildItem -LiteralPath $ResultsDir -Filter "*-Audit.html" -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime.ToString("yyyy-MM") -eq $thisYearMon } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+    }
+
+    if ($priorReport) {
+        $skipMsg = "Audit already completed this month ({0}, last run: {1:yyyy-MM-dd HH:mm})" -f $priorReport.Name, $priorReport.LastWriteTime
+        & $Log $skipMsg
+        Write-Host ("[Deploy] {0}" -f $skipMsg) -ForegroundColor Green
+        Write-Host "[Deploy] Use -ForceRun to override the monthly guard and run again." -ForegroundColor Gray
+        exit 3
+    }
+
+    & $Log ("Monthly guard: no audit found for {0} -- proceeding" -f $thisYearMon)
+} else {
+    & $Log "Monthly guard: -ForceRun specified -- skipping guard check"
+    Write-Host "[Deploy] -ForceRun specified -- skipping monthly guard check." -ForegroundColor Cyan
+}
+
+# ------------------------- #
+# GitHub API -- latest ver  #
 # ------------------------- #
 $ApiVersion   = $null
 $DownloadUrl  = $null
