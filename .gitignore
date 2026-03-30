@@ -1,3 +1,4 @@
 *.exe
 *.docx
+!assets/*.docx
 .claude/
