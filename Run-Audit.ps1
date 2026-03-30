@@ -59,7 +59,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.1.0"
+$ScriptVersion = "1.4.1.5"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -257,19 +257,19 @@ function Get-PendingWindowsUpdatesWUA {
         $res  = $searcher.Search($Criteria)
         $list = [System.Collections.Generic.List[object]]::new()
         for ($i = 0; $i -lt $res.Updates.Count; $i++) {
-            $u  = $res.Updates.Item($i)
-            $kb = "N/A"
-            try { if ($u.KBArticleIDs -and $u.KBArticleIDs.Count -gt 0) { $kb = ($u.KBArticleIDs -join ", ") } } catch {}
-            $cats = "N/A"
-            try { if ($u.Categories -and $u.Categories.Count -gt 0) { $cats = (@($u.Categories) | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", " } } catch {}
+            $update        = $res.Updates.Item($i)
+            $kbId          = "N/A"
+            try { if ($update.KBArticleIDs -and $update.KBArticleIDs.Count -gt 0) { $kbId = ($update.KBArticleIDs -join ", ") } } catch {}
+            $categoryNames = "N/A"
+            try { if ($update.Categories -and $update.Categories.Count -gt 0) { $categoryNames = (@($update.Categories) | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", " } } catch {}
             $list.Add([pscustomobject]@{
-                Title          = $u.Title
-                KB             = $kb
-                Categories     = $cats
-                Downloaded     = $u.IsDownloaded
-                Mandatory      = $u.IsMandatory
-                RebootRequired = $u.RebootRequired
-                EulaAccepted   = $u.EulaAccepted
+                Title          = $update.Title
+                KB             = $kbId
+                Categories     = $categoryNames
+                Downloaded     = $update.IsDownloaded
+                Mandatory      = $update.IsMandatory
+                RebootRequired = $update.RebootRequired
+                EulaAccepted   = $update.EulaAccepted
             })
         }
         return [pscustomobject]@{ ResultCode = $res.ResultCode; Count = $res.Updates.Count; Items = @($list) }
@@ -288,11 +288,11 @@ function Get-PendingWindowsUpdatesWUA {
             for ($i = 0; $i -lt $history.Count; $i++) {
                 $h = $history.Item($i)
                 if ($h.ResultCode -eq 4 -and $h.Date -ge $cutoff) {
-                    $kb = "N/A"
-                    try { if ($h.Title -match 'KB(\d+)') { $kb = "KB$($Matches[1])" } } catch {}
+                    $kbId = "N/A"
+                    try { if ($h.Title -match 'KB(\d+)') { $kbId = "KB$($Matches[1])" } } catch {}
                     $failedHistory.Add([pscustomobject]@{
                         Title      = $h.Title
-                        KB         = $kb
+                        KB         = $kbId
                         Date       = $h.Date.ToString('yyyy-MM-dd HH:mm')
                         HResult    = ("0x{0:X8}" -f [uint32]$h.HResult)
                     })
@@ -313,193 +313,201 @@ function Get-PendingWindowsUpdatesWUA {
     }
 }
 
-# ------------------------- #
-# Installed software        #
-# ------------------------- #
-function Get-InstalledSoftwareInventory {
+# ---------------------------------------------------------------- #
+# Installed software — shared helpers                              #
+# ---------------------------------------------------------------- #
+
+function Normalize-Text {
     <#
-      Installed software inventory (robust + trimmed) merging:
-        - Uninstall registry keys (HKLM 64/32 + HKCU)
-        - Loaded user hives (HKU) + offline NTUSER.DAT (when elevated)
-        - Microsoft Store / AppX packages (current user; all users when elevated)
-        - Winget list (best-effort, if present)
-
-      Enhancements:
-        - Normalizes all fields to strings to avoid type-mismatch crashes
-        - Filters noisy "junk" entries (framework/system AppX, winget usage output, component explosions)
-        - Enhanced logging on failure (includes sample object/property types)
+      Normalise a raw string value from registry / winget / AppX:
+        - null/empty  -> ""
+        - whitespace  -> collapsed to single space and trimmed
+        - UTF-8-bytes-decoded-as-CP437 punctuation artifacts -> repaired
     #>
+    param([object]$Value)
+    try {
+        if ($null -eq $Value) { return "" }
+        $s = [string]$Value
+        $s = ($s -replace '\s+', ' ').Trim()
 
-    [CmdletBinding()]
+        # Reverse common UTF-8-bytes-decoded-as-CP437 artifacts.
+        # Pattern: UTF-8 byte E2 -> Gamma (U+0393) in CP437,
+        #          byte 80 -> C-cedilla (U+00C7), third byte varies.
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00AA, '...')  # U+2026 ellipsis        (E2 80 A6)
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00F6, ' - ')  # U+2014 em dash         (E2 80 94)
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00F4, ' - ')  # U+2013 en dash         (E2 80 93)
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00D6, "'")    # U+2019 right single q  (E2 80 99)
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00FF, "'")    # U+2018 left single q   (E2 80 98)
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x009C, '"')    # U+201C left double q   (E2 80 9C)
+        $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x009D, '"')    # U+201D right double q  (E2 80 9D)
+
+        return $s
+    } catch {
+        return ""
+    }
+}
+
+function Normalize-Version {
+    <# Normalise a version string; returns "N/A" for blank/unknown values. #>
+    param([object]$Value)
+    $v = Normalize-Text $Value
+    if ([string]::IsNullOrWhiteSpace($v)) { return "N/A" }
+    if ($v -match '^(N/A|NA|UNKNOWN|NOT AVAILABLE)$') { return "N/A" }
+    return $v
+}
+
+function Join-UniqueValues {
+    <# Join non-empty, trimmed, unique strings with ';'. #>
+    param([string[]]$Values)
+    (($Values | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() } | Sort-Object -Unique) -join ';')
+}
+
+function Test-IsGuidLikeName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    return ($Name -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(_|$)')
+}
+
+function Test-IsNoisyAppx {
+    param([string]$Name, [string]$Publisher)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+    if (Test-IsGuidLikeName $Name) { return $true }
+
+    $noisyPatterns = @(
+        '^Microsoft\.VCLibs(\.|$)',
+        '^Microsoft\.UI\.Xaml(\.|$)',
+        '^Microsoft\.NET\.Native\.(Framework|Runtime)(\.|$)',
+        '^Microsoft\.WindowsAppRuntime(\.|$)',
+        '^Microsoft\.WinAppRuntime(\.|$)',
+        '^MicrosoftCorporationII\.WinAppRuntime(\.|$)',
+
+        '^Microsoft\.Windows\.Apprep\.',
+        '^Microsoft\.Windows\.OOBE',
+        '^Microsoft\.Windows\.AssignedAccess',
+        '^Microsoft\.Windows\.CapturePicker',
+        '^Microsoft\.Windows\.CloudExperienceHost',
+        '^Microsoft\.Windows\.ContentDeliveryManager',
+        '^Microsoft\.Windows\.PeopleExperienceHost',
+        '^Microsoft\.Windows\.ShellExperienceHost',
+        '^Microsoft\.Windows\.StartMenuExperienceHost',
+        '^Microsoft\.Win32WebViewHost',
+
+        '^Microsoft\.AAD\.BrokerPlugin',
+        '^Microsoft\.AccountsControl',
+        '^Microsoft\.CredDialogHost',
+        '^Microsoft\.AsyncTextService',
+        '^Microsoft\.Services\.Store\.',
+        '^Microsoft\.ECApp',
+
+        '^MicrosoftWindows\.Client\.',
+        '^MicrosoftWindows\.LKG\.',
+        '^WindowsWorkload\.',
+
+        '^windows\.immersivecontrolpanel$',
+        '^Windows\.PrintDialog$',
+        '^Windows\.CBSPreview$'
+    )
+
+    foreach ($p in $noisyPatterns) {
+        if ($Name -match $p) { return $true }
+    }
+
+    if ($Publisher -match '^CN=Microsoft Windows' -and $Name -match '_(cw5n1h2txyewy|8wekyb3d8bbwe)$') {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-IsWingetGarbageLine {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+    return ($Name -match '^(usage:|More help can be found|The following |Argument name was not recognized)')
+}
+
+function Test-IsComponentExplosion {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name -match '^Microsoft Visual C\+\+ (20\d{2}|v14)' -and $Name -match '(Minimum|Additional)') { return $true }
+    if ($Name -match '^Microsoft \.NET (Runtime|Host|Host FX Resolver)' -and $Name -match '\(x64\)') { return $true }
+    if ($Name -match '^Python 3\.\d+\.\d+' -and $Name -match '(Core Interpreter|Documentation|Development Libraries|Standard Library|Test Suite|Tcl/Tk Support|pip Bootstrap|Executables|Add to Path)') { return $true }
+    return $false
+}
+
+function Add-SoftwareResult {
+    <# Normalise, filter, and append one entry to the $Results list. #>
+    param(
+        [Parameter(Mandatory)][System.Collections.Generic.List[object]]$Results,
+        [object]$Name,
+        [object]$Version,
+        [object]$Publisher,
+        [object]$InstallLocation,
+        [string]$Scope,
+        [string]$Source
+    )
+    try {
+        $n = Normalize-Text $Name
+        if ([string]::IsNullOrWhiteSpace($n)) { return }
+
+        $v  = Normalize-Text $Version
+        $p  = Normalize-Text $Publisher
+        $il = Normalize-Text $InstallLocation
+
+        if ($Source -match '^AppX' -and (Test-IsNoisyAppx -Name $n -Publisher $p)) { return }
+        if ($Source -eq 'Winget' -and (Test-IsWingetGarbageLine -Name $n))          { return }
+        if (Test-IsComponentExplosion -Name $n)                                      { return }
+
+        $Results.Add([pscustomobject]@{
+            DisplayName     = $n
+            DisplayVersion  = $v
+            Publisher       = $p
+            InstallLocation = $il
+            Scope           = $Scope
+            Source          = $Source
+        }) | Out-Null
+    } catch {
+        Log-ExceptionDetail -Context "Installed Software Add-SoftwareResult" -ErrorRecord $_
+    }
+}
+
+function Add-UninstallEntriesFromRoot {
+    <# Read both 64-bit and 32-bit Uninstall keys under $Root and append results. #>
+    param(
+        [Parameter(Mandatory)][System.Collections.Generic.List[object]]$Results,
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Scope,
+        [Parameter(Mandatory)][string]$Source
+    )
+    foreach ($path in @(
+        "$Root\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "$Root\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )) {
+        try {
+            Get-ItemProperty -Path $path -ErrorAction Stop |
+                Where-Object { $_.DisplayName -and ([string]$_.DisplayName).Trim() -ne "" } |
+                ForEach-Object {
+                    Add-SoftwareResult -Results $Results -Name $_.DisplayName -Version $_.DisplayVersion `
+                        -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope $Scope -Source $Source
+                }
+        } catch {
+            Log-ExceptionDetail -Context ("Installed Software registry read: {0}" -f $path) -ErrorRecord $_
+        }
+    }
+}
+
+# ---------------------------------------------------------------- #
+# Installed software — source collectors                           #
+# ---------------------------------------------------------------- #
+
+function Get-RegistrySoftware {
+    <# Collect software from HKLM/HKCU uninstall keys, loaded HKU hives, and offline NTUSER.DAT hives. #>
     param([switch]$IncludeAllUsers)
 
-    $results = New-Object System.Collections.Generic.List[object]
+    $results = [System.Collections.Generic.List[object]]::new()
 
-    function Normalize-Text {
-        param([object]$Value)
-        try {
-            if ($null -eq $Value) { return "" }
-            $s = [string]$Value
-            $s = ($s -replace '\s+', ' ').Trim()
+    Add-UninstallEntriesFromRoot -Results $results -Root "HKLM:" -Scope "Machine"     -Source "UninstallHKLM"
+    Add-UninstallEntriesFromRoot -Results $results -Root "HKCU:" -Scope "CurrentUser" -Source "UninstallHKCU"
 
-            # Reverse common UTF-8-bytes-decoded-as-CP437 artifacts.
-            # These appear when winget or registry values contain Unicode punctuation
-            # that was stored/transmitted as UTF-8 but decoded using CP437.
-            # Each entry: (CP437-misread sequence) -> correct Unicode replacement.
-            # Pattern: UTF-8 byte E2 always decodes to Gamma (U+0393) in CP437,
-            #          byte 80 to C-cedilla (U+00C7), followed by a third varying byte.
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00AA, '...')  # U+2026 ellipsis        (E2 80 A6)
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00F6, ' - ')  # U+2014 em dash         (E2 80 94)
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00F4, ' - ')  # U+2013 en dash         (E2 80 93)
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00D6, "'")    # U+2019 right single q  (E2 80 99)
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x00FF, "'")    # U+2018 left single q   (E2 80 98)
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x009C, '"')    # U+201C left double q   (E2 80 9C)
-            $s = $s.Replace([char]0x0393 + [char]0x00C7 + [char]0x009D, '"')    # U+201D right double q  (E2 80 9D)
-
-            return $s
-        } catch {
-            return ""
-        }
-    }
-
-    function Test-IsGuidLikeName {
-        param([string]$Name)
-        if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-        return ($Name -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(_|$)')
-    }
-
-    function Test-IsNoisyAppx {
-        param([string]$Name, [string]$Publisher)
-        if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
-        if (Test-IsGuidLikeName $Name) { return $true }
-
-        $noisyPatterns = @(
-            '^Microsoft\.VCLibs(\.|$)',
-            '^Microsoft\.UI\.Xaml(\.|$)',
-            '^Microsoft\.NET\.Native\.(Framework|Runtime)(\.|$)',
-            '^Microsoft\.WindowsAppRuntime(\.|$)',
-            '^Microsoft\.WinAppRuntime(\.|$)',
-            '^MicrosoftCorporationII\.WinAppRuntime(\.|$)',
-
-            '^Microsoft\.Windows\.Apprep\.',
-            '^Microsoft\.Windows\.OOBE',
-            '^Microsoft\.Windows\.AssignedAccess',
-            '^Microsoft\.Windows\.CapturePicker',
-            '^Microsoft\.Windows\.CloudExperienceHost',
-            '^Microsoft\.Windows\.ContentDeliveryManager',
-            '^Microsoft\.Windows\.PeopleExperienceHost',
-            '^Microsoft\.Windows\.ShellExperienceHost',
-            '^Microsoft\.Windows\.StartMenuExperienceHost',
-            '^Microsoft\.Win32WebViewHost',
-
-            '^Microsoft\.AAD\.BrokerPlugin',
-            '^Microsoft\.AccountsControl',
-            '^Microsoft\.CredDialogHost',
-            '^Microsoft\.AsyncTextService',
-            '^Microsoft\.Services\.Store\.',
-            '^Microsoft\.ECApp',
-
-            '^MicrosoftWindows\.Client\.',
-            '^MicrosoftWindows\.LKG\.',
-            '^WindowsWorkload\.',
-
-            '^windows\.immersivecontrolpanel$',
-            '^Windows\.PrintDialog$',
-            '^Windows\.CBSPreview$'
-        )
-
-        foreach ($p in $noisyPatterns) {
-            if ($Name -match $p) { return $true }
-        }
-
-        if ($Publisher -match '^CN=Microsoft Windows' -and $Name -match '_(cw5n1h2txyewy|8wekyb3d8bbwe)$') {
-            return $true
-        }
-
-        return $false
-    }
-
-    function Test-IsWingetGarbageLine {
-        param([string]$Name)
-        if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
-        return ($Name -match '^(usage:|More help can be found|The following |Argument name was not recognized)')
-    }
-
-    function Test-IsComponentExplosion {
-        param([string]$Name)
-        if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-
-        # Reduce noise, but keep major "real" apps
-        if ($Name -match '^Microsoft Visual C\+\+ (20\d{2}|v14)' -and $Name -match '(Minimum|Additional)') { return $true }
-        if ($Name -match '^Microsoft \.NET (Runtime|Host|Host FX Resolver)' -and $Name -match '\(x64\)') { return $true }
-        if ($Name -match '^Python 3\.\d+\.\d+' -and $Name -match '(Core Interpreter|Documentation|Development Libraries|Standard Library|Test Suite|Tcl/Tk Support|pip Bootstrap|Executables|Add to Path)') { return $true }
-
-        return $false
-    }
-
-    function Add-Result {
-        param(
-            [object]$Name,
-            [object]$Version,
-            [object]$Publisher,
-            [object]$InstallLocation,
-            [string]$Scope,
-            [string]$Source
-        )
-        try {
-            $n = Normalize-Text $Name
-            if ([string]::IsNullOrWhiteSpace($n)) { return }
-
-            $v = Normalize-Text $Version
-            $p = Normalize-Text $Publisher
-            $il = Normalize-Text $InstallLocation
-
-            # Trim junk
-            if ($Source -match '^AppX' -and (Test-IsNoisyAppx -Name $n -Publisher $p)) { return }
-            if ($Source -eq 'Winget' -and (Test-IsWingetGarbageLine -Name $n)) { return }
-            if (Test-IsComponentExplosion -Name $n) { return }
-
-            $results.Add([pscustomobject]@{
-                DisplayName     = $n
-                DisplayVersion  = $v
-                Publisher       = $p
-                InstallLocation = $il
-                Scope           = $Scope
-                Source          = $Source
-            }) | Out-Null
-        } catch {
-            Log-ExceptionDetail -Context "Installed Software Add-Result" -ErrorRecord $_
-        }
-    }
-
-    function Add-UninstallEntriesFromRoot {
-        param(
-            [Parameter(Mandatory)] [string]$Root,
-            [Parameter(Mandatory)] [string]$Scope,
-            [Parameter(Mandatory)] [string]$Source
-        )
-
-        foreach ($p in @(
-            "$Root\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "$Root\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-        )) {
-            try {
-                Get-ItemProperty -Path $p -ErrorAction Stop |
-                    Where-Object { $_.DisplayName -and ([string]$_.DisplayName).Trim() -ne "" } |
-                    ForEach-Object {
-                        Add-Result -Name $_.DisplayName -Version $_.DisplayVersion -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope $Scope -Source $Source
-                    }
-            } catch {
-                Log-ExceptionDetail -Context ("Installed Software registry read: {0}" -f $p) -ErrorRecord $_
-            }
-        }
-    }
-
-    # --- Registry (classic installs) ---
-    Add-UninstallEntriesFromRoot -Root "HKLM:" -Scope "Machine"     -Source "UninstallHKLM"
-    Add-UninstallEntriesFromRoot -Root "HKCU:" -Scope "CurrentUser" -Source "UninstallHKCU"
-
-    # --- Loaded user hives (HKU) + offline hives (NTUSER.DAT) when elevated ---
     if ($IncludeAllUsers) {
         # Loaded HKU hives
         try {
@@ -511,7 +519,8 @@ function Get-InstalledSoftwareInventory {
                 Select-Object -ExpandProperty PSChildName
 
             foreach ($sid in @($userSids)) {
-                Add-UninstallEntriesFromRoot -Root ("Registry::HKEY_USERS\{0}" -f $sid) -Scope ("UserHive:{0}" -f $sid) -Source "UninstallHKU"
+                Add-UninstallEntriesFromRoot -Results $results -Root ("Registry::HKEY_USERS\{0}" -f $sid) `
+                    -Scope ("UserHive:{0}" -f $sid) -Source "UninstallHKU"
             }
         } catch {
             Log-ExceptionDetail -Context "Installed Software HKU enumerate" -ErrorRecord $_
@@ -522,11 +531,11 @@ function Get-InstalledSoftwareInventory {
             $profileList = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' -ErrorAction Stop |
                 Select-Object PSChildName, ProfileImagePath
 
-            foreach ($p in @($profileList)) {
-                $sid = [string]$p.PSChildName
+            foreach ($profile in @($profileList)) {
+                $sid = [string]$profile.PSChildName
                 if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
 
-                $profilePath = [string]$p.ProfileImagePath
+                $profilePath = [string]$profile.ProfileImagePath
                 if ([string]::IsNullOrWhiteSpace($profilePath)) { continue }
 
                 $ntUser = Join-Path $profilePath 'NTUSER.DAT'
@@ -544,7 +553,8 @@ function Get-InstalledSoftwareInventory {
 
                 if ($loaded) {
                     try {
-                        Add-UninstallEntriesFromRoot -Root $tempHiveRoot -Scope ("OfflineUser:{0}" -f $sid) -Source "UninstallHKU-Offline"
+                        Add-UninstallEntriesFromRoot -Results $results -Root $tempHiveRoot `
+                            -Scope ("OfflineUser:{0}" -f $sid) -Source "UninstallHKU-Offline"
                     }
                     finally {
                         try { $null = & reg.exe unload ("HKU\{0}" -f $tempHiveName) 2>$null } catch { }
@@ -556,11 +566,20 @@ function Get-InstalledSoftwareInventory {
         }
     }
 
-    # --- Microsoft Store / AppX packages ---
+    return $results
+}
+
+function Get-AppxSoftware {
+    <# Collect software from Microsoft Store / AppX package registry. #>
+    param([switch]$IncludeAllUsers)
+
+    $results = [System.Collections.Generic.List[object]]::new()
+
     try {
         Get-AppxPackage -ErrorAction SilentlyContinue | ForEach-Object {
             $name = if ($_.PackageFamilyName) { $_.PackageFamilyName } else { $_.Name }
-            Add-Result -Name $name -Version ($_.Version.ToString()) -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope "CurrentUser" -Source "AppX"
+            Add-SoftwareResult -Results $results -Name $name -Version ($_.Version.ToString()) `
+                -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope "CurrentUser" -Source "AppX"
         }
     } catch {
         Log-ExceptionDetail -Context "Installed Software AppX current user" -ErrorRecord $_
@@ -570,86 +589,121 @@ function Get-InstalledSoftwareInventory {
         try {
             Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | ForEach-Object {
                 $name = if ($_.PackageFamilyName) { $_.PackageFamilyName } else { $_.Name }
-                Add-Result -Name $name -Version ($_.Version.ToString()) -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope "AllUsers" -Source "AppX-AllUsers"
+                Add-SoftwareResult -Results $results -Name $name -Version ($_.Version.ToString()) `
+                    -Publisher $_.Publisher -InstallLocation $_.InstallLocation -Scope "AllUsers" -Source "AppX-AllUsers"
             }
         } catch {
             Log-ExceptionDetail -Context "Installed Software AppX all users" -ErrorRecord $_
         }
     }
 
-    # --- Winget (best-effort; version-safe) ---
+    return $results
+}
+
+function Get-WingetSoftware {
+    <# Collect software from winget list (best-effort; version-safe). #>
+
+    $results = [System.Collections.Generic.List[object]]::new()
+
     try {
         $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-        if ($winget) {
-            # Winget outputs UTF-8. Force OutputEncoding to UTF-8 before capturing so
-            # Unicode characters (e.g. ellipsis in truncated names) are not decoded as CP437.
-            $prevOutputEncoding = [Console]::OutputEncoding
+        if (-not $winget) { return $results }
+
+        # Winget outputs UTF-8. Force OutputEncoding to UTF-8 before capturing so
+        # Unicode characters (e.g. ellipsis in truncated names) are not decoded as CP437.
+        $prevOutputEncoding = [Console]::OutputEncoding
+        try {
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            $raw = & $winget.Source "list" "--disable-interactivity" "--accept-source-agreements" 2>&1
+        } finally {
+            [Console]::OutputEncoding = $prevOutputEncoding
+        }
+
+        $lines = @($raw) | ForEach-Object { [string]$_ } | Where-Object { $_ -and $_.Trim() -ne "" }
+
+        # If this looks like help/usage output, skip entirely
+        if ($lines -match '^usage:\s+winget\s+list') {
+            Log "Winget list returned usage/help output; skipping winget inventory."
+            return $results
+        }
+
+        # Attempt to parse the aligned table if present; otherwise treat as name-only lines.
+        $sepHit    = ($lines | Select-String -Pattern '^-{3,}\s+-{3,}' -SimpleMatch:$false | Select-Object -First 1)
+        $dataLines = @()
+        if ($sepHit -and $sepHit.LineNumber -and $sepHit.LineNumber -lt $lines.Count) {
+            $dataLines = $lines[($sepHit.LineNumber)..($lines.Count-1)]
+        } elseif ($lines.Count -gt 2) {
+            $dataLines = $lines[2..($lines.Count-1)]
+        }
+
+        foreach ($l in @($dataLines)) {
             try {
-                [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-                # Don't pass flags that older winget builds reject
-                $raw = & $winget.Source "list" "--disable-interactivity" "--accept-source-agreements" 2>&1
-            } finally {
-                [Console]::OutputEncoding = $prevOutputEncoding
-            }
-            $lines = @($raw) | ForEach-Object { [string]$_ } | Where-Object { $_ -and $_.Trim() -ne "" }
+                $t = $l.TrimEnd()
+                if (-not $t -or $t -match '^-{3,}$') { continue }
+                if (Test-IsWingetGarbageLine -Name $t) { continue }
 
-            # If this looks like help/usage output, skip entirely
-            if ($lines -match '^usage:\s+winget\s+list') {
-                Log "Winget list returned usage/help output; skipping winget inventory."
-            } else {
-                # Attempt to parse the aligned table if present; otherwise treat as name-only lines.
-                $sepHit = ($lines | Select-String -Pattern '^-{3,}\s+-{3,}' -SimpleMatch:$false | Select-Object -First 1)
-                $dataLines = @()
-                if ($sepHit -and $sepHit.LineNumber -and $sepHit.LineNumber -lt $lines.Count) {
-                    $dataLines = $lines[($sepHit.LineNumber)..($lines.Count-1)]
-                } elseif ($lines.Count -gt 2) {
-                    $dataLines = $lines[2..($lines.Count-1)]
+                $parts = $t -split '\s{2,}'
+                if ($parts.Count -ge 1) {
+                    $name = $parts[0]
+                    $ver  = if ($parts.Count -ge 3) { $parts[2] } else { "" }
+                    Add-SoftwareResult -Results $results -Name $name -Version $ver `
+                        -Publisher "" -InstallLocation "" -Scope "Machine/User" -Source "Winget"
                 }
-
-                foreach ($l in @($dataLines)) {
-                    try {
-                        $t = $l.TrimEnd()
-                        if (-not $t -or $t -match '^-{3,}$') { continue }
-                        if (Test-IsWingetGarbageLine -Name $t) { continue }
-
-                        $parts = $t -split '\s{2,}'
-                        if ($parts.Count -ge 1) {
-                            $name = $parts[0]
-                            $ver  = if ($parts.Count -ge 3) { $parts[2] } else { "" }
-                            Add-Result -Name $name -Version $ver -Publisher "" -InstallLocation "" -Scope "Machine/User" -Source "Winget"
-                        }
-                    } catch {
-                        Log-ExceptionDetail -Context "Winget parse line" -ErrorRecord $_
-                    }
-                }
+            } catch {
+                Log-ExceptionDetail -Context "Winget parse line" -ErrorRecord $_
             }
         }
     } catch {
         Log-ExceptionDetail -Context "Installed Software Winget" -ErrorRecord $_
     }
 
-    # --- De-dupe & aggregate sources (string-key grouping to avoid type mismatches) ---
+    return $results
+}
+
+# ---------------------------------------------------------------- #
+# Installed software — coordinator + de-duplication                #
+# ---------------------------------------------------------------- #
+
+function Get-InstalledSoftwareInventory {
+    <#
+      Merges software from all sources, normalises fields, and de-duplicates.
+      Sources: registry uninstall keys, HKU/offline hives, AppX/Store, Winget.
+    #>
+    [CmdletBinding()]
+    param([switch]$IncludeAllUsers)
+
+    $all = [System.Collections.Generic.List[object]]::new()
+
+    $registryItems = Get-RegistrySoftware -IncludeAllUsers:$IncludeAllUsers
+    if ($registryItems -and $registryItems.Count -gt 0) { $all.AddRange($registryItems) }
+
+    $appxItems = Get-AppxSoftware -IncludeAllUsers:$IncludeAllUsers
+    if ($appxItems -and $appxItems.Count -gt 0) { $all.AddRange($appxItems) }
+
+    $wingetItems = Get-WingetSoftware
+    if ($wingetItems -and $wingetItems.Count -gt 0) { $all.AddRange($wingetItems) }
+
+    # De-dupe & aggregate sources (string-key grouping to avoid type mismatches)
     try {
-        $norm = @($results) | ForEach-Object {
-            # Ensure all fields are strings
-            $_.DisplayName    = Normalize-Text $_.DisplayName
-            $_.DisplayVersion = Normalize-Text $_.DisplayVersion
-            $_.Publisher      = Normalize-Text $_.Publisher
-            $_.InstallLocation= Normalize-Text $_.InstallLocation
-            $_.Scope          = Normalize-Text $_.Scope
-            $_.Source         = Normalize-Text $_.Source
+        $norm = @($all) | ForEach-Object {
+            $_.DisplayName     = Normalize-Text $_.DisplayName
+            $_.DisplayVersion  = Normalize-Text $_.DisplayVersion
+            $_.Publisher       = Normalize-Text $_.Publisher
+            $_.InstallLocation = Normalize-Text $_.InstallLocation
+            $_.Scope           = Normalize-Text $_.Scope
+            $_.Source          = Normalize-Text $_.Source
             $_
         } | Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne "" }
 
         $groups = $norm | Group-Object -Property @{ Expression = {
             "{0}`0{1}`0{2}`0{3}" -f ($_.DisplayName.ToLowerInvariant()),
-                                ($_.DisplayVersion.ToLowerInvariant()),
-                                ($_.Publisher.ToLowerInvariant()),
-                                ($_.Scope.ToLowerInvariant())
+                                    ($_.DisplayVersion.ToLowerInvariant()),
+                                    ($_.Publisher.ToLowerInvariant()),
+                                    ($_.Scope.ToLowerInvariant())
         }}
 
         $out = foreach ($g in $groups) {
-            $first = $g.Group | Select-Object -First 1
+            $first   = $g.Group | Select-Object -First 1
             $sources = ($g.Group | ForEach-Object { $_.Source } | Where-Object { $_ } | Sort-Object -Unique) -join ";"
             $first | Add-Member -NotePropertyName Sources -NotePropertyValue $sources -Force
             $first
@@ -659,9 +713,8 @@ function Get-InstalledSoftwareInventory {
     } catch {
         Log-ExceptionDetail -Context "Installed Software grouping/trim" -ErrorRecord $_
         try {
-            $sample = @($results | Select-Object -First 20)
+            $sample = @($all | Select-Object -First 20)
             Log ("Installed Software sample (first 20): {0}" -f (($sample | ForEach-Object { $_.DisplayName }) -join " | "))
-
             foreach ($s in $sample) {
                 try {
                     $props = $s.PSObject.Properties | ForEach-Object { "{0}={1}" -f $_.Name, (if ($_.Value) { $_.Value.GetType().Name } else { "null" }) }
@@ -669,29 +722,27 @@ function Get-InstalledSoftwareInventory {
                 } catch { }
             }
         } catch { }
-
-        return ($results | Sort-Object DisplayName, DisplayVersion, Scope -Unique)
+        return ($all | Sort-Object DisplayName, DisplayVersion, Scope -Unique)
     }
 }
 
-# ------------------------- #
-# Software de-duplication   #
-# ------------------------- #
+# ---------------------------------------------------------------- #
+# Software de-duplication                                          #
+# ---------------------------------------------------------------- #
+
 function Remove-SoftwareDuplicates {
     <#
       Cleans software inventory duplicates with two rules:
 
       1) Prefer a REAL version over "N/A"/blank for the same DisplayName.
-         - If a name has at least one real version entry, drop the rows for that name where version is N/A/blank/unknown.
+         If a name has at least one real version entry, drop rows where version is N/A/blank/unknown.
 
       2) De-duplicate on DisplayName + DisplayVersion.
-         - If two entries have the same name and same version, keep only one.
-         - If the versions differ, keep them both (distinct installs).
+         If two entries have the same name and version, keep only one.
+         If the versions differ, keep them both (distinct installs).
 
-      When duplicates are collapsed, this function merges:
-        - Scope   (unique values joined with ';')
-        - Sources (unique values joined with ';')
-      And prefers the row with richer Publisher/InstallLocation fields.
+      When duplicates are collapsed, merges Scope and Sources fields and
+      prefers the row with richer Publisher/InstallLocation data.
     #>
     [CmdletBinding()]
     param(
@@ -700,62 +751,39 @@ function Remove-SoftwareDuplicates {
 
     if (-not $Items -or $Items.Count -eq 0) { return @() }
 
+    # Local helpers — operate on already-normalised strings so no encoding repair needed.
     function Norm([object]$v) {
-        try {
-            if ($null -eq $v) { return "" }
-            $s = [string]$v
-            $s = ($s -replace '\s+', ' ').Trim()
-            return $s
-        } catch { return "" }
+        try { if ($null -eq $v) { return "" }; $s = [string]$v; return ($s -replace '\s+', ' ').Trim() } catch { return "" }
     }
-
-    function NormName([object]$n) {
-        (Norm $n).ToLowerInvariant()
-    }
-
-    function NormVersion([object]$v) {
-        $vv = Norm $v
-        if ([string]::IsNullOrWhiteSpace($vv)) { return "N/A" }
-        if ($vv -match '^(N/A|NA|UNKNOWN|NOT AVAILABLE)$') { return "N/A" }
-        return $vv
-    }
-
-    function Join-Unique([string[]]$vals) {
-        (($vals | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() } | Sort-Object -Unique) -join ';')
-    }
+    function NormName([object]$n)  { (Norm $n).ToLowerInvariant() }
 
     # ---------------------------
     # Pass 1: Drop N/A versions when a real version exists for that name
     # ---------------------------
     $filtered = foreach ($g in ($Items | Group-Object -Property @{ Expression = { NormName $_.DisplayName } })) {
-        $rows = @($g.Group)
+        $rows    = @($g.Group)
         $hasReal = $false
         foreach ($r in $rows) {
-            if ((NormVersion $r.DisplayVersion) -ne "N/A") { $hasReal = $true; break }
+            if ((Normalize-Version $r.DisplayVersion) -ne "N/A") { $hasReal = $true; break }
         }
-
-        if ($hasReal) {
-            $rows | Where-Object { (NormVersion $_.DisplayVersion) -ne "N/A" }
-        } else {
-            $rows
-        }
+        if ($hasReal) { $rows | Where-Object { (Normalize-Version $_.DisplayVersion) -ne "N/A" } }
+        else          { $rows }
     }
 
     # ---------------------------
     # Pass 2: De-dupe on Name + Version (keep distinct versions), merge Scope/Sources
     # ---------------------------
     $groups = $filtered | Group-Object -Property @{ Expression = {
-        $n = (NormName $_.DisplayName)
-        $v = (NormVersion $_.DisplayVersion).ToLowerInvariant()
+        $n = NormName $_.DisplayName
+        $v = (Normalize-Version $_.DisplayVersion).ToLowerInvariant()
         "$n`0$v"
     }}
 
     $out = foreach ($g in $groups) {
         $rows = @($g.Group)
         if ($rows.Count -eq 1) {
-            # Normalize version display if it is blank-ish
             $rows[0].DisplayName    = Norm $rows[0].DisplayName
-            $rows[0].DisplayVersion = NormVersion $rows[0].DisplayVersion
+            $rows[0].DisplayVersion = Normalize-Version $rows[0].DisplayVersion
             if (-not ($rows[0].PSObject.Properties.Name -contains 'Sources') -and ($rows[0].PSObject.Properties.Name -contains 'Source')) {
                 $rows[0] | Add-Member -NotePropertyName Sources -NotePropertyValue (Norm $rows[0].Source) -Force
             }
@@ -766,34 +794,32 @@ function Remove-SoftwareDuplicates {
         # Prefer a row with more useful metadata.
         $best = $rows | Sort-Object -Descending -Property @{ Expression = {
             $score = 0
-            if (-not [string]::IsNullOrWhiteSpace((Norm $_.Publisher))) { $score += 2 }
+            if (-not [string]::IsNullOrWhiteSpace((Norm $_.Publisher)))       { $score += 2 }
             if (-not [string]::IsNullOrWhiteSpace((Norm $_.InstallLocation))) { $score += 1 }
-            if ($_.PSObject.Properties.Name -contains 'Sources') { $score += (Norm $_.Sources).Length } elseif ($_.PSObject.Properties.Name -contains 'Source') { $score += (Norm $_.Source).Length }
+            if ($_.PSObject.Properties.Name -contains 'Sources') { $score += (Norm $_.Sources).Length }
+            elseif ($_.PSObject.Properties.Name -contains 'Source') { $score += (Norm $_.Source).Length }
             $score
         }} | Select-Object -First 1
 
         # Merge scopes/sources across duplicates
-        $scopes = $rows | ForEach-Object { Norm $_.Scope } | Where-Object { $_ } | Sort-Object -Unique
+        $scopes  = $rows | ForEach-Object { Norm $_.Scope } | Where-Object { $_ } | Sort-Object -Unique
 
         $sources = $rows | ForEach-Object {
-            if ($_.PSObject.Properties.Name -contains 'Sources') { Norm $_.Sources }
-            elseif ($_.PSObject.Properties.Name -contains 'Source') { Norm $_.Source }
+            if ($_.PSObject.Properties.Name -contains 'Sources')      { Norm $_.Sources }
+            elseif ($_.PSObject.Properties.Name -contains 'Source')   { Norm $_.Source  }
             else { "" }
-        } | Where-Object { $_ } | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique
+        } | Where-Object { $_ } | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } |
+            Where-Object { $_ } | Sort-Object -Unique
 
-        if ($scopes.Count -gt 0) {
-            $best.Scope = Join-Unique $scopes
-        }
+        if ($scopes.Count  -gt 0) { $best.Scope = Join-UniqueValues $scopes }
 
         if (-not ($best.PSObject.Properties.Name -contains 'Sources')) {
             $best | Add-Member -NotePropertyName Sources -NotePropertyValue "" -Force
         }
-        if ($sources.Count -gt 0) {
-            $best.Sources = Join-Unique $sources
-        }
+        if ($sources.Count -gt 0) { $best.Sources = Join-UniqueValues $sources }
 
         $best.DisplayName    = Norm $best.DisplayName
-        $best.DisplayVersion = NormVersion $best.DisplayVersion
+        $best.DisplayVersion = Normalize-Version $best.DisplayVersion
 
         $best
     }
@@ -1046,6 +1072,24 @@ function Html-AddTable {
     }
 
     Html-Add "</tbody></table>"
+}
+
+function Html-StartKvTable { Html-Add "<table class='kv-table'><tbody>" }
+function Html-EndKvTable   { Html-Add "</tbody></table>" }
+
+function Html-AddKvRow {
+    <#
+      Emit one <tr><th>Key</th><td>Value</td></tr> row inside a kv-table.
+      Both Key and Value are HTML-encoded. Use plain Html-Add for cells that
+      need raw HTML (e.g. badge spans).
+    #>
+    param(
+        [string]$Key,
+        [object]$Value,
+        [string]$RowClass = ""
+    )
+    $cls = if ($RowClass) { " class='$RowClass'" } else { "" }
+    Html-Add ("<tr{0}><th>{1}</th><td>{2}</td></tr>" -f $cls, (Html-Enc $Key), (Html-Enc $Value))
 }
 
 # ------------------------- #
@@ -2050,23 +2094,23 @@ Write-Action -What "Running: Pending updates (WUA API)" -Kind run
 $pendingUpdates = Safe-Invoke { Get-PendingWindowsUpdatesWUA } "Pending Windows Updates (WUA API)"
 
 # ---- Summary header table ----
-Html-Add "<table class='kv-table'><tbody>"
+Html-StartKvTable
 
 if ($wuLastScan -ne "Error" -and $wuLastScan) {
     $scanClass = if ($wuLastScan.DaysAgo -le 7) { '' } elseif ($wuLastScan.DaysAgo -le 30) { 'sev-warn' } else { 'sev-bad' }
-    Html-Add ("<tr class='{0}'><th>Last Scan</th><td>{1} ({2} days ago)</td></tr>" -f $scanClass, (Html-Enc $wuLastScan.DateTime), (Html-Enc $wuLastScan.DaysAgo))
+    Html-AddKvRow -Key "Last Scan" -Value ("{0} ({1} days ago)" -f $wuLastScan.DateTime, $wuLastScan.DaysAgo) -RowClass $scanClass
     Write-Action -What ("Last WU scan: {0} ({1} days ago)" -f $wuLastScan.DateTime, $wuLastScan.DaysAgo) -Kind $(if ($wuLastScan.DaysAgo -le 7) { "ok" } elseif ($wuLastScan.DaysAgo -le 30) { "warn" } else { "bad" })
 } else {
-    Html-Add "<tr class='sev-warn'><th>Last Scan</th><td>Could not determine</td></tr>"
+    Html-AddKvRow -Key "Last Scan" -Value "Could not determine" -RowClass "sev-warn"
 }
 
 if ($wuPolicy -ne "Error" -and $wuPolicy) {
     if ($wuPolicy.UseWUServer -eq 1 -and $wuPolicy.WUServer) {
         $srcText = "WSUS: $($wuPolicy.WUServer)"
         if ($wuPolicy.TargetGroup) { $srcText += " (Target group: $($wuPolicy.TargetGroup))" }
-        Html-Add ("<tr><th>Update Source</th><td>{0}</td></tr>" -f (Html-Enc $srcText))
+        Html-AddKvRow -Key "Update Source" -Value $srcText
     } else {
-        Html-Add "<tr><th>Update Source</th><td>Windows Update (direct / Microsoft)</td></tr>"
+        Html-AddKvRow -Key "Update Source" -Value "Windows Update (direct / Microsoft)"
     }
     if ($wuPolicy.DisableWindowsUpdateAccess -eq 1) {
         Html-AddNote -Text "Windows Update access is disabled by policy - users cannot manually check for updates." -Kind warn `
@@ -2077,20 +2121,20 @@ if ($wuPolicy -ne "Error" -and $wuPolicy) {
 if ($muEnabled -ne "Error") {
     $muClass = if ($muEnabled) { 'sev-good' } else { 'sev-warn' }
     $muText  = if ($muEnabled) { 'Enabled (Office and other Microsoft products included)' } else { 'Disabled (Windows only; Office and other products excluded)' }
-    Html-Add ("<tr class='{0}'><th>Microsoft Update</th><td>{1}</td></tr>" -f $muClass, (Html-Enc $muText))
+    Html-AddKvRow -Key "Microsoft Update" -Value $muText -RowClass $muClass
     Write-Action -What ("Microsoft Update: {0}" -f $(if ($muEnabled) { "Enabled" } else { "Disabled" })) -Kind $(if ($muEnabled) { "ok" } else { "warn" })
 }
 
 if ($rebootPending -ne "Error" -and $rebootPending) {
     $rbClass = if ($rebootPending.Pending) { 'sev-warn' } else { '' }
     $rbText  = if ($rebootPending.Pending) { "Yes ($($rebootPending.Signals))" } else { 'No' }
-    Html-Add ("<tr class='{0}'><th>Reboot Pending</th><td>{1}</td></tr>" -f $rbClass, (Html-Enc $rbText))
+    Html-AddKvRow -Key "Reboot Pending" -Value $rbText -RowClass $rbClass
     if ($rebootPending.Pending) {
         Write-Action -What ("Reboot pending: {0}" -f $rebootPending.Signals) -Kind warn
     }
 }
 
-Html-Add "</tbody></table>"
+Html-EndKvTable
 
 # ---- Pending updates ----
 if ($pendingUpdates -eq "Error") {
@@ -2105,17 +2149,20 @@ else {
         Html-Add ("<p class='small'><span class='code'>WUA:</span> ResultCode={0}; Count={1}</p>" -f (Html-Enc $meta.PendingResultCode), (Html-Enc $meta.PendingCount))
     }
 
-    if (-not $real -or @($real).Count -eq 0) {
+    if (-not $real -or $real.Count -eq 0) {
         Write-Action -What "No pending updates found." -Kind ok
         Html-AddNote -Text "No pending updates found." -Kind good
     }
     else {
-        $count   = @($real).Count
-        $cCrit   = @($real | Where-Object { $_.Categories -match 'Critical Updates' }).Count
-        $cSec    = @($real | Where-Object { $_.Categories -match 'Security Updates' -and $_.Categories -notmatch 'Critical Updates' }).Count
-        $cDriver = @($real | Where-Object { $_.Categories -match 'Drivers' }).Count
-        $cEula   = @($real | Where-Object { $_.EulaAccepted -eq $false }).Count
-        $cOther  = $count - $cCrit - $cSec - $cDriver
+        $count   = $real.Count
+        $cCrit   = 0; $cSec = 0; $cDriver = 0; $cEula = 0; $cOther = 0
+        foreach ($upd in $real) {
+            if     ($upd.Categories -match 'Critical Updates')  { $cCrit++ }
+            elseif ($upd.Categories -match 'Security Updates')  { $cSec++ }
+            elseif ($upd.Categories -match 'Drivers')           { $cDriver++ }
+            else                                                { $cOther++ }
+            if ($upd.EulaAccepted -eq $false)                   { $cEula++ }
+        }
 
         $summaryParts = [System.Collections.Generic.List[string]]::new()
         if ($cCrit   -gt 0) { $summaryParts.Add("Critical: $cCrit") }
@@ -2132,7 +2179,7 @@ else {
             Html-AddNote -Text ("$cEula update(s) have not had their EULA accepted and will not install automatically.") -Kind warn
         }
 
-        $updateRows = @($real) | ForEach-Object {
+        $updateRows = $real | ForEach-Object {
             [pscustomobject]@{
                 KB             = $_.KB
                 Title          = $_.Title
@@ -2164,8 +2211,8 @@ else {
 
     # ---- Hidden updates ----
     $hiddenList = $pendingUpdates.Hidden
-    if ($hiddenList -and @($hiddenList).Count -gt 0) {
-        $hCount = @($hiddenList).Count
+    if ($hiddenList -and $hiddenList.Count -gt 0) {
+        $hCount = $hiddenList.Count
         Write-Action -What ("Hidden updates: {0} (excluded from auto-install)" -f $hCount) -Kind warn
         Html-AddNote -Text ("$hCount update(s) are hidden and will not install automatically. Review whether any are security-relevant.") -Kind warn
         Html-StartDetails -Summary ("Hidden Updates ({0})" -f $hCount)
@@ -2179,8 +2226,8 @@ else {
 
     # ---- Failed update history (last 30 days) ----
     $failedList = $pendingUpdates.Failed
-    if ($failedList -and @($failedList).Count -gt 0) {
-        $fCount = @($failedList).Count
+    if ($failedList -and $failedList.Count -gt 0) {
+        $fCount = $failedList.Count
         Write-Action -What ("Failed updates (last 30 days): {0}" -f $fCount) -Kind bad
         Html-AddNote -Text ("$fCount update installation(s) failed in the last 30 days.") -Kind bad `
             -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-troubleshooting" -KbTitle "Windows Update troubleshooting"
@@ -3069,12 +3116,12 @@ $appLockRowClass = if ($appLockEnf) { "sev-good" } elseif ($appLockOk) { "sev-wa
 $wdacRowClass    = if ($wdacOk) { "sev-good" } else { "sev-warn" }
 $appLockDetail   = if ($appLocker -ne "Error" -and $appLocker) { $appLocker.Detail } else { "Query failed" }
 $wdacDetail      = if ($wdac -ne "Error" -and $wdac) { $wdac.Detail } else { "Query failed" }
-Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>AppLocker</th><td>{1}</td></tr>"          -f $appLockRowClass, (Html-Enc $appLockDetail))
-Html-Add ("<tr class='{0}'><th>WDAC / Code Integrity</th><td>{1}</td></tr>" -f $wdacRowClass, (Html-Enc $wdacDetail))
-Html-Add ("<tr class='{0}'><th>PowerShell Execution Policy</th><td>{1}</td></tr>" -f $psExecClass, (Html-Enc $psExecLabel))
-Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $acBadge, $acStatus)
-Html-Add "</tbody></table>"
+Html-StartKvTable
+Html-AddKvRow -Key "AppLocker"                    -Value $appLockDetail  -RowClass $appLockRowClass
+Html-AddKvRow -Key "WDAC / Code Integrity"        -Value $wdacDetail     -RowClass $wdacRowClass
+Html-AddKvRow -Key "PowerShell Execution Policy"  -Value $psExecLabel    -RowClass $psExecClass
+Html-Add ("<tr class='{0}'><th>Overall</th><td><span class='badge {1}'>{2}</span></td></tr>" -f $acClass, $acBadge, (Html-Enc $acStatus))
+Html-EndKvTable
 Write-Action -What ("Application Control: {0}" -f $acStatus) -Kind $(if ($acBadge -eq "good") { "ok" } elseif ($acBadge -eq "warn") { "warn" } else { "warn" })
 $e8Scores.Add([pscustomobject]@{ Control = "Application Control"; Status = $acStatus; Badge = $acBadge })
 
@@ -3116,23 +3163,23 @@ $wuAU = Safe-Invoke {
 $patchDays = if ($lastHotfix -ne "Error" -and $lastHotfix -and $null -ne $lastHotfix.DaysAgo) { $lastHotfix.DaysAgo } else { $null }
 $patchClass = if ($null -eq $patchDays) { "sev-warn" } elseif ($patchDays -le 14) { "sev-good" } elseif ($patchDays -le 30) { "sev-warn" } else { "sev-bad" }
 
-Html-Add "<table class='kv-table'><tbody>"
+Html-StartKvTable
 if ($lastHotfix -ne "Error" -and $lastHotfix) {
-    Html-Add ("<tr class='{0}'><th>Most Recent Hotfix</th><td>{1}</td></tr>" -f $patchClass, (Html-Enc $lastHotfix.HotFixID))
-    Html-Add ("<tr class='{0}'><th>Installed On</th><td>{1}</td></tr>"      -f $patchClass, (Html-Enc $lastHotfix.InstalledOn))
-    Html-Add ("<tr class='{0}'><th>Days Since Last Patch</th><td>{1}</td></tr>" -f $patchClass, (Html-Enc $(if ($null -ne $patchDays) { "$patchDays days" } else { "Unknown" })))
+    Html-AddKvRow -Key "Most Recent Hotfix"    -Value $lastHotfix.HotFixID  -RowClass $patchClass
+    Html-AddKvRow -Key "Installed On"          -Value $lastHotfix.InstalledOn -RowClass $patchClass
+    Html-AddKvRow -Key "Days Since Last Patch" -Value (if ($null -ne $patchDays) { "$patchDays days" } else { "Unknown" }) -RowClass $patchClass
 } else {
-    Html-Add "<tr class='sev-warn'><th>Most Recent Hotfix</th><td>Could not retrieve</td></tr>"
+    Html-AddKvRow -Key "Most Recent Hotfix" -Value "Could not retrieve" -RowClass "sev-warn"
 }
 if ($wuAU -ne "Error" -and $wuAU) {
-    Html-Add ("<tr><th>Windows Update Policy</th><td>{0}</td></tr>" -f (Html-Enc $wuAU.Description))
+    Html-AddKvRow -Key "Windows Update Policy" -Value $wuAU.Description
 }
 if ($wuPolicy -ne "Error" -and $wuPolicy) {
     if ($wuPolicy.DeferQualityUpdates -eq 1 -and $null -ne $wuPolicy.DeferQualityUpdatesPeriodInDays) {
-        Html-Add ("<tr class='sev-warn'><th>Quality Update Deferral</th><td>{0} days (WUfB)</td></tr>" -f (Html-Enc $wuPolicy.DeferQualityUpdatesPeriodInDays))
+        Html-AddKvRow -Key "Quality Update Deferral" -Value "$($wuPolicy.DeferQualityUpdatesPeriodInDays) days (WUfB)" -RowClass "sev-warn"
     }
     if ($wuPolicy.DeferFeatureUpdates -eq 1 -and $null -ne $wuPolicy.DeferFeatureUpdatesPeriodInDays) {
-        Html-Add ("<tr><th>Feature Update Deferral</th><td>{0} days (WUfB)</td></tr>" -f (Html-Enc $wuPolicy.DeferFeatureUpdatesPeriodInDays))
+        Html-AddKvRow -Key "Feature Update Deferral" -Value "$($wuPolicy.DeferFeatureUpdatesPeriodInDays) days (WUfB)"
     }
 }
 # Browser version checks - Edge and Chrome registry keys
@@ -3178,7 +3225,7 @@ if ($browserRows.Count -gt 0) {
     }
 }
 
-Html-Add "</tbody></table>"
+Html-EndKvTable
 Write-Action -What ("Patch currency: {0}" -f $(if ($null -ne $patchDays) { "$patchDays days since last hotfix" } else { "date unavailable" })) -Kind $(if ($patchClass -eq "sev-good") { "ok" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" })
 $e8PatchStatus = if ($patchClass -eq "sev-good") { "Current" } elseif ($patchClass -eq "sev-warn") { "Needs attention" } else { "Overdue" }
 $e8Scores.Add([pscustomobject]@{ Control = "Patch Applications"; Status = $e8PatchStatus; Badge = if ($patchClass -eq "sev-good") { "good" } elseif ($patchClass -eq "sev-warn") { "warn" } else { "bad" } })
@@ -3377,15 +3424,15 @@ $wshDisabled = Safe-Invoke {
 $wshLabel = if ($wshDisabled -eq "Error") { "Query failed" } elseif ($wshDisabled) { "Disabled (good)" } else { "Enabled" }
 $wshClass  = if ($wshDisabled -eq $true) { "sev-good" } else { "sev-warn" }
 
-Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>Controlled Folder Access</th><td>{1}</td></tr>"     -f $cfaClass,  (Html-Enc $cfaLabel))
-Html-Add ("<tr class='{0}'><th>Network Protection</th><td>{1}</td></tr>"           -f $npClass,   (Html-Enc $npLabel))
-Html-Add ("<tr class='{0}'><th>ASR Rules</th><td>{1}</td></tr>"                    -f $asrClass,  (Html-Enc $asrSummary))
-Html-Add ("<tr class='{0}'><th>SmartScreen</th><td>{1}</td></tr>"                  -f $ssClass,   (Html-Enc $ssLabel))
-Html-Add ("<tr class='{0}'><th>Windows Script Host</th><td>{1}</td></tr>"          -f $wshClass,  (Html-Enc $wshLabel))
-Html-Add ("<tr class='{0}'><th>PowerShell v2</th><td>{1}</td></tr>"                -f $psv2Class, (Html-Enc $psv2Label))
-Html-Add ("<tr class='{0}'><th>Internet Explorer</th><td>{1}</td></tr>"            -f $ieClass,   (Html-Enc $ieLabel))
-Html-Add "</tbody></table>"
+Html-StartKvTable
+Html-AddKvRow -Key "Controlled Folder Access" -Value $cfaLabel    -RowClass $cfaClass
+Html-AddKvRow -Key "Network Protection"       -Value $npLabel     -RowClass $npClass
+Html-AddKvRow -Key "ASR Rules"                -Value $asrSummary  -RowClass $asrClass
+Html-AddKvRow -Key "SmartScreen"              -Value $ssLabel     -RowClass $ssClass
+Html-AddKvRow -Key "Windows Script Host"      -Value $wshLabel    -RowClass $wshClass
+Html-AddKvRow -Key "PowerShell v2"            -Value $psv2Label   -RowClass $psv2Class
+Html-AddKvRow -Key "Internet Explorer"        -Value $ieLabel     -RowClass $ieClass
+Html-EndKvTable
 
 # Show ASR rule breakdown if any rules are configured
 if ($asrRows.Count -gt 0) {
@@ -3470,13 +3517,13 @@ $filterAdminToken = Safe-Invoke {
 $fatLabel = if ($filterAdminToken -eq "Error") { "Query failed" } elseif ($filterAdminToken -eq 1) { "Enabled (built-in admin restricted)" } elseif ($filterAdminToken -eq 0) { "Disabled (built-in admin unrestricted)" } else { "Not set (default - built-in admin unrestricted)" }
 $fatClass = if ($filterAdminToken -eq 1) { "sev-good" } else { "sev-warn" }
 
-Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>UAC Enabled (EnableLUA)</th><td>{1}</td></tr>"                   -f $uacLuaClass,      (Html-Enc $uacLuaLabel))
-Html-Add ("<tr class='{0}'><th>UAC Admin Consent Prompt</th><td>{1}</td></tr>"                  -f $uacBehaviorClass, (Html-Enc $uacBehaviorLabel))
-Html-Add ("<tr class='{0}'><th>Filter Administrator Token</th><td>{1}</td></tr>"                -f $fatClass,         (Html-Enc $fatLabel))
-Html-Add ("<tr class='{0}'><th>LAPS</th><td>{1}</td></tr>"                                      -f $lapsClass,        (Html-Enc $lapsLabel))
-Html-Add ("<tr class='{0}'><th>Local Administrator Count</th><td>{1}</td></tr>"                 -f $adminClass,       (Html-Enc $(if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" })))
-Html-Add "</tbody></table>"
+Html-StartKvTable
+Html-AddKvRow -Key "UAC Enabled (EnableLUA)"       -Value $uacLuaLabel      -RowClass $uacLuaClass
+Html-AddKvRow -Key "UAC Admin Consent Prompt"      -Value $uacBehaviorLabel -RowClass $uacBehaviorClass
+Html-AddKvRow -Key "Filter Administrator Token"    -Value $fatLabel         -RowClass $fatClass
+Html-AddKvRow -Key "LAPS"                          -Value $lapsLabel        -RowClass $lapsClass
+Html-AddKvRow -Key "Local Administrator Count"     -Value (if ($null -ne $adminCount) { "$adminCount member(s)" } else { "Could not retrieve" }) -RowClass $adminClass
+Html-EndKvTable
 Write-Action -What ("UAC: {0} | LAPS: {1} | Admin members: {2}" -f $uacLuaLabel, $lapsLabel, $(if ($null -ne $adminCount) { $adminCount } else { "unknown" })) -Kind info
 $e8AdminOk = ($uacLua -eq 1) -and ($null -ne $adminCount) -and ($adminCount -le 4) -and $lapsOk
 $e8AdminStatus = if ($e8AdminOk) { "Restricted" } elseif ($uacLua -eq 1) { "Partial" } else { "Weak" }
@@ -3516,25 +3563,25 @@ $wuSvcClass = if ($wuSvc -ne "Error" -and $wuSvc) {
     else { 'sev-warn' }
 } else { 'sev-warn' }
 
-Html-Add "<table class='kv-table'><tbody>"
+Html-StartKvTable
 if ($osBuild -ne "Error" -and $osBuild) {
-    Html-Add ("<tr><th>OS</th><td>{0}</td></tr>"             -f (Html-Enc $osBuild.ProductName))
-    Html-Add ("<tr><th>Feature Version</th><td>{0}</td></tr>" -f (Html-Enc $osBuild.DisplayVersion))
-    Html-Add ("<tr><th>Build Number</th><td>{0}.{1}</td></tr>" -f (Html-Enc $osBuild.CurrentBuild), (Html-Enc $osBuild.UBR))
+    Html-AddKvRow -Key "OS"              -Value $osBuild.ProductName
+    Html-AddKvRow -Key "Feature Version" -Value $osBuild.DisplayVersion
+    Html-AddKvRow -Key "Build Number"    -Value "$($osBuild.CurrentBuild).$($osBuild.UBR)"
 }
 if ($lastHotfix -ne "Error" -and $lastHotfix -and $lastHotfix.HotFixID -ne "N/A") {
-    Html-Add ("<tr class='{0}'><th>Most Recent Patch</th><td>{1} (installed {2}, {3} days ago)</td></tr>" -f $patchClass, (Html-Enc $lastHotfix.HotFixID), (Html-Enc $lastHotfix.InstalledOn), (Html-Enc $lastHotfix.DaysAgo))
+    Html-AddKvRow -Key "Most Recent Patch" -Value "$($lastHotfix.HotFixID) (installed $($lastHotfix.InstalledOn), $($lastHotfix.DaysAgo) days ago)" -RowClass $patchClass
 } else {
-    Html-Add "<tr class='sev-warn'><th>Most Recent Patch</th><td>Could not determine</td></tr>"
+    Html-AddKvRow -Key "Most Recent Patch" -Value "Could not determine" -RowClass "sev-warn"
 }
 if ($wuSvc -ne "Error" -and $wuSvc) {
-    Html-Add ("<tr class='{0}'><th>Windows Update Service</th><td>{1} (startup: {2})</td></tr>" -f $wuSvcClass, (Html-Enc $wuSvc.Status), (Html-Enc $wuSvc.StartType))
+    Html-AddKvRow -Key "Windows Update Service" -Value "$($wuSvc.Status) (startup: $($wuSvc.StartType))" -RowClass $wuSvcClass
 }
 if ($muEnabled -ne "Error") {
     $muE8Class = if ($muEnabled) { 'sev-good' } else { 'sev-warn' }
-    Html-Add ("<tr class='{0}'><th>Microsoft Update</th><td>{1}</td></tr>" -f $muE8Class, (Html-Enc $(if ($muEnabled) { 'Enabled' } else { 'Disabled (non-OS Microsoft products excluded)' })))
+    Html-AddKvRow -Key "Microsoft Update" -Value (if ($muEnabled) { 'Enabled' } else { 'Disabled (non-OS Microsoft products excluded)' }) -RowClass $muE8Class
 }
-Html-Add "</tbody></table>"
+Html-EndKvTable
 Write-Action -What ("OS: {0} | WU Service: {1}" -f $(if ($osBuild -ne "Error" -and $osBuild) { "$($osBuild.ProductName) $($osBuild.DisplayVersion)" } else { "unknown" }), $(if ($wuSvc -ne "Error" -and $wuSvc) { $wuSvc.Status } else { "unknown" })) -Kind info
 $e8OsPatchOk = ($wuSvc -ne "Error" -and $wuSvc -and $wuSvc.Status -eq "Running" -and $wuSvc.StartType -ne 'Disabled') -and ($patchClass -ne "sev-bad")
 $e8OsStatus  = if ($e8OsPatchOk -and $patchClass -eq "sev-good") { "Current" } elseif ($e8OsPatchOk) { "Needs attention" } else { "Overdue" }
@@ -3597,15 +3644,15 @@ $cachedCreds = Safe-Invoke {
 $cachedLabel = if ($cachedCreds -eq "Error") { "Query failed" } elseif ($null -ne $cachedCreds) { "$cachedCreds cached credential(s) stored" } else { "Not set (Windows default applies)" }
 $cachedClass = if ($cachedCreds -eq "Error" -or $null -eq $cachedCreds) { "sev-warn" } elseif ([int]$cachedCreds -eq 0) { "sev-good" } elseif ([int]$cachedCreds -le 2) { "sev-warn" } else { "sev-bad" }
 
-Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>Windows Hello for Business Policy</th><td>{1}</td></tr>"  -f $wh4bClass,         (Html-Enc $wh4bLabel))
-Html-Add ("<tr class='{0}'><th>Windows Hello Enrollment</th><td>{1}</td></tr>"           -f $wh4bEnrolledClass, (Html-Enc $wh4bEnrolledLabel))
+Html-StartKvTable
+Html-AddKvRow -Key "Windows Hello for Business Policy" -Value $wh4bLabel        -RowClass $wh4bClass
+Html-AddKvRow -Key "Windows Hello Enrollment"          -Value $wh4bEnrolledLabel -RowClass $wh4bEnrolledClass
 if ($wh4bEntraCorrelated) {
-    Html-Add ("<tr class='sev-good'><th>dsregcmd NgcSet</th><td>YES - Windows Hello confirmed via Entra ID join status</td></tr>")
+    Html-AddKvRow -Key "dsregcmd NgcSet" -Value "YES - Windows Hello confirmed via Entra ID join status" -RowClass "sev-good"
 }
-Html-Add ("<tr class='{0}'><th>Smartcard Readers</th><td>{1}</td></tr>"                  -f $scClass,           (Html-Enc $scLabel))
-Html-Add ("<tr class='{0}'><th>Cached Domain Credentials</th><td>{1}</td></tr>"          -f $cachedClass,       (Html-Enc $cachedLabel))
-Html-Add "</tbody></table>"
+Html-AddKvRow -Key "Smartcard Readers"           -Value $scLabel     -RowClass $scClass
+Html-AddKvRow -Key "Cached Domain Credentials"   -Value $cachedLabel -RowClass $cachedClass
+Html-EndKvTable
 Write-Action -What ("MFA signals: WH4B policy=$wh4bLabel | Enrolled=$wh4bActuallyEnrolled | Smartcards=$scCount") -Kind info
 $e8MfaOk = $wh4bActuallyEnrolled -or $wh4bEntraCorrelated -or ($scCount -gt 0)
 $e8MfaPartial = (-not $e8MfaOk) -and ($wh4bPolicy -eq 1)
@@ -3678,15 +3725,15 @@ $tpBackupClass = if ($tpBackupDetected) { "sev-good" } else { "sev-warn" }
 # VSS age label
 $vssAgeLabel = if ($scCopies.Count -eq 0) { "No snapshots" } elseif ($null -ne $vssDaysOld) { "$($scCopies.Count) snapshot(s); newest $vssDaysOld day(s) ago" } else { "$($scCopies.Count) snapshot(s); age unknown" }
 
-Html-Add "<table class='kv-table'><tbody>"
-Html-Add ("<tr class='{0}'><th>VSS Shadow Copies</th><td>{1}</td></tr>"         -f $scClass8,       (Html-Enc $vssAgeLabel))
+Html-StartKvTable
+Html-AddKvRow -Key "VSS Shadow Copies"        -Value $vssAgeLabel    -RowClass $scClass8
 if ($vssSvc -ne "Error" -and $vssSvc) {
-    Html-Add ("<tr class='{0}'><th>VSS Service</th><td>{1} (startup: {2})</td></tr>" -f $vssSvcClass, (Html-Enc $vssSvc.Status), (Html-Enc $vssSvc.StartType))
+    Html-AddKvRow -Key "VSS Service" -Value "$($vssSvc.Status) (startup: $($vssSvc.StartType))" -RowClass $vssSvcClass
 }
-Html-Add ("<tr class='{0}'><th>Third-Party Backup Agent</th><td>{1}</td></tr>"  -f $tpBackupClass,  (Html-Enc $tpBackupLabel))
-Html-Add ("<tr class='{0}'><th>File History</th><td>{1}</td></tr>"              -f $fhClass,        (Html-Enc $fhLabel))
-Html-Add ("<tr class='{0}'><th>OneDrive</th><td>{1}</td></tr>"                  -f $odClass,        (Html-Enc $odLabel))
-Html-Add "</tbody></table>"
+Html-AddKvRow -Key "Third-Party Backup Agent" -Value $tpBackupLabel  -RowClass $tpBackupClass
+Html-AddKvRow -Key "File History"             -Value $fhLabel        -RowClass $fhClass
+Html-AddKvRow -Key "OneDrive"                 -Value $odLabel        -RowClass $odClass
+Html-EndKvTable
 
 if ($thirdPartyBackupAgents.Count -gt 0) {
     Html-StartDetails "Detected Backup Agents"
@@ -3697,7 +3744,7 @@ if ($thirdPartyBackupAgents.Count -gt 0) {
     Html-EndDetails
 }
 
-if ($backupTasks -ne "Error" -and $backupTasks -and @($backupTasks).Count -gt 0) {
+if ($backupTasks -ne "Error" -and $backupTasks -and $backupTasks.Count -gt 0) {
     Html-StartDetails "Windows Backup Scheduled Tasks"
     Html-AddTable -Items $backupTasks -Columns @(
         @{ Header = "Task";      Property = "TaskName"    },
