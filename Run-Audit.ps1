@@ -437,7 +437,7 @@ function Test-IsComponentExplosion {
 function Add-SoftwareResult {
     <# Normalise, filter, and append one entry to the $Results list. #>
     param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Results,
+        [AllowEmptyCollection()]$Results,
         [object]$Name,
         [object]$Version,
         [object]$Publisher,
@@ -473,7 +473,7 @@ function Add-SoftwareResult {
 function Add-UninstallEntriesFromRoot {
     <# Read both 64-bit and 32-bit Uninstall keys under $Root and append results. #>
     param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Results,
+        [AllowEmptyCollection()]$Results,
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Scope,
         [Parameter(Mandatory)][string]$Source
