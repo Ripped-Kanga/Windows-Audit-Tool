@@ -9,9 +9,11 @@
       versioned and updated.
 
       Designed to run as a daily Atera scheduled automation. A monthly guard check prevents
-      the audit from running more than once per calendar month. If an audit report already
-      exists in the Results directory with a write date in the current month, the script
-      exits with code 3 and reports the skip reason. Use -ForceRun to override.
+      the audit from running more than once per calendar month. The check scans the audit
+      log for an "Audit completed for" entry timestamped in the current calendar month --
+      this works regardless of whether Hudu integration is used (Hudu deployments delete
+      the local HTML report on completion, but the log entry is always written).
+      Exits with code 3 and reports the skip reason. Use -ForceRun to override.
 
     ATERA SETUP NOTES
       - Set execution policy to Bypass in the Atera script configuration
@@ -57,11 +59,11 @@ param(
 # Constants                 #
 # ------------------------- #
 $DeployScriptVersion = "1.1.0"
-$LogPath    = "C:\Windows\Temp\AuditDeploy.txt"
-$CachedDir  = "C:\Program Files\Windows Audit Tool\Scripts"
-$CachedPath = Join-Path $CachedDir "Run-Audit.ps1"
-$ResultsDir = "C:\Program Files\Windows Audit Tool\Results"
-$ApiUrl     = "https://api.github.com/repos/Ripped-Kanga/Windows-Audit-Tool/releases/latest"
+$LogPath      = "C:\Windows\Temp\AuditDeploy.txt"
+$CachedDir    = "C:\Program Files\Windows Audit Tool\Scripts"
+$CachedPath   = Join-Path $CachedDir "Run-Audit.ps1"
+$AuditLogPath = "C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt"
+$ApiUrl       = "https://api.github.com/repos/Ripped-Kanga/Windows-Audit-Tool/releases/latest"
 
 # Ensure the Scripts directory exists before any read/write against $CachedPath
 if (-not (Test-Path -LiteralPath $CachedDir -ErrorAction SilentlyContinue)) {
@@ -89,24 +91,24 @@ $Log = {
 # ------------------------- #
 if (-not $ForceRun) {
     $thisYearMon = (Get-Date).ToString("yyyy-MM")
-    $priorReport = $null
+    $priorRun    = $null
 
-    if (Test-Path -LiteralPath $ResultsDir -ErrorAction SilentlyContinue) {
-        $priorReport = Get-ChildItem -LiteralPath $ResultsDir -Filter "*-Audit.html" -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime.ToString("yyyy-MM") -eq $thisYearMon } |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
+    if (Test-Path -LiteralPath $AuditLogPath -ErrorAction SilentlyContinue) {
+        # Match log lines like: [2026-03-15 09:12:34Z] Audit completed for HOSTNAME
+        $priorRun = Get-Content -LiteralPath $AuditLogPath -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match ('^\[' + $thisYearMon) -and $_ -match 'Audit completed for ' } |
+            Select-Object -Last 1
     }
 
-    if ($priorReport) {
-        $skipMsg = "Audit already completed this month ({0}, last run: {1:yyyy-MM-dd HH:mm})" -f $priorReport.Name, $priorReport.LastWriteTime
-        & $Log $skipMsg
-        Write-Host ("[Deploy] {0}" -f $skipMsg) -ForegroundColor Green
+    if ($priorRun) {
+        & $Log ("Monthly guard: audit already completed this month -- {0}" -f $priorRun)
+        Write-Host "[Deploy] Audit already completed this month." -ForegroundColor Green
+        Write-Host ("[Deploy] Log entry: {0}" -f $priorRun.TrimStart('[')) -ForegroundColor Gray
         Write-Host "[Deploy] Use -ForceRun to override the monthly guard and run again." -ForegroundColor Gray
         exit 3
     }
 
-    & $Log ("Monthly guard: no audit found for {0} -- proceeding" -f $thisYearMon)
+    & $Log ("Monthly guard: no completed audit found for {0} -- proceeding" -f $thisYearMon)
 } else {
     & $Log "Monthly guard: -ForceRun specified -- skipping guard check"
     Write-Host "[Deploy] -ForceRun specified -- skipping monthly guard check." -ForegroundColor Cyan
