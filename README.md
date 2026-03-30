@@ -42,9 +42,23 @@ The deploy script is designed to be scheduled as a **daily Atera automation**. I
 # Force a run even if an audit already completed this month:
 -ForceRun
 
-# With Hudu integration:
+# With Hudu integration (creates a new dated asset each month):
 -HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Audit Reports"
+
+# With Hudu integration — write into an existing asset named after the computer
+# (finds the asset by name and updates it in place; creates it if it doesn't exist):
+-HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Computers" -HuduEntryName $ComputerName
 ```
+
+The `-HuduEntryName` parameter controls the Hudu asset name. It supports the following tokens, which are expanded on the endpoint at runtime (enter them literally in Atera — no quotes needed in the parameter field):
+
+| Token | Expands to | Example |
+|---|---|---|
+| `$ComputerName` | Endpoint hostname | `DESKTOP-ABC123` |
+| `$Date` | Run date (`yyyy-MM-dd`) | `2026-03-30` |
+| `$CustomerName` | Value of `-CustomerName` if provided | `Acme Corp` |
+
+When `-HuduEntryName` is used, the Hudu integration finds any existing asset with that name in the target layout and **updates it in place** rather than creating a new one. This lets you write audit reports directly into existing device records (e.g. assets synced from Atera). When `-HuduEntryName` is not set, the default name is `HOSTNAME - dd/MM/yyyy`, which is unique per day and always creates.
 
 | Exit code | Meaning |
 |---|---|
