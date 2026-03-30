@@ -145,7 +145,7 @@ After updating the `.ps1`, the script automatically re-launches the new version 
 
 ## Hudu Integration
 
-The script can upload audit reports directly to [Hudu](https://www.huducloud.com/) as a new asset. Enable this with the `-HuduReport` switch and four required parameters:
+The script can upload audit reports directly to [Hudu](https://www.huducloud.com/), writing into an existing asset entry or creating a new one. Enable this with the `-HuduReport` switch and the required parameters:
 
 | Parameter | Description |
 |---|---|
@@ -153,9 +153,10 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
 | `-HuduAPIKey` | Your Hudu API key (generate from Admin > API Keys in Hudu) |
 | `-HuduBaseURL` | Your Hudu instance URL (e.g. `https://your-instance.huducloud.com`) |
 | `-HuduCompanySlug` | The hex slug from your Hudu company URL (e.g. `0297b67dbba7` from `https://instance.huducloud.com/c/0297b67dbba7`) |
-| `-HuduAssetLayoutName` | The name of the asset layout to create the asset under (e.g. `Audit Reports`) |
+| `-HuduAssetLayoutName` | The name of the asset layout to write into (e.g. `Audit Reports`, `Atera Devices`) |
+| `-HuduEntryName` | *(Optional)* The name of the individual entry within the layout. If an entry with this name already exists it is updated in place; otherwise a new entry is created. When omitted, the default name is `HOSTNAME - dd/MM/yyyy` (always creates a new dated entry). |
 
-**Example:**
+**Example — create a new dated entry each run:**
 ```powershell
 .\Run-Audit.ps1 -HuduReport `
     -HuduAPIKey "your-api-key" `
@@ -164,12 +165,22 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
     -HuduAssetLayoutName "Audit Reports"
 ```
 
+**Example — update an existing device record by name:**
+```powershell
+.\Run-Audit.ps1 -HuduReport `
+    -HuduAPIKey "your-api-key" `
+    -HuduBaseURL "https://your-instance.huducloud.com" `
+    -HuduCompanySlug "Hex String" `
+    -HuduAssetLayoutName "Atera Devices" `
+    -HuduEntryName "$env:COMPUTERNAME"
+```
+
 **How it works:**
 1. The script resolves the company name from the slug via the Hudu API and uses it as the customer name in the report (no need to pass `-CustomerName` separately)
 2. All audit HTML is transformed in real-time into Hudu-compatible inline-styled HTML (Hudu's ActionText editor strips `<style>` blocks)
-3. After the audit completes, a new asset is created under the specified company and layout with the report content embedded in the first RichText field
-4. The full standalone HTML report is attached to the asset as a downloadable file
-5. A local Hudu preview file is also saved for reference
+3. If `-HuduEntryName` is set, the script searches the target layout for an existing entry with that name and updates it (PUT); if none is found, or if `-HuduEntryName` is omitted, a new entry is created (POST)
+4. The full standalone HTML report is attached to the entry as a downloadable file
+5. A local Hudu preview file is also saved for reference; both local files are removed after a successful upload and attachment
 
 **Asset layout requirements:** The target asset layout must have at least one RichText field. The script automatically detects and uses the first RichText field in the layout.
 
@@ -181,7 +192,8 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
     -HuduAPIKey "your-api-key" `
     -HuduBaseURL "https://your-instance.huducloud.com" `
     -HuduCompanySlug "Hex String" `
-    -HuduAssetLayoutName "Audit Reports"
+    -HuduAssetLayoutName "Atera Devices" `
+    -HuduEntryName "$env:COMPUTERNAME"
 ```
 
 ---
