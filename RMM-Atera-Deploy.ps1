@@ -28,8 +28,18 @@
     PARAMETERS
       Pass only what you need. -Silent is always injected automatically.
       -ForceRun              Skip the monthly guard check and run the audit regardless.
+      -HuduEntryName         Override the Hudu asset name. Accepts plain text or tokens:
+                               $ComputerName  - endpoint hostname (e.g. DESKTOP-ABC123)
+                               $Date          - run date in yyyy-MM-dd format
+                               $CustomerName  - value of -CustomerName if provided
+                             Examples:
+                               -HuduEntryName "$ComputerName"
+                               -HuduEntryName "$Date - $ComputerName - Audit"
+                             In Atera's parameter field enter the value literally (no quotes
+                             needed) -- tokens are expanded on the endpoint at runtime.
+                             If omitted, Run-Audit.ps1 uses its default: "HOSTNAME - dd/MM/yyyy".
       Example (Hudu deployment):
-        -HuduReport -HuduAPIKey "key" -HuduBaseURL "https://..." -HuduCompanySlug "abc123" -HuduAssetLayoutName "Audit Reports"
+        -HuduReport -HuduAPIKey "key" -HuduBaseURL "https://..." -HuduCompanySlug "abc123" -HuduAssetLayoutName "Audit Reports" -HuduEntryName "$ComputerName"
 
     EXIT CODES
       0  Audit completed (pass-through from Run-Audit.ps1)
@@ -52,13 +62,14 @@ param(
     [string]$HuduBaseURL,
     [string]$HuduCompanySlug,
     [string]$HuduAssetLayoutName,
+    [string]$HuduEntryName,
     [switch]$ForceRun
 )
 
 # ------------------------- #
 # Constants                 #
 # ------------------------- #
-$DeployScriptVersion = "1.1.0"
+$DeployScriptVersion = "1.2.0"
 $LogPath      = "C:\Windows\Temp\AuditDeploy.txt"
 $CachedDir    = "C:\Program Files\Windows Audit Tool\Scripts"
 $CachedPath   = Join-Path $CachedDir "Run-Audit.ps1"
@@ -242,6 +253,20 @@ if ($NeedDownload) {
 }
 
 # ------------------------- #
+# HuduEntryName expansion   #
+# ------------------------- #
+$ResolvedHuduEntryName = $null
+if ($HuduEntryName) {
+    $tokenDate             = Get-Date -Format 'yyyy-MM-dd'
+    $tokenCustomerName     = if ($CustomerName) { $CustomerName } else { '' }
+    $ResolvedHuduEntryName = $HuduEntryName `
+        -replace '\$ComputerName', $env:COMPUTERNAME `
+        -replace '\$Date',         $tokenDate `
+        -replace '\$CustomerName', $tokenCustomerName
+    & $Log ("HuduEntryName resolved: '{0}' -> '{1}'" -f $HuduEntryName, $ResolvedHuduEntryName)
+}
+
+# ------------------------- #
 # Build argument list       #
 # ------------------------- #
 $argList = @('-ExecutionPolicy', 'Bypass', '-File', $CachedPath, '-Silent')
@@ -251,6 +276,7 @@ if ($PSBoundParameters.ContainsKey('HuduAPIKey'))          { $argList += @('-Hud
 if ($PSBoundParameters.ContainsKey('HuduBaseURL'))         { $argList += @('-HuduBaseURL', $HuduBaseURL) }
 if ($PSBoundParameters.ContainsKey('HuduCompanySlug'))     { $argList += @('-HuduCompanySlug', $HuduCompanySlug) }
 if ($PSBoundParameters.ContainsKey('HuduAssetLayoutName')) { $argList += @('-HuduAssetLayoutName', $HuduAssetLayoutName) }
+if ($ResolvedHuduEntryName)                                { $argList += @('-HuduEntryName', $ResolvedHuduEntryName) }
 
 # Log argument list with API key masked
 $logArgs = $argList | ForEach-Object {

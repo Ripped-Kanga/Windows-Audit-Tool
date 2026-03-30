@@ -45,7 +45,13 @@ param(
     [string]$HuduCompanySlug,
 
     [Alias('hudu-asset-layout-name')]
-    [string]$HuduAssetLayoutName
+    [string]$HuduAssetLayoutName,
+
+    # Override the Hudu entry name (the individual record within the asset layout).
+    # When set, an existing entry with this name is updated in place rather than
+    # creating a new one. When not set the default is "$ComputerName - <date>".
+    [Alias('hudu-entry-name')]
+    [string]$HuduEntryName
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +59,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.0.0"
+$ScriptVersion = "1.4.1.0"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1276,6 +1282,29 @@ function Get-HuduCompanyBySlug {
     return $null
 }
 
+function Get-HuduAssetByName {
+    <#
+      Searches for a Hudu asset by exact name within a specific company and layout.
+      Hudu's name= query parameter is a contains-search, so results are filtered
+      locally for an exact match. Returns the first matching asset, or $null.
+    #>
+    param(
+        [string]$Name,
+        [int]$CompanyId,
+        [int]$LayoutId
+    )
+    $encodedName = [uri]::EscapeDataString($Name)
+    $page = 1
+    do {
+        $resp   = Invoke-HuduRequest -Endpoint "assets?name=$encodedName&company_id=$CompanyId&asset_layout_id=$LayoutId&page=$page"
+        $assets = @($resp.assets)
+        $match  = $assets | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+        if ($match) { return $match }
+        $page++
+    } while ($assets.Count -ge 25)
+    return $null
+}
+
 function Add-HuduUpload {
     <#
       Uploads a file to Hudu and attaches it to the specified record.
@@ -1327,11 +1356,13 @@ function Add-HuduUpload {
 
 function Publish-HuduAsset {
     <#
-      Creates a new asset in Hudu under the specified company and asset layout.
+      Creates or updates a Hudu asset under the specified company and asset layout.
       Uses the pre-resolved numeric company ID from $_HuduCompanyId, finds the
       layout by name, auto-detects the first RichText field, and populates it
-      with the supplied HTML content. Optionally attaches a file to the asset.
-      Returns $true on success, $false on failure (never throws).
+      with the supplied HTML content. If an asset with the given name already
+      exists in the layout, it is updated (PUT) rather than duplicated (POST).
+      Optionally attaches a file to the asset.
+      Returns a PSCustomObject { AssetCreated; FileAttached } (never throws).
     #>
     param(
         [string]$LayoutName,
@@ -1390,8 +1421,7 @@ function Publish-HuduAsset {
             Log "Hudu: 'Health Score' field not found in layout '$LayoutName' - skipping score field"
         }
 
-        # 3. Create the asset
-        Write-Action -What "Creating asset: $AssetName" -Kind run
+        # 3. Build request body (shared by create and update paths)
         $customFields = [System.Collections.Generic.List[object]]::new()
         $customFields.Add(@{ $fieldKey = $HtmlContent })
         # Format as an invariant-culture string ("7.5") for the Text field.
@@ -1406,11 +1436,23 @@ function Publish-HuduAsset {
                 custom_fields   = $customFields.ToArray()
             }
         }
-        $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$companyId/assets" -Body $body
+
+        # 4. Find existing asset or create new
+        $existingAsset = Get-HuduAssetByName -Name $AssetName -CompanyId $companyId -LayoutId $layoutId
+        if ($existingAsset) {
+            $existingId = $existingAsset.id
+            Write-Action -What ("Updating existing asset: $AssetName (ID: $existingId)") -Kind run
+            $result = Invoke-HuduRequest -Method PUT -Endpoint "companies/$companyId/assets/$existingId" -Body $body
+        } else {
+            Write-Action -What "Creating asset: $AssetName" -Kind run
+            $result = Invoke-HuduRequest -Method POST -Endpoint "companies/$companyId/assets" -Body $body
+        }
+
         if ($result -and $result.asset) {
             $assetId = $result.asset.id
-            Write-Action -What ("Asset created successfully (ID: {0})" -f $assetId) -Kind ok
-            Log ("Hudu: asset '{0}' created (ID {1})" -f $AssetName, $assetId)
+            $verb    = if ($existingAsset) { 'updated' } else { 'created' }
+            Write-Action -What ("Asset {0} successfully (ID: {1})" -f $verb, $assetId) -Kind ok
+            Log ("Hudu: asset '{0}' {1} (ID {2})" -f $AssetName, $verb, $assetId)
 
             # Attach file if path provided
             $fileAttached = $false
@@ -1423,14 +1465,15 @@ function Publish-HuduAsset {
                     Log ("Hudu: attached '{0}' to asset {1}" -f $fileName, $assetId)
                     $fileAttached = $true
                 } else {
-                    Write-Action -What "Attachment upload failed (asset was still created)." -Kind warn
+                    Write-Action -What ("Attachment upload failed (asset was still {0})." -f $verb) -Kind warn
                 }
             }
             return [pscustomobject]@{ AssetCreated = $true; FileAttached = $fileAttached }
         }
         # Unexpected response shape
-        Write-Action -What "Asset may have been created but response was unexpected." -Kind warn
-        Log ("Hudu: unexpected response from asset create: {0}" -f ($result | ConvertTo-Json -Depth 3 -Compress))
+        $op = if ($existingAsset) { 'update' } else { 'create' }
+        Write-Action -What ("Asset {0} response was unexpected." -f $op) -Kind warn
+        Log ("Hudu: unexpected response from asset {0}: {1}" -f $op, ($result | ConvertTo-Json -Depth 3 -Compress))
         return [pscustomobject]@{ AssetCreated = $true; FileAttached = $false }
     }
     catch {
@@ -4332,8 +4375,7 @@ $huduBodyFragment
     # ---- Upload to Hudu via API ----
     Write-Host "[Hudu] Uploading report to Hudu..." -ForegroundColor Yellow
     Log "STEP Hudu: Uploading report to Hudu"
-    $huduAssetDate = Get-Date -Format 'dd/MM/yyyy'
-    $huduAssetName = "$ComputerName - $huduAssetDate"
+    $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
     # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) - they are
     # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
     # These can originate from registry software entries containing embedded null bytes.
