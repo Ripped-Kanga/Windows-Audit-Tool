@@ -47,11 +47,11 @@ param(
     [Alias('hudu-asset-layout-name')]
     [string]$HuduAssetLayoutName,
 
-    # Override the Hudu asset name. When set, the asset is found by name and updated
-    # if it already exists, or created with this name if it does not.
-    # When not set the default name is "$ComputerName - <date>".
-    [Alias('hudu-asset-name')]
-    [string]$HuduAssetName
+    # Override the Hudu entry name (the individual record within the asset layout).
+    # When set, an existing entry with this name is updated in place rather than
+    # creating a new one. When not set the default is "$ComputerName - <date>".
+    [Alias('hudu-entry-name')]
+    [string]$HuduEntryName
 )
 
 $ErrorActionPreference = "Stop"
@@ -4375,7 +4375,7 @@ $huduBodyFragment
     # ---- Upload to Hudu via API ----
     Write-Host "[Hudu] Uploading report to Hudu..." -ForegroundColor Yellow
     Log "STEP Hudu: Uploading report to Hudu"
-    $huduAssetName = if ($HuduAssetName) { $HuduAssetName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
+    $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
     # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) - they are
     # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
     # These can originate from registry software entries containing embedded null bytes.

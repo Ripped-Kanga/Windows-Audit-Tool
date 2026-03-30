@@ -255,15 +255,15 @@ if ($NeedDownload) {
 # ------------------------- #
 # HuduEntryName expansion   #
 # ------------------------- #
-$ResolvedHuduAssetName = $null
+$ResolvedHuduEntryName = $null
 if ($HuduEntryName) {
     $tokenDate             = Get-Date -Format 'yyyy-MM-dd'
     $tokenCustomerName     = if ($CustomerName) { $CustomerName } else { '' }
-    $ResolvedHuduAssetName = $HuduEntryName `
+    $ResolvedHuduEntryName = $HuduEntryName `
         -replace '\$ComputerName', $env:COMPUTERNAME `
         -replace '\$Date',         $tokenDate `
         -replace '\$CustomerName', $tokenCustomerName
-    & $Log ("HuduEntryName resolved: '{0}' -> '{1}'" -f $HuduEntryName, $ResolvedHuduAssetName)
+    & $Log ("HuduEntryName resolved: '{0}' -> '{1}'" -f $HuduEntryName, $ResolvedHuduEntryName)
 }
 
 # ------------------------- #
@@ -276,7 +276,7 @@ if ($PSBoundParameters.ContainsKey('HuduAPIKey'))          { $argList += @('-Hud
 if ($PSBoundParameters.ContainsKey('HuduBaseURL'))         { $argList += @('-HuduBaseURL', $HuduBaseURL) }
 if ($PSBoundParameters.ContainsKey('HuduCompanySlug'))     { $argList += @('-HuduCompanySlug', $HuduCompanySlug) }
 if ($PSBoundParameters.ContainsKey('HuduAssetLayoutName')) { $argList += @('-HuduAssetLayoutName', $HuduAssetLayoutName) }
-if ($ResolvedHuduAssetName)                                { $argList += @('-HuduAssetName', $ResolvedHuduAssetName) }
+if ($ResolvedHuduEntryName)                                { $argList += @('-HuduEntryName', $ResolvedHuduEntryName) }
 
 # Log argument list with API key masked
 $logArgs = $argList | ForEach-Object {
