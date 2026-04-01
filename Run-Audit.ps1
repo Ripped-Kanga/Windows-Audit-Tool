@@ -1865,8 +1865,9 @@ if ($disks -ne "Error" -and $disks) {
     )
 }
 
-if ($logDisks -ne "Error" -and $logDisks -and $logDisks.Count -gt 0) {
-    $logDiskList = $logDisks | ForEach-Object {
+if ($logDisks -ne "Error" -and $logDisks) {
+    Write-Action -What ("Logical drives found: {0}" -f @($logDisks).Count) -Kind ok
+    $logDiskList = @($logDisks) | ForEach-Object {
         $totalGB = if ($_.Size)      { [math]::Round($_.Size      / 1GB, 2) } else { 0 }
         $freeGB  = if ($_.FreeSpace) { [math]::Round($_.FreeSpace / 1GB, 2) } else { 0 }
         $usedPct = if ($totalGB -gt 0) { [math]::Round(($totalGB - $freeGB) / $totalGB * 100, 1) } else { 0 }
@@ -1898,6 +1899,9 @@ if ($logDisks -ne "Error" -and $logDisks -and $logDisks.Count -gt 0) {
         elseif ($r.UsedPct -ge 75) { 'sev-warn' }
         else                       { '' }
     }
+} else {
+    Write-Action -What "Could not retrieve logical disk info." -Kind warn
+    Html-AddNote -Text "Could not retrieve drive space information." -Kind warn
 }
 
 # --- System Status ---
