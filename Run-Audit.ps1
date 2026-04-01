@@ -59,7 +59,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.1.5"
+$ScriptVersion = "1.4.1.6"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1825,7 +1825,8 @@ $ramGB = if ($mem -ne "Error" -and $mem) { [math]::Round($mem.TotalPhysicalMemor
 $boot   = if ($os -ne "Error" -and $os) { $os.LastBootUpTime } else { Safe-Invoke { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } "Uptime" }
 $uptime = if ($boot -ne "Error" -and $boot) { New-TimeSpan -Start $boot } else { $null }
 
-$disks = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
+$disks    = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
+$logDisks = Safe-Invoke { @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID, VolumeName, Size, FreeSpace) } "Logical Disk Info"
 
 # --- Operating System ---
 Html-Add "<h3>Operating System</h3>"
@@ -1862,6 +1863,45 @@ if ($disks -ne "Error" -and $disks) {
         @{ Header="Model"; Property="Model" },
         @{ Header="Size (GB)"; Property="SizeGB" }
     )
+}
+
+if ($logDisks -ne "Error" -and $logDisks) {
+    Write-Action -What ("Logical drives found: {0}" -f @($logDisks).Count) -Kind ok
+    $logDiskList = @($logDisks) | ForEach-Object {
+        $totalGB = if ($_.Size)      { [math]::Round($_.Size      / 1GB, 2) } else { 0 }
+        $freeGB  = if ($_.FreeSpace) { [math]::Round($_.FreeSpace / 1GB, 2) } else { 0 }
+        $usedPct = if ($totalGB -gt 0) { [math]::Round(($totalGB - $freeGB) / $totalGB * 100, 1) } else { 0 }
+        $label   = [string]$_.VolumeName
+        [pscustomobject]@{
+            Drive   = $_.DeviceID
+            Label   = $label
+            TotalGB = $totalGB
+            FreeGB  = $freeGB
+            UsedPct = $usedPct
+        }
+    }
+    Html-Add "<h4>Drive Space</h4>"
+    Html-AddTable -Items $logDiskList -Columns @(
+        @{ Header="Drive";      Property="Drive" },
+        @{ Header="Label";      Property="Label" },
+        @{ Header="Total (GB)"; Property="TotalGB" },
+        @{ Header="Free (GB)"; Property="FreeGB" },
+        @{ Header="Usage"; Raw=$true; Value={
+            param($r)
+            $pct   = $r.UsedPct
+            $color = if ($pct -ge 90) { '#dc2626' } elseif ($pct -ge 75) { '#d97706' } else { '#059669' }
+            $fill  = "<div style='width:{0}%;height:100%;background:{1};border-radius:4px'></div>" -f $pct, $color
+            "<div style='display:flex;align-items:center;gap:6px;min-width:130px'><div style='flex:1;background:#e2e8f0;border-radius:4px;height:10px;overflow:hidden;min-width:80px'>$fill</div><span style='font-size:12px;white-space:nowrap'>$pct%</span></div>"
+        }}
+    ) -RowClass {
+        param($r)
+        if     ($r.UsedPct -ge 90) { 'sev-bad' }
+        elseif ($r.UsedPct -ge 75) { 'sev-warn' }
+        else                       { '' }
+    }
+} else {
+    Write-Action -What "Could not retrieve logical disk info." -Kind warn
+    Html-AddNote -Text "Could not retrieve drive space information." -Kind warn
 }
 
 # --- System Status ---
@@ -2287,6 +2327,23 @@ if ($adapters -ne "Error" -and $adapters) {
     Html-AddNote -Text "Could not retrieve network adapter information." -Kind warn
 }
 
+# ---- WiFi SSID map (keyed by adapter name) ----
+$ssidMap = Safe-Invoke {
+    $map = @{}
+    $lines = & netsh wlan show interfaces 2>$null
+    if ($lines) {
+        $curName = $null
+        foreach ($line in $lines) {
+            if     ($line -match '^\s+Name\s*:\s*(.+)$')  { $curName = $Matches[1].Trim() }
+            elseif ($line -match '^\s+SSID\s*:\s*(.+)$' -and $curName) {
+                $map[$curName] = $Matches[1].Trim()
+                $curName = $null
+            }
+        }
+    }
+    $map
+} "WiFi SSID"
+
 # ---- DHCP details from WMI (keyed by adapter description for correlation) ----
 $dhcpMap = Safe-Invoke {
     $map = @{}
@@ -2386,6 +2443,9 @@ if ($ipConfigs -ne "Error" -and $ipConfigs) {
         if ($gw6 -ne 'N/A')    { $kv["IPv6 Gateway"]   = $gw6 }
         $kv["Network Profile"] = $netProfile
         $kv["Link Speed"]      = $speed
+        if ($ssidMap -ne "Error" -and $ssidMap -and $ssidMap.ContainsKey($adName)) {
+            $kv["SSID"] = $ssidMap[$adName]
+        }
 
         Html-AddKV -Pairs $kv
     }
