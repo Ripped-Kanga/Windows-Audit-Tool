@@ -69,7 +69,7 @@ param(
 # ------------------------- #
 # Constants                 #
 # ------------------------- #
-$DeployScriptVersion = "1.2.0"
+$DeployScriptVersion = "1.2.1"
 $LogPath      = "C:\Windows\Temp\AuditDeploy.txt"
 $CachedDir    = "C:\Program Files\Windows Audit Tool\Scripts"
 $CachedPath   = Join-Path $CachedDir "Run-Audit.ps1"
@@ -105,9 +105,9 @@ if (-not $ForceRun) {
     $priorRun    = $null
 
     if (Test-Path -LiteralPath $AuditLogPath -ErrorAction SilentlyContinue) {
-        # Match log lines like: [2026-03-15 09:12:34Z] Audit completed for HOSTNAME
+        # Match log lines like: 2026-03-15 09:12:34Z - Audit completed for HOSTNAME
         $priorRun = Get-Content -LiteralPath $AuditLogPath -ErrorAction SilentlyContinue |
-            Where-Object { $_ -match ('^\[' + $thisYearMon) -and $_ -match 'Audit completed for ' } |
+            Where-Object { $_ -match ('^' + $thisYearMon) -and $_ -match 'Audit completed for ' } |
             Select-Object -Last 1
     }
 
