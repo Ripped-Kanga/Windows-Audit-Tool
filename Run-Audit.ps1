@@ -4,10 +4,10 @@
 
     Output:
       RMM / Silent mode (or running from C:\Program Files\...):
-        HTML report  ->  C:\Program Files\Windows Audit Tool\Results\<COMPUTER>-Audit.html
+        HTML report  ->  C:\Program Files\Windows Audit Tool\Results\<DATE> - <COMPUTER>-Audit.html
         Audit log    ->  C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt
       Interactive mode (run from any other location):
-        HTML report  ->  <script-dir>\Windows Audit Tool\<COMPUTER>-Audit.html
+        HTML report  ->  <script-dir>\Windows Audit Tool\<DATE> - <COMPUTER>-Audit.html
         Audit log    ->  <script-dir>\Windows Audit Tool\AuditLog.txt
 
       Bootstrap log (first few lines, before paths are resolved):
@@ -1712,8 +1712,9 @@ foreach ($dir in @($ReportDir, $LogDir)) {
 $LogPath = Join-Path $LogDir "AuditLog.txt"
 Log ("Log continued at final path: {0}" -f $LogPath)
 
-$HtmlReportPath     = Join-Path $ReportDir "${ComputerName}-Audit.html"
-$HuduHtmlReportPath = Join-Path $ReportDir "${ComputerName}-Audit-Hudu.html"
+$ReportDate         = Get-Date -Format 'yyyy-MM-dd'
+$HtmlReportPath     = Join-Path $ReportDir "${ReportDate} - ${ComputerName}-Audit.html"
+$HuduHtmlReportPath = Join-Path $ReportDir "${ReportDate} - ${ComputerName}-Audit-Hudu.html"
 Log ("Report output directory: {0}" -f $ReportDir)
 
 # ------------------------- #
@@ -1786,8 +1787,8 @@ if (-not $CustomerName -and -not $Silent) {
 if ($CustomerName) {
     Write-Action -What ("Customer: {0}" -f $CustomerName) -Kind ok
     Log ("Customer name: {0}" -f $CustomerName)
-    $HtmlReportPath     = Join-Path $ReportDir "${CustomerName} - ${ComputerName}-Audit.html"
-    $HuduHtmlReportPath = Join-Path $ReportDir "${CustomerName} - ${ComputerName}-Audit-Hudu.html"
+    $HtmlReportPath     = Join-Path $ReportDir "${ReportDate} - ${CustomerName} - ${ComputerName}-Audit.html"
+    $HuduHtmlReportPath = Join-Path $ReportDir "${ReportDate} - ${CustomerName} - ${ComputerName}-Audit-Hudu.html"
 }
 
 # ============================================================
