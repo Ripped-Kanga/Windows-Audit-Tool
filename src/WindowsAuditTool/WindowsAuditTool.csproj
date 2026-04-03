@@ -26,4 +26,8 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.*" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Resource Include="app.ico" />
+  </ItemGroup>
+
 </Project>
