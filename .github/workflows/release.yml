@@ -38,6 +38,8 @@ jobs:
       - name: Build GUI (restore + publish)
         shell: pwsh
         run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          Write-Host "Building GUI with version: $version"
           dotnet publish src/WindowsAuditTool/WindowsAuditTool.csproj `
             -c Release `
             -r win-x64 `
@@ -45,6 +47,9 @@ jobs:
             -p:PublishSingleFile=true `
             -p:IncludeNativeLibrariesForSelfExtract=true `
             -p:EnableCompressionInSingleFile=true `
+            -p:Version=$version `
+            -p:FileVersion=$version `
+            -p:AssemblyVersion=$version `
             -o gui-publish
 
       - name: Verify GUI output
