@@ -1,0 +1,59 @@
+name: Build GUI Release
+
+on:
+  push:
+    tags:
+      - 'gui-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        shell: pwsh
+        run: dotnet restore src/WindowsAuditTool/WindowsAuditTool.csproj
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build src/WindowsAuditTool/WindowsAuditTool.csproj -c Release --no-restore
+
+      - name: Publish self-contained single-file
+        shell: pwsh
+        run: |
+          dotnet publish src/WindowsAuditTool/WindowsAuditTool.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o publish
+
+      - name: Verify output
+        shell: pwsh
+        run: |
+          $exe = Get-Item "publish/WindowsAuditTool.exe"
+          Write-Host "Executable size: $([math]::Round($exe.Length / 1MB, 1)) MB"
+          if (-not $exe) { throw "WindowsAuditTool.exe not found in publish output" }
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            publish/WindowsAuditTool.exe `
+            Run-Audit.ps1 `
+            --title "GUI ${{ github.ref_name }}" `
+            --generate-notes

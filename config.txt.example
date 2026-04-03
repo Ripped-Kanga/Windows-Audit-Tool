@@ -1,0 +1,13 @@
+# Windows Audit Tool Configuration
+# Place this file as "config.txt" next to WindowsAuditTool.exe
+# All settings are optional. Lines starting with # are comments.
+
+CustomerName=
+
+# Hudu integration (uncomment and fill in to enable)
+# HuduReport=true
+# HuduAPIKey=your-api-key-here
+# HuduBaseURL=https://your-instance.huducloud.com
+# HuduCompanySlug=abc123
+# HuduAssetLayoutName=Audit Reports
+# HuduEntryName=$ComputerName
