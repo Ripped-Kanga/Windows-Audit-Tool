@@ -1,4 +1,4 @@
-using System.IO;
+using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -12,9 +12,10 @@ public partial class LaunchView : UserControl
     private readonly AppConfig _config;
     private readonly bool _isElevated;
     private readonly bool _scriptFound;
+    private UpdateInfo? _updateInfo;
 
     /// <summary>Raised when the user clicks "Run Audit".</summary>
-    public event System.Action<AppConfig>? RunRequested;
+    public event Action<AppConfig>? RunRequested;
 
     public LaunchView()
     {
@@ -25,10 +26,14 @@ public partial class LaunchView : UserControl
         _scriptFound = new AuditRunner().FindScript() != null;
 
         SetupUI();
+        CheckForUpdateAsync();
     }
 
     private void SetupUI()
     {
+        // Version display
+        VersionText.Text = $"GUI v{UpdateService.GetCurrentVersion()}";
+
         // Customer name
         CustomerNameBox.Text = _config.CustomerName;
 
@@ -71,6 +76,43 @@ public partial class LaunchView : UserControl
         {
             ConfigIndicator.Text = "Settings loaded from config.txt";
             ConfigIndicator.Visibility = Visibility.Visible;
+        }
+    }
+
+    private async void CheckForUpdateAsync()
+    {
+        _updateInfo = await UpdateService.CheckForUpdateAsync();
+        if (_updateInfo == null)
+            return;
+
+        UpdateText.Text = $"Update available: v{_updateInfo.CurrentVersion} \u2192 v{_updateInfo.LatestVersion}";
+        UpdateSubText.Text = _updateInfo.Ps1DownloadUrl != null
+            ? "Updates both the GUI and Run-Audit.ps1"
+            : "Updates the GUI executable";
+        UpdateBanner.Visibility = Visibility.Visible;
+    }
+
+    private async void UpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_updateInfo == null) return;
+
+        UpdateButton.IsEnabled = false;
+        UpdateButton.Content = "Downloading...";
+
+        var success = await UpdateService.DownloadAndRestartAsync(_updateInfo, status =>
+        {
+            Dispatcher.Invoke(() => UpdateSubText.Text = status);
+        });
+
+        if (success)
+        {
+            Application.Current.Shutdown();
+        }
+        else
+        {
+            UpdateButton.IsEnabled = true;
+            UpdateButton.Content = "Update && Restart";
+            UpdateSubText.Text = "Update failed. Try again or download manually.";
         }
     }
 

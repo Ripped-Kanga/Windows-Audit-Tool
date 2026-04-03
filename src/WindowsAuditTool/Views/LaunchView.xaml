@@ -39,6 +39,31 @@
                     </StackPanel>
                 </Border>
 
+                <!-- Update banner (shown when a newer version is available) -->
+                <Border x:Name="UpdateBanner"
+                        CornerRadius="8"
+                        Padding="14,12"
+                        Margin="0,0,0,16"
+                        Visibility="Collapsed"
+                        Background="#1A0078D4">
+                    <DockPanel>
+                        <Button x:Name="UpdateButton"
+                                Content="Update &amp; Restart"
+                                Style="{StaticResource SecondaryButton}"
+                                DockPanel.Dock="Right"
+                                Click="UpdateButton_Click"/>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock x:Name="UpdateText"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="#0078D4"/>
+                            <TextBlock x:Name="UpdateSubText"
+                                       FontSize="11"
+                                       Foreground="{StaticResource MutedBrush}"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+
                 <!-- Elevation status -->
                 <Border x:Name="ElevationBanner"
                         CornerRadius="8"
