@@ -34,13 +34,42 @@ jobs:
         shell: pwsh
         run: Install-Module ps2exe -Scope CurrentUser -Force
 
-      - name: Compile executable
+      - name: Compile PS2EXE executable
         shell: pwsh
         run: Invoke-ps2exe .\Run-Audit.ps1 .\Run-Audit.exe
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build GUI (restore + publish)
+        shell: pwsh
+        run: |
+          dotnet publish src/WindowsAuditTool/WindowsAuditTool.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o gui-publish
+
+      - name: Verify GUI output
+        shell: pwsh
+        run: |
+          $exe = Get-Item "gui-publish/WindowsAuditTool.exe"
+          if (-not $exe) { throw "WindowsAuditTool.exe not found in publish output" }
+          Write-Host "GUI executable size: $([math]::Round($exe.Length / 1MB, 1)) MB"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" Run-Audit.ps1 Run-Audit.exe --title "${{ github.ref_name }}" --generate-notes
+          gh release create "${{ github.ref_name }}" `
+            Run-Audit.ps1 `
+            Run-Audit.exe `
+            gui-publish/WindowsAuditTool.exe `
+            --title "${{ github.ref_name }}" `
+            --generate-notes
