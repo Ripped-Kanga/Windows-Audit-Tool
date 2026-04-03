@@ -15,8 +15,7 @@
                 Margin="40"
                 VerticalAlignment="Center"
                 HorizontalAlignment="Center"
-                MinWidth="480"
-                Effect="{x:Null}">
+                MinWidth="480">
             <Border.Effect>
                 <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.08" Color="Black"/>
             </Border.Effect>
