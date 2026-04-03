@@ -72,6 +72,10 @@ public partial class LaunchView : UserControl
             RunButton.IsEnabled = false;
         }
 
+        // Export directory
+        var exportDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Windows Audit Tool");
+        ExportDirLabel.Text = $"Export Directory: {exportDir}";
+
         // Config file indicator
         if (ConfigService.ConfigFileExists())
         {

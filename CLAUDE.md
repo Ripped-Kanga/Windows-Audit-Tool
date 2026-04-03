@@ -131,11 +131,11 @@ Output paths are determined at runtime based on deployment context (`$IsRmmMode`
 
 | Context | `$ReportDir` | `$LogPath` |
 |---|---|---|
-| RMM/Silent OR running from `C:\Program Files\...` | `C:\Program Files\Windows Audit Tool\Results` | `C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt` |
-| Interactive (non-silent, not in Program Files) | `<script-dir>\Windows Audit Tool\` | `<script-dir>\Windows Audit Tool\AuditLog.txt` |
+| RMM: running from `C:\Program Files\...` | `C:\Program Files\Windows Audit Tool\Results` | `C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt` |
+| Interactive / GUI (any other location) | `<script-dir>\Windows Audit Tool\` | `<script-dir>\Windows Audit Tool\AuditLog.txt` |
 | With `-CustomerName` | same as above | `<CustomerName> - <ComputerName>-Audit.html` |
 
-`$IsRmmMode` is `$true` when `-Silent` is passed OR when `$ScriptDir` starts with `C:\Program Files`. Both `$ScriptDir` and `$IsRmmMode` are resolved early in the main `try` block. `$LogPath` starts as a bootstrap path (`C:\Windows\Temp\AuditLog.txt`) for the first few log lines, then is updated to its final value after the output directory routing block. `$HtmlReportPath` and `$HuduHtmlReportPath` are derived from `$ReportDir`. Do not add configuration file support or additional path parameters.
+`$IsRmmMode` is `$true` when `$ScriptDir` starts with `C:\Program Files` (the `-Silent` flag only suppresses interactive prompts, it does not affect output paths). Both `$ScriptDir` and `$IsRmmMode` are resolved early in the main `try` block. `$LogPath` starts as a bootstrap path (`C:\Windows\Temp\AuditLog.txt`) for the first few log lines, then is updated to its final value after the output directory routing block. `$HtmlReportPath` and `$HuduHtmlReportPath` are derived from `$ReportDir`. Do not add configuration file support or additional path parameters.
 
 ---
 

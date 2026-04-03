@@ -3,10 +3,10 @@
     System Audit Script with progress output + security baseline.
 
     Output:
-      RMM / Silent mode (or running from C:\Program Files\...):
+      RMM mode (running from C:\Program Files\...):
         HTML report  ->  C:\Program Files\Windows Audit Tool\Results\<DATE> - <COMPUTER>-Audit.html
         Audit log    ->  C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt
-      Interactive mode (run from any other location):
+      Interactive / GUI mode (run from any other location):
         HTML report  ->  <script-dir>\Windows Audit Tool\<DATE> - <COMPUTER>-Audit.html
         Audit log    ->  <script-dir>\Windows Audit Tool\AuditLog.txt
 
@@ -1560,8 +1560,10 @@ if ($PSCommandPath) {
 }
 Log ("ScriptDir resolved: {0}" -f $(if ($ScriptDir) { $ScriptDir } else { '(null)' }))
 
-# RMM mode: -Silent was passed, OR the script is running from a Program Files path.
-$IsRmmMode = $Silent -or ($ScriptDir -and $ScriptDir -like 'C:\Program Files*')
+# RMM mode: the script is running from a Program Files path (e.g. deployed via RMM/MDM).
+# Note: -Silent alone does NOT trigger RMM mode -- the GUI wrapper uses -Silent to suppress
+# interactive prompts while still saving reports next to the script (e.g. USB stick).
+$IsRmmMode = $ScriptDir -and $ScriptDir -like 'C:\Program Files*'
 Log ("Deployment mode: {0}" -f $(if ($IsRmmMode) { 'RMM/Silent' } else { 'Interactive' }))
 
 if (-not $Silent) {
@@ -1685,10 +1687,10 @@ Write-Mode -IsElevated:$IsElevated
 # ------------------------------------ #
 # Output Directory Routing             #
 # ------------------------------------ #
-# RMM/Silent (or running from C:\Program Files\...):
+# RMM (running from C:\Program Files\...):
 #   Reports -> C:\Program Files\Windows Audit Tool\Results\
 #   Logs    -> C:\Program Files\Windows Audit Tool\Logs\
-# Interactive (any other location):
+# Interactive / GUI (any other location, including -Silent from GUI wrapper):
 #   Reports -> <script-dir>\Windows Audit Tool\
 #   Logs    -> <script-dir>\Windows Audit Tool\
 if ($IsRmmMode) {
