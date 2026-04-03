@@ -2,34 +2,41 @@
 
 A self-contained PowerShell script that audits a single Windows machine and produces a portable, single-file HTML report. No external modules required. Optional Hudu integration uploads the report directly to your documentation platform.
 
+An optional WPF GUI wrapper (`WindowsAuditTool.exe`) provides a launch interface, live progress tracking, and an in-app report viewer.
+
 ---
 
 ![Windows Audit Tool - Audit System Health Score](assets/screenshots/WAT-Audit-Report-SHS.png)
 
 ## Quick Start
 
-**Download the script:**
+**Option 1 — GUI (recommended for interactive use):**
+
+Download `WindowsAuditTool.exe` and `Run-Audit.ps1` from the [latest release](https://github.com/Ripped-Kanga/Windows-Audit-Tool/releases/latest) and place them in the same folder. Double-click `WindowsAuditTool.exe` to launch.
+
+The GUI detects whether `Run-Audit.ps1` is present alongside it. If the script is missing, a download button appears to fetch it from the latest GitHub release automatically.
+
+**Option 2 — Script only (PowerShell prompt or right-click):**
+
+Download the script:
 ```powershell
 curl -o Run-Audit.ps1 https://github.com/Ripped-Kanga/Windows-Audit-Tool/releases/latest/download/Run-Audit.ps1
 ```
 
-**Option 1 — Right-click the script or executable:**
-- `Run-Audit.ps1` → right-click → *Run with PowerShell*
-- `Run-Audit.exe` → double-click (no PowerShell window needed — launches automatically)
-
-**Option 2 — From an elevated PowerShell prompt:**
+Run it:
 ```powershell
+# Right-click Run-Audit.ps1 -> Run with PowerShell
+
+# Or from an elevated PowerShell prompt:
 powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1
 ```
 
 **Option 3 — Unattended via RMM/MDM (Atera, Intune, etc.):**
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "Acme Corp"
-# or
-.\Run-Audit.exe -Silent -CustomerName "Acme Corp"
 ```
 
-**Option 3a — Atera with `RMM-Atera-Deploy.ps1` (recommended for Atera):**
+**Option 4 — Atera with `RMM-Atera-Deploy.ps1` (recommended for Atera):**
 
 Upload `RMM-Atera-Deploy.ps1` once to Atera. It automatically downloads and caches the latest `Run-Audit.ps1` from GitHub Releases on each run, so you never need to update the Atera script when a new version is released.
 
@@ -69,7 +76,7 @@ When `-HuduEntryName` is used, the Hudu integration finds any existing asset wit
 
 Set the Atera script execution policy to `Bypass` and the timeout to **600 seconds**. See [`RMM-Atera-Deploy.ps1`](RMM-Atera-Deploy.ps1) for full setup notes.
 
-**Option 4 — With Hudu integration (upload report directly to Hudu):**
+**Option 5 — With Hudu integration (upload report directly to Hudu):**
 ```powershell
 .\Run-Audit.ps1 -HuduReport `
     -HuduAPIKey "your-api-key" `
@@ -78,7 +85,7 @@ Set the Atera script execution policy to `Bypass` and the timeout to **600 secon
     -HuduAssetLayoutName "Audit Reports"
 ```
 
-The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. In `-Silent` mode, script updates from GitHub are applied automatically before the audit runs. Use this when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
+The `-Silent` switch suppresses the UAC elevation prompt and the "Press ENTER to exit" pause, allowing the process to exit cleanly in non-interactive contexts. In `-Silent` mode, script updates from GitHub are not applied automatically — pass an explicit update switch alongside `-Silent` to update during a deployment (e.g. `.\Run-Audit.ps1 -Silent -UpdateScript`). Use `-Silent` when deploying through endpoint management software that already runs the script in an elevated context (e.g. Atera agent as SYSTEM, Intune Win32 app with `runAsAccount = system`).
 
 The script will request administrator privileges via UAC automatically in interactive mode. If elevation is declined it continues in limited mode, skipping admin-only checks and noting what was skipped in the report.
 
@@ -91,16 +98,16 @@ Output paths are determined by deployment context, not elevation level.
 **RMM / Silent mode** (when `-Silent` is passed, or the script runs from `C:\Program Files\...`):
 | File | Path |
 |---|---|
-| HTML report | `C:\Program Files\Windows Audit Tool\Results\<ComputerName>-Audit.html` |
-| HTML report (with customer name) | `C:\Program Files\Windows Audit Tool\Results\<CustomerName> - <ComputerName>-Audit.html` |
+| HTML report | `C:\Program Files\Windows Audit Tool\Results\<DATE> - <ComputerName>-Audit.html` |
+| HTML report (with customer name) | `C:\Program Files\Windows Audit Tool\Results\<DATE> - <CustomerName> - <ComputerName>-Audit.html` |
 | Hudu preview (when `-HuduReport` used) | `C:\Program Files\Windows Audit Tool\Results\<ComputerName>-Audit-Hudu.html` |
 | Operational log | `C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt` |
 
-**Interactive mode** (run from any other location):
+**Interactive / GUI mode** (run from any other location):
 | File | Path |
 |---|---|
-| HTML report | `<script-dir>\Windows Audit Tool\<ComputerName>-Audit.html` |
-| HTML report (with customer name) | `<script-dir>\Windows Audit Tool\<CustomerName> - <ComputerName>-Audit.html` |
+| HTML report | `<script-dir>\Windows Audit Tool\<DATE> - <ComputerName>-Audit.html` |
+| HTML report (with customer name) | `<script-dir>\Windows Audit Tool\<DATE> - <CustomerName> - <ComputerName>-Audit.html` |
 | Hudu preview (when `-HuduReport` used) | `<script-dir>\Windows Audit Tool\<ComputerName>-Audit-Hudu.html` |
 | Operational log | `<script-dir>\Windows Audit Tool\AuditLog.txt` |
 
@@ -110,9 +117,64 @@ Output paths are determined by deployment context, not elevation level.
 
 ---
 
+## GUI Wrapper
+
+`WindowsAuditTool.exe` is a WPF application (.NET 8, Windows x64) that wraps `Run-Audit.ps1` with a graphical interface. It is distributed alongside the script on every GitHub release.
+
+### Features
+
+- **Launch view** — customer name input, elevation status indicator, script presence check, update banner
+- **Live progress** — real-time progress bar and colour-coded log output as the audit runs
+- **In-app report viewer** — renders the HTML report using the Microsoft WebView2 runtime; falls back to the default browser if WebView2 is not installed
+- **Auto-update** — checks the GitHub Releases API on startup; one click downloads the new GUI exe and `Run-Audit.ps1`, then restarts
+- **Script download** — if `Run-Audit.ps1` is missing, a button downloads it from the latest release
+
+### Portable USB Stick Setup
+
+Place the following in the same folder (e.g. a USB drive):
+
+```
+WindowsAuditTool.exe
+Run-Audit.ps1
+config.txt          (optional — pre-fills settings)
+```
+
+Reports are written to a `Windows Audit Tool\` subfolder next to the exe.
+
+### config.txt
+
+Create a `config.txt` file in the same folder as `WindowsAuditTool.exe` to pre-fill the customer name and Hudu settings. The file is loaded automatically on startup. Lines beginning with `#` are comments.
+
+```ini
+# Windows Audit Tool — GUI configuration
+CustomerName=Acme Corp
+
+# Hudu integration (optional)
+HuduReport=true
+HuduAPIKey=your-api-key
+HuduBaseURL=https://your-instance.huducloud.com
+HuduCompanySlug=0297b67dbba7
+HuduAssetLayoutName=Audit Reports
+HuduEntryName=$ComputerName
+```
+
+All keys are optional. Any key not present in `config.txt` uses its default (empty / disabled).
+
+### How the GUI Runs the Script
+
+The GUI launches `Run-Audit.ps1` as a child `powershell.exe` process with `-Silent` and passes through the customer name and any Hudu parameters. Console output from the script is captured and displayed in the progress log. When the script finishes, the HTML report path is parsed from the output and loaded into the WebView2 panel.
+
+### Requirements (GUI)
+
+- Windows 10 x64 or later
+- No separate .NET runtime installation required (the exe is self-contained)
+- Microsoft WebView2 Runtime for in-app report viewing (most Windows 10/11 machines already have it via Edge; the GUI falls back to the default browser if absent)
+
+---
+
 ## Self-Update
 
-The script checks the [GitHub Releases](https://github.com/Ripped-Kanga/Windows-Audit-Tool/releases) API on every run to detect newer versions.
+The script checks the [GitHub Releases](https://github.com/Ripped-Kanga/Windows-Audit-Tool/releases) API on every interactive run to detect newer versions.
 
 **Interactive mode (default):** If an update is found, the script pauses and recommends updating before continuing:
 
@@ -120,18 +182,16 @@ The script checks the [GitHub Releases](https://github.com/Ripped-Kanga/Windows-
     Update available: 1.1.0 -> v1.2.0
     It is recommended you update before continuing.
     Restart the script with one of the following switches:
-      .\Run-Audit.ps1 -UpdateAll       # update script + binary
+      .\Run-Audit.ps1 -UpdateAll       # update script + GUI exe
       .\Run-Audit.ps1 -UpdateScript    # update script only
-      .\Run-Audit.ps1 -UpdateExe       # update binary only
 
     Press ENTER to continue with the current version...
 ```
 
 | Switch | What it downloads |
 |---|---|
-| `-UpdateAll` | Both `Run-Audit.ps1` and `Run-Audit.exe` from the release assets |
+| `-UpdateAll` | Both `Run-Audit.ps1` and `WindowsAuditTool.exe` from the release assets |
 | `-UpdateScript` | `Run-Audit.ps1` only |
-| `-UpdateExe` | `Run-Audit.exe` only |
 
 After updating the `.ps1`, the script automatically re-launches the new version and runs the audit.
 
@@ -139,7 +199,7 @@ After updating the `.ps1`, the script automatically re-launches the new version 
 
 **No internet / GitHub unreachable:** The update check silently fails and the audit proceeds with the current version. Update failures never block the audit.
 
-> **Note for releases:** Attach both `Run-Audit.ps1` and `Run-Audit.exe` as assets to each GitHub Release. The updater looks for files ending in `.ps1` and `.exe` in the release assets.
+> **Note for releases:** Both `Run-Audit.ps1` and `WindowsAuditTool.exe` are attached as assets to each GitHub Release. The updater looks for files ending in `.ps1` and the GUI exe by name in the release assets.
 
 ---
 
@@ -301,7 +361,7 @@ Report features:
 
 **Partial data beats no data.** Every section is independent. A failed WMI query, blocked command, or missing privilege produces a visible warning in the report rather than crashing the audit.
 
-**Minimal configuration.** No configuration files or external modules to install. Basic usage requires no setup at all. Hudu integration requires API credentials passed as parameters.
+**Minimal configuration.** No configuration files or external modules required for basic use. The optional `config.txt` pre-fills GUI settings. Hudu integration requires API credentials passed as parameters.
 
 **Self-contained output.** The HTML report is a single file. No viewer software, no server, no dependencies.
 
@@ -316,3 +376,9 @@ Report features:
 - Admin-only sections are skipped gracefully when elevation is unavailable
 - Essential Eight checks detect configuration signals only and do not constitute a formal E8 assessment
 - MFA checks reflect endpoint-observable signals; identity provider enforcement cannot be verified from the local machine
+
+---
+
+## License
+
+MIT 2025
