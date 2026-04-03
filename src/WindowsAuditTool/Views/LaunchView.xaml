@@ -99,8 +99,17 @@
                         CornerRadius="8"
                         Padding="12,10"
                         Margin="0,0,0,24">
-                    <TextBlock x:Name="ScriptStatusText"
-                               FontSize="13"/>
+                    <DockPanel>
+                        <Button x:Name="DownloadScriptButton"
+                                Content="Download"
+                                Style="{StaticResource SecondaryButton}"
+                                DockPanel.Dock="Right"
+                                Visibility="Collapsed"
+                                Click="DownloadScriptButton_Click"/>
+                        <TextBlock x:Name="ScriptStatusText"
+                                   FontSize="13"
+                                   VerticalAlignment="Center"/>
+                    </DockPanel>
                 </Border>
 
                 <!-- Config file indicator -->

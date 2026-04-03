@@ -192,6 +192,47 @@ public sealed class UpdateService
         }
     }
 
+    /// <summary>
+    /// Downloads Run-Audit.ps1 from the latest GitHub release into the application directory.
+    /// Returns true on success.
+    /// </summary>
+    public static async Task<bool> DownloadScriptAsync(Action<string>? progress = null)
+    {
+        var exePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exePath))
+            return false;
+
+        var appDir = Path.GetDirectoryName(exePath)!;
+
+        try
+        {
+            progress?.Invoke("Checking latest release...");
+            var release = await Http.GetFromJsonAsync<GitHubRelease>(ApiUrl);
+            if (release?.Assets == null)
+                return false;
+
+            var ps1Asset = release.Assets.FirstOrDefault(a =>
+                a.Name != null && a.Name.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase));
+
+            if (ps1Asset?.BrowserDownloadUrl == null)
+                return false;
+
+            progress?.Invoke("Downloading Run-Audit.ps1...");
+            var ps1Path = Path.Combine(appDir, "Run-Audit.ps1");
+            using var response = await Http.GetAsync(ps1Asset.BrowserDownloadUrl, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            await using var fs = File.Create(ps1Path);
+            await response.Content.CopyToAsync(fs);
+
+            progress?.Invoke("Download complete.");
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static string GetCurrentVersion()
     {
         var asm = System.Reflection.Assembly.GetExecutingAssembly();

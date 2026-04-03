@@ -65,9 +65,10 @@ public partial class LaunchView : UserControl
         }
         else
         {
-            ScriptStatusText.Text = "Run-Audit.ps1 not found - place it next to this executable";
+            ScriptStatusText.Text = "Run-Audit.ps1 not found";
             ScriptStatusText.Foreground = FindResource("BadBrush") as SolidColorBrush;
             ScriptStatusBorder.Background = new SolidColorBrush(Color.FromArgb(0x1A, 0xDC, 0x26, 0x26));
+            DownloadScriptButton.Visibility = Visibility.Visible;
             RunButton.IsEnabled = false;
         }
 
@@ -113,6 +114,37 @@ public partial class LaunchView : UserControl
             UpdateButton.IsEnabled = true;
             UpdateButton.Content = "Update && Restart";
             UpdateSubText.Text = "Update failed. Try again or download manually.";
+        }
+    }
+
+    private async void DownloadScriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        DownloadScriptButton.IsEnabled = false;
+        DownloadScriptButton.Content = "Downloading...";
+
+        var success = await UpdateService.DownloadScriptAsync(status =>
+        {
+            Dispatcher.Invoke(() => ScriptStatusText.Text = status);
+        });
+
+        if (success)
+        {
+            // Re-check script status and update UI
+            var runner = new AuditRunner();
+            if (runner.FindScript() != null)
+            {
+                ScriptStatusText.Text = "Run-Audit.ps1 found";
+                ScriptStatusText.Foreground = FindResource("GoodBrush") as SolidColorBrush;
+                ScriptStatusBorder.Background = new SolidColorBrush(Color.FromArgb(0x1A, 0x05, 0x96, 0x69));
+                DownloadScriptButton.Visibility = Visibility.Collapsed;
+                RunButton.IsEnabled = true;
+            }
+        }
+        else
+        {
+            ScriptStatusText.Text = "Download failed - check your internet connection";
+            DownloadScriptButton.IsEnabled = true;
+            DownloadScriptButton.Content = "Retry";
         }
     }
 
