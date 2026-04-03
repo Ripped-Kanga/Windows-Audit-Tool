@@ -38,10 +38,12 @@
                 <ProgressBar.Template>
                     <ControlTemplate TargetType="ProgressBar">
                         <Border CornerRadius="6" Background="{TemplateBinding Background}" BorderThickness="0">
-                            <Border x:Name="PART_Indicator"
-                                    CornerRadius="6"
-                                    Background="{TemplateBinding Foreground}"
-                                    HorizontalAlignment="Left"/>
+                            <Border x:Name="PART_Track">
+                                <Border x:Name="PART_Indicator"
+                                        CornerRadius="6"
+                                        Background="{TemplateBinding Foreground}"
+                                        HorizontalAlignment="Left"/>
+                            </Border>
                         </Border>
                     </ControlTemplate>
                 </ProgressBar.Template>
