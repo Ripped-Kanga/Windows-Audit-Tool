@@ -8,6 +8,7 @@
     <RootNamespace>WindowsAuditTool</RootNamespace>
     <AssemblyName>WindowsAuditTool</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
