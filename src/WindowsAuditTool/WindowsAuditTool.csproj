@@ -4,6 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
     <RootNamespace>WindowsAuditTool</RootNamespace>
     <AssemblyName>WindowsAuditTool</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
