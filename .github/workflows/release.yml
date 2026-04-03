@@ -30,17 +30,42 @@ jobs:
           }
           Write-Host "Version validated: $scriptVersion"
 
-      - name: Install PS2EXE
-        shell: pwsh
-        run: Install-Module ps2exe -Scope CurrentUser -Force
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Compile executable
+      - name: Build GUI (restore + publish)
         shell: pwsh
-        run: Invoke-ps2exe .\Run-Audit.ps1 .\Run-Audit.exe
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          Write-Host "Building GUI with version: $version"
+          dotnet publish src/WindowsAuditTool/WindowsAuditTool.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:Version=$version `
+            -p:FileVersion=$version `
+            -p:AssemblyVersion=$version `
+            -o gui-publish
+
+      - name: Verify GUI output
+        shell: pwsh
+        run: |
+          $exe = Get-Item "gui-publish/WindowsAuditTool.exe"
+          if (-not $exe) { throw "WindowsAuditTool.exe not found in publish output" }
+          Write-Host "GUI executable size: $([math]::Round($exe.Length / 1MB, 1)) MB"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" Run-Audit.ps1 Run-Audit.exe --title "${{ github.ref_name }}" --generate-notes
+          gh release create "${{ github.ref_name }}" `
+            Run-Audit.ps1 `
+            gui-publish/WindowsAuditTool.exe `
+            --title "${{ github.ref_name }}" `
+            --generate-notes
