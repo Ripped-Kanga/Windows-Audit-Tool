@@ -28,11 +28,11 @@
                             Style="{StaticResource SecondaryButton}"
                             Margin="0,0,8,0"
                             Click="OpenFolderButton_Click"/>
-                    <Button x:Name="PrintButton"
-                            Content="Print"
-                            Style="{StaticResource SecondaryButton}"
-                            Margin="0,0,8,0"
-                            Click="PrintButton_Click"/>
+                    <TextBlock x:Name="PdfStatus"
+                               FontSize="12"
+                               Foreground="{StaticResource MutedBrush}"
+                               VerticalAlignment="Center"
+                               Margin="0,0,8,0"/>
                     <Button x:Name="RunAgainButton"
                             Content="Run Again"
                             Style="{StaticResource PrimaryButton}"

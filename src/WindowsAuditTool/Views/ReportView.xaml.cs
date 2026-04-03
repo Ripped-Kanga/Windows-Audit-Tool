@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 
 namespace WindowsAuditTool.Views;
@@ -41,6 +42,12 @@ public partial class ReportView : UserControl
             ReportWebView.Visibility = Visibility.Visible;
             FallbackPanel.Visibility = Visibility.Collapsed;
 
+            ReportWebView.CoreWebView2.NavigationCompleted += async (_, args) =>
+            {
+                if (args.IsSuccess)
+                    await ExportPdfAsync();
+            };
+
             ReportWebView.CoreWebView2.Navigate(new Uri(reportPath).AbsoluteUri);
         }
         catch (Exception)
@@ -55,13 +62,67 @@ public partial class ReportView : UserControl
     public void ShowError(string message)
     {
         StatusLabel.Text = "Audit Failed";
-        StatusLabel.Foreground = FindResource("BadBrush") as System.Windows.Media.SolidColorBrush;
+        StatusLabel.Foreground = FindResource("BadBrush") as SolidColorBrush;
         ReportWebView.Visibility = Visibility.Collapsed;
         FallbackPanel.Visibility = Visibility.Visible;
         FallbackPath.Text = message;
         OpenBrowserButton.IsEnabled = false;
         OpenFolderButton.IsEnabled = false;
-        PrintButton.IsEnabled = false;
+    }
+
+    private async System.Threading.Tasks.Task ExportPdfAsync()
+    {
+        if (_reportPath == null || ReportWebView.CoreWebView2 == null)
+            return;
+
+        var pdfPath = Path.ChangeExtension(_reportPath, ".pdf");
+        PdfStatus.Text = "Saving PDF...";
+        PdfStatus.Foreground = FindResource("MutedBrush") as SolidColorBrush;
+
+        try
+        {
+            // Inject CSS to fix large blank spaces caused by break-inside:avoid on tall sections
+            await ReportWebView.CoreWebView2.ExecuteScriptAsync(@"
+                (() => {
+                    const style = document.createElement('style');
+                    style.textContent = `
+                        @media print {
+                            .section, .score-card { break-inside: auto !important; }
+                            table { break-inside: auto !important; }
+                            tr { break-inside: avoid; }
+                            h2 { break-after: avoid; }
+                        }
+                    `;
+                    document.head.appendChild(style);
+                })()
+            ");
+
+            var printSettings = ReportWebView.CoreWebView2.Environment.CreatePrintSettings();
+            printSettings.Orientation = CoreWebView2PrintOrientation.Portrait;
+            printSettings.ShouldPrintBackgrounds = true;
+            printSettings.MarginTop = 0.4;
+            printSettings.MarginBottom = 0.4;
+            printSettings.MarginLeft = 0.4;
+            printSettings.MarginRight = 0.4;
+
+            var result = await ReportWebView.CoreWebView2.PrintToPdfAsync(pdfPath, printSettings);
+
+            if (result)
+            {
+                PdfStatus.Text = $"PDF saved";
+                PdfStatus.Foreground = FindResource("GoodBrush") as SolidColorBrush;
+            }
+            else
+            {
+                PdfStatus.Text = "PDF export failed";
+                PdfStatus.Foreground = FindResource("BadBrush") as SolidColorBrush;
+            }
+        }
+        catch
+        {
+            PdfStatus.Text = "PDF export failed";
+            PdfStatus.Foreground = FindResource("BadBrush") as SolidColorBrush;
+        }
     }
 
     private void ShowFallback(string reportPath)
@@ -90,14 +151,6 @@ public partial class ReportView : UserControl
                 Arguments = $"/select,\"{_reportPath}\"",
                 UseShellExecute = true
             });
-        }
-    }
-
-    private void PrintButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_webView2Available && ReportWebView.CoreWebView2 != null)
-        {
-            ReportWebView.CoreWebView2.ExecuteScriptAsync("window.print()");
         }
     }
 
