@@ -1436,7 +1436,10 @@ function Get-HuduPreviousReport {
         $headers = @{ "x-api-key" = $script:_HuduAPIKey }
         $rawResp = Invoke-WebRequest -Uri "$baseUrl/api/v1/uploads" -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $rawBody = if ($rawResp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($rawResp.Content) } else { $rawResp.Content }
-        $allUploads = @($rawBody | ConvertFrom-Json)
+        $parsed = $rawBody | ConvertFrom-Json
+        # ConvertFrom-Json in PS 5.1 returns JSON arrays as a single [object[]]
+        # Assign directly to avoid @() double-wrapping it into a nested array
+        if ($parsed -is [array]) { $allUploads = $parsed } else { $allUploads = @($parsed) }
 
         # Filter to HTML uploads belonging to this asset
         $assetHtmlUploads = @($allUploads | Where-Object {
