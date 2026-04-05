@@ -1426,17 +1426,18 @@ function Get-HuduPreviousReport {
             return $null
         }
 
-        # Fetch uploads attached to this asset
+        # Fetch uploads attached to this asset via the dedicated uploads API
         $assetId = $asset.id
-        $uploads = Invoke-HuduRequest -Endpoint "assets/$assetId" -Method GET
-        if (-not $uploads -or -not $uploads.asset) { return $null }
-
-        # Hudu assets may have uploads[] array
-        $assetData = $uploads.asset
+        $uploadsResp = Invoke-HuduRequest -Endpoint "uploads?uploadable_type=Asset&uploadable_id=$assetId" -Method GET
         $attachments = @()
-        if ($assetData.PSObject.Properties.Name -contains 'uploads' -and $assetData.uploads) {
-            $attachments = @($assetData.uploads)
+        if ($uploadsResp -and $uploadsResp.uploads) {
+            $attachments = @($uploadsResp.uploads)
+        } elseif ($uploadsResp -is [array]) {
+            # Some Hudu versions return a bare array
+            $attachments = @($uploadsResp)
         }
+
+        Log ("Hudu diff: found {0} upload(s) on asset {1}" -f $attachments.Count, $assetId)
 
         # Find the most recent .html attachment
         $htmlAttachment = $attachments |
@@ -1448,6 +1449,8 @@ function Get-HuduPreviousReport {
             Log "Hudu diff: no HTML attachment found on asset $assetId"
             return $null
         }
+
+        Log ("Hudu diff: found attachment '{0}' (ID {1})" -f $htmlAttachment.file_name, $htmlAttachment.id)
 
         # Download the attachment
         $downloadUrl = $htmlAttachment.url
@@ -1461,6 +1464,7 @@ function Get-HuduPreviousReport {
             $downloadUrl = $script:_HuduBaseURL.TrimEnd('/') + '/' + $downloadUrl.TrimStart('/')
         }
 
+        Log ("Hudu diff: downloading from {0}" -f $downloadUrl)
         $headers = @{ "x-api-key" = $script:_HuduAPIKey }
         $resp = Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $htmlContent = [System.Text.Encoding]::UTF8.GetString($resp.Content)
@@ -1867,7 +1871,7 @@ function Publish-HuduAsset {
                 $uploaded = Add-HuduUpload @uploadParams
                 if ($uploaded) {
                     Write-Action -What "Attachment uploaded successfully" -Kind ok
-                    Log ("Hudu: attached '{0}' to asset {1}" -f $fileName, $assetId)
+                    Log ("Hudu: attached '{0}' to asset {1}" -f $displayName, $assetId)
                     $fileAttached = $true
                 } else {
                     Write-Action -What ("Attachment upload failed (asset was still {0})." -f $verb) -Kind warn
