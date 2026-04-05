@@ -1426,24 +1426,54 @@ function Get-HuduPreviousReport {
             return $null
         }
 
-        # Fetch uploads attached to this asset via the dedicated uploads API
+        # Fetch the full asset detail to inspect for uploads/attachments
         $assetId = $asset.id
-        $uploadsResp = Invoke-HuduRequest -Endpoint "uploads?uploadable_type=Asset&uploadable_id=$assetId" -Method GET
-        $attachments = @()
-        if ($uploadsResp -and $uploadsResp.uploads) {
-            $attachments = @($uploadsResp.uploads)
-        } elseif ($uploadsResp -is [array]) {
-            # Some Hudu versions return a bare array
-            $attachments = @($uploadsResp)
+        $assetDetail = Invoke-HuduRequest -Endpoint "assets/$assetId" -Method GET
+
+        # Log raw structure for diagnosis
+        $rawJson = $null
+        try { $rawJson = $assetDetail | ConvertTo-Json -Depth 2 -Compress } catch {}
+        if ($rawJson) {
+            # Log first 500 chars of asset detail to see available properties
+            $snippet = $rawJson.Substring(0, [Math]::Min($rawJson.Length, 500))
+            Log ("Hudu diff: asset detail snippet: {0}" -f $snippet)
         }
 
-        Log ("Hudu diff: found {0} upload(s) on asset {1}" -f $attachments.Count, $assetId)
+        # Try multiple approaches to find uploads
+        $attachments = @()
 
-        # Log the first upload's property names to diagnose field naming
+        # Approach 1: uploads nested in asset detail response
+        $ad = if ($assetDetail.asset) { $assetDetail.asset } else { $assetDetail }
+        foreach ($propName in @('uploads', 'attachments', 'files')) {
+            if ($ad.PSObject.Properties.Name -contains $propName -and $ad.$propName) {
+                $attachments = @($ad.$propName)
+                Log ("Hudu diff: found {0} item(s) via asset.{1}" -f $attachments.Count, $propName)
+                break
+            }
+        }
+
+        # Approach 2: dedicated uploads API endpoint
+        if ($attachments.Count -eq 0) {
+            $uploadsResp = Invoke-HuduRequest -Endpoint "uploads?uploadable_type=Asset&uploadable_id=$assetId" -Method GET
+            $rawUploads = $null
+            try { $rawUploads = $uploadsResp | ConvertTo-Json -Depth 2 -Compress } catch {}
+            if ($rawUploads) {
+                $uSnippet = $rawUploads.Substring(0, [Math]::Min($rawUploads.Length, 500))
+                Log ("Hudu diff: uploads API snippet: {0}" -f $uSnippet)
+            }
+            if ($uploadsResp -and $uploadsResp.uploads) {
+                $attachments = @($uploadsResp.uploads)
+            } elseif ($uploadsResp -is [array]) {
+                $attachments = @($uploadsResp)
+            }
+            Log ("Hudu diff: uploads API returned {0} item(s)" -f $attachments.Count)
+        }
+
+        # Log first real object to see property names
         if ($attachments.Count -gt 0) {
-            $sample = $attachments[0]
-            $props = @($sample.PSObject.Properties | ForEach-Object { "{0}={1}" -f $_.Name, ($_.Value -as [string]).Substring(0, [Math]::Min(($_.Value -as [string]).Length, 80)) })
-            Log ("Hudu diff: sample upload props: {0}" -f ($props -join ' | '))
+            $sampleJson = $null
+            try { $sampleJson = $attachments[0] | ConvertTo-Json -Depth 2 -Compress } catch {}
+            Log ("Hudu diff: sample upload[0]: {0}" -f $(if ($sampleJson) { $sampleJson.Substring(0, [Math]::Min($sampleJson.Length, 300)) } else { $attachments[0].GetType().Name + ' = ' + $attachments[0] }))
         }
 
         # Find the most recent .html attachment -- try multiple possible field names
@@ -1456,7 +1486,7 @@ function Get-HuduPreviousReport {
         } | Select-Object -Last 1
 
         if (-not $htmlAttachment) {
-            Log "Hudu diff: no HTML attachment found on asset $assetId"
+            Log "Hudu diff: no HTML attachment matched from {0} item(s) on asset {1}" -f $attachments.Count, $assetId
             return $null
         }
 
