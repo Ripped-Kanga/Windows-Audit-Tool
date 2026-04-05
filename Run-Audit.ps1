@@ -1459,34 +1459,83 @@ function Get-HuduPreviousReport {
         $target = $assetHtmlUploads | Sort-Object id -Descending | Select-Object -First 1
         Log ("Hudu diff: selected attachment '{0}' (ID {1}, {2})" -f $target.name, $target.id, $target.size)
 
-        # Download the HTML content
-        $downloadUrl = $target.url
-        if (-not $downloadUrl) {
-            Log "Hudu diff: attachment has no URL"
-            return $null
-        }
+        # Download the HTML content via the API endpoint (the .url field is a web URL
+        # that requires browser-session auth; the x-api-key header only works on /api/v1/).
+        $uploadId   = $target.id
+        $htmlContent = $null
 
-        Log ("Hudu diff: downloading from {0}" -f $downloadUrl)
-        $resp = Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-        $htmlContent = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { $resp.Content }
+        # Try API download endpoints in order of likelihood
+        $downloadAttempts = @(
+            "$baseUrl/api/v1/uploads/$uploadId"
+            "$baseUrl/api/v1/uploads/$($target.slug)"
+        )
 
-        Log ("Hudu diff: downloaded {0} chars, starts with: {1}" -f $htmlContent.Length, $htmlContent.Substring(0, [Math]::Min($htmlContent.Length, 120)))
-
-        # If the response is too small, it is likely a Hudu preview page rather than the actual file.
-        # Try appending /download or using the slug-based direct download URL.
-        if ($htmlContent.Length -lt 5000 -and $htmlContent -notmatch '<!doctype html>.*System Audit Report') {
-            Log "Hudu diff: response too small and missing audit report markers -- trying direct download"
-            $directUrl = $downloadUrl.TrimEnd('/') + '/download'
+        foreach ($attemptUrl in $downloadAttempts) {
+            if ($htmlContent) { break }
             try {
-                $resp2 = Invoke-WebRequest -Uri $directUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-                $htmlContent2 = if ($resp2.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp2.Content) } else { $resp2.Content }
-                if ($htmlContent2.Length -gt $htmlContent.Length) {
-                    Log ("Hudu diff: /download returned {0} chars (better)" -f $htmlContent2.Length)
-                    $htmlContent = $htmlContent2
+                Log ("Hudu diff: trying download from {0}" -f $attemptUrl)
+                $resp = Invoke-WebRequest -Uri $attemptUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                $body = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { $resp.Content }
+                Log ("Hudu diff: got {0} chars, content-type: {1}" -f $body.Length, $resp.Headers['Content-Type'])
+
+                # Check if the response is JSON (API metadata) rather than the actual file
+                if ($body.TrimStart().StartsWith('{') -or $body.TrimStart().StartsWith('[')) {
+                    # API returned JSON -- look for a direct download URL in the response
+                    try {
+                        $apiObj = $body | ConvertFrom-Json
+                        $inner = if ($apiObj.upload) { $apiObj.upload } else { $apiObj }
+                        # Check for a signed/direct URL field
+                        foreach ($urlProp in @('signed_url', 'direct_url', 'download_url', 'file_url', 'url')) {
+                            if ($inner.PSObject.Properties.Name -contains $urlProp -and $inner.$urlProp) {
+                                Log ("Hudu diff: found '{0}' in API response, following..." -f $urlProp)
+                                $resp2 = Invoke-WebRequest -Uri $inner.$urlProp -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                                $body2 = if ($resp2.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp2.Content) } else { $resp2.Content }
+                                if ($body2.Length -gt 5000 -or $body2 -match 'System Audit Report') {
+                                    $htmlContent = $body2
+                                    Log ("Hudu diff: followed URL returned {0} chars" -f $htmlContent.Length)
+                                }
+                                break
+                            }
+                        }
+                        # Log the JSON keys if we still don't have content
+                        if (-not $htmlContent) {
+                            $jsonKeys = @($inner.PSObject.Properties.Name) -join ', '
+                            Log ("Hudu diff: API JSON keys: {0}" -f $jsonKeys)
+                        }
+                    } catch {}
+                } else {
+                    # Raw file content
+                    if ($body.Length -gt 5000 -or $body -match 'System Audit Report') {
+                        $htmlContent = $body
+                    } else {
+                        Log ("Hudu diff: response too small ({0} chars), starts with: {1}" -f $body.Length, $body.Substring(0, [Math]::Min($body.Length, 120)))
+                    }
                 }
             } catch {
-                Log ("Hudu diff: /download fallback failed: {0}" -f $_.Exception.Message)
+                Log ("Hudu diff: attempt failed: {0}" -f $_.Exception.Message)
             }
+        }
+
+        # Last resort: try the web URL (works if Hudu instance allows unauthenticated file access)
+        if (-not $htmlContent -and $target.url) {
+            try {
+                Log ("Hudu diff: trying web URL {0}" -f $target.url)
+                $resp = Invoke-WebRequest -Uri $target.url -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                $body = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { $resp.Content }
+                if ($body.Length -gt 5000 -or $body -match 'System Audit Report') {
+                    $htmlContent = $body
+                    Log ("Hudu diff: web URL returned {0} chars" -f $htmlContent.Length)
+                } else {
+                    Log ("Hudu diff: web URL returned login page ({0} chars)" -f $body.Length)
+                }
+            } catch {
+                Log ("Hudu diff: web URL failed: {0}" -f $_.Exception.Message)
+            }
+        }
+
+        if (-not $htmlContent) {
+            Log "Hudu diff: could not download attachment content via any method"
+            return $null
         }
 
         Log ("Hudu diff: final report size: {0} chars from asset {1}" -f $htmlContent.Length, $assetId)
