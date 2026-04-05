@@ -51,7 +51,14 @@ param(
     # When set, an existing entry with this name is updated in place rather than
     # creating a new one. When not set the default is "$ComputerName - <date>".
     [Alias('hudu-entry-name')]
-    [string]$HuduEntryName
+    [string]$HuduEntryName,
+
+    # Override the filename of the HTML report attachment uploaded to Hudu.
+    # Accepts tokens: $ComputerName, $Date, $CustomerName (expanded at runtime).
+    # When not set the default is "$Date - $ComputerName".
+    # The .html extension is added automatically if not present.
+    [Alias('hudu-report-name')]
+    [string]$HuduReportName
 )
 
 $ErrorActionPreference = "Stop"
@@ -1359,13 +1366,16 @@ function Add-HuduUpload {
     param(
         [string]$FilePath,
         [int]$RecordId,
-        [string]$RecordType = "Asset"
+        [string]$RecordType = "Asset",
+        [string]$FileName   # Optional: override the filename Hudu sees (defaults to local filename)
     )
     try {
         Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
         $file    = Get-Item -LiteralPath $FilePath -ErrorAction Stop
         $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
         $uri     = "$baseUrl/api/v1/uploads"
+
+        $uploadName = if ($FileName) { $FileName } else { $file.Name }
 
         $httpClient = New-Object System.Net.Http.HttpClient
         $httpClient.DefaultRequestHeaders.Add("x-api-key", $script:_HuduAPIKey)
@@ -1374,7 +1384,7 @@ function Add-HuduUpload {
         $fileStream = [System.IO.File]::OpenRead($file.FullName)
         $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
         $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("text/html")
-        $multipart.Add($fileContent, "file", $file.Name)
+        $multipart.Add($fileContent, "file", $uploadName)
         $multipart.Add((New-Object System.Net.Http.StringContent($RecordId.ToString())), "upload[uploadable_id]")
         $multipart.Add((New-Object System.Net.Http.StringContent($RecordType)), "upload[uploadable_type]")
 
@@ -1761,6 +1771,7 @@ function Publish-HuduAsset {
         [string]$AssetName,
         [string]$HtmlContent,
         [string]$AttachmentPath,
+        [string]$AttachmentName,  # Optional: override the filename Hudu sees for the attachment
         [double]$HealthScore = 0
     )
     try {
@@ -1849,9 +1860,11 @@ function Publish-HuduAsset {
             # Attach file if path provided
             $fileAttached = $false
             if ($AttachmentPath -and (Test-Path -LiteralPath $AttachmentPath)) {
-                $fileName = Split-Path -Leaf $AttachmentPath
-                Write-Action -What "Attaching report: $fileName" -Kind run
-                $uploaded = Add-HuduUpload -FilePath $AttachmentPath -RecordId $assetId -RecordType "Asset"
+                $displayName = if ($AttachmentName) { $AttachmentName } else { Split-Path -Leaf $AttachmentPath }
+                Write-Action -What "Attaching report: $displayName" -Kind run
+                $uploadParams = @{ FilePath = $AttachmentPath; RecordId = $assetId; RecordType = "Asset" }
+                if ($AttachmentName) { $uploadParams['FileName'] = $AttachmentName }
+                $uploaded = Add-HuduUpload @uploadParams
                 if ($uploaded) {
                     Write-Action -What "Attachment uploaded successfully" -Kind ok
                     Log ("Hudu: attached '{0}' to asset {1}" -f $fileName, $assetId)
@@ -5511,6 +5524,17 @@ $huduBodyFragment
         Log "Hudu HTML preview updated with diff section"
     }
 
+    # ---- Resolve Hudu attachment filename ----
+    $resolvedReportName = $null
+    if ($HuduReportName) {
+        $resolvedReportName = $HuduReportName `
+            -replace '\$ComputerName', $ComputerName `
+            -replace '\$Date',         (Get-Date -Format 'yyyy-MM-dd') `
+            -replace '\$CustomerName', $(if ($CustomerName) { $CustomerName } else { '' })
+        if ($resolvedReportName -notlike '*.html') { $resolvedReportName += '.html' }
+        Log ("Hudu report attachment name: '{0}' -> '{1}'" -f $HuduReportName, $resolvedReportName)
+    }
+
     # ---- Upload to Hudu via API ----
     Write-Host "[Hudu] Uploading report to Hudu..." -ForegroundColor Yellow
     Log "STEP Hudu: Uploading report to Hudu"
@@ -5518,12 +5542,15 @@ $huduBodyFragment
     # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
     # These can originate from registry software entries containing embedded null bytes.
     $huduBodyFragment = $huduBodyFragment -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', ''
-    $huduResult = Publish-HuduAsset `
-        -LayoutName     $HuduAssetLayoutName `
-        -AssetName      $huduAssetName `
-        -HtmlContent    $huduBodyFragment `
-        -AttachmentPath $HtmlReportPath `
-        -HealthScore    $score
+    $publishParams = @{
+        LayoutName     = $HuduAssetLayoutName
+        AssetName      = $huduAssetName
+        HtmlContent    = $huduBodyFragment
+        AttachmentPath = $HtmlReportPath
+        HealthScore    = $score
+    }
+    if ($resolvedReportName) { $publishParams['AttachmentName'] = $resolvedReportName }
+    $huduResult = Publish-HuduAsset @publishParams
     if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
         if ($huduResult.FileAttached) {

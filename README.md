@@ -36,15 +36,15 @@ powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1
 powershell -ExecutionPolicy Bypass -File .\Run-Audit.ps1 -Silent -CustomerName "Acme Corp"
 ```
 
-**Option 4 — Atera with `RMM-Atera-Deploy.ps1` (recommended for Atera):**
+**Option 4 — RMM deployment with `RMM-Deploy.ps1` (recommended for Atera, NinjaRMM, Datto):**
 
-Upload `RMM-Atera-Deploy.ps1` once to Atera. It automatically downloads and caches the latest `Run-Audit.ps1` from GitHub Releases on each run, so you never need to update the Atera script when a new version is released.
+Upload `RMM-Deploy.ps1` once to your RMM platform. It automatically downloads and caches the latest `Run-Audit.ps1` from GitHub Releases on each run, so you never need to update the RMM script when a new version is released. Use `-RmmPlatform` to select your platform (default: `Atera`).
 
-The deploy script is designed to be scheduled as a **daily Atera automation**. It includes a monthly guard check: the script scans the audit log (`C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt`) for a successful completion entry timestamped in the current calendar month. If found, it exits immediately with code `3` and reports `Audit already completed this month` — no GitHub calls, no audit run. This works correctly for both standard and Hudu deployments (Hudu deletes the local HTML report after upload, but the log entry is always written). On the first run each month, the audit proceeds normally. Pass `-ForceRun` to skip the guard and run unconditionally.
+The deploy script is designed to be scheduled as a **daily RMM automation**. It includes a monthly guard check: the script scans the audit log (`C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt`) for a successful completion entry timestamped in the current calendar month. If found, it exits immediately with code `3` and reports `Audit already completed this month` -- no GitHub calls, no audit run. This works correctly for both standard and Hudu deployments (Hudu deletes the local HTML report after upload, but the log entry is always written). On the first run each month, the audit proceeds normally. Pass `-ForceRun` to skip the guard and run unconditionally.
 
 ```powershell
-# Atera script body — no arguments needed for a basic run:
-# (RMM-Atera-Deploy.ps1 injects -Silent automatically)
+# RMM script body -- no arguments needed for a basic run:
+# (RMM-Deploy.ps1 injects -Silent automatically)
 
 # Force a run even if an audit already completed this month:
 -ForceRun
@@ -52,12 +52,12 @@ The deploy script is designed to be scheduled as a **daily Atera automation**. I
 # With Hudu integration (creates a new dated asset each month):
 -HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Audit Reports"
 
-# With Hudu integration — write into an existing asset named after the computer
+# With Hudu integration -- write into an existing asset named after the computer
 # (finds the asset by name and updates it in place; creates it if it doesn't exist):
--HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Computers" -HuduEntryName $ComputerName
+-HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Computers" -HuduEntryName $ComputerName -HuduReportName "$Date - $ComputerName"
 ```
 
-The `-HuduEntryName` parameter controls the Hudu asset name. It supports the following tokens, which are expanded on the endpoint at runtime (enter them literally in Atera — no quotes needed in the parameter field):
+The `-HuduEntryName` parameter controls the Hudu asset name. The `-HuduReportName` parameter controls the filename of the HTML report attachment uploaded to Hudu. Both support the following tokens, which are expanded on the endpoint at runtime (enter them literally in the RMM parameter field -- no quotes needed):
 
 | Token | Expands to | Example |
 |---|---|---|
@@ -67,14 +67,16 @@ The `-HuduEntryName` parameter controls the Hudu asset name. It supports the fol
 
 When `-HuduEntryName` is used, the Hudu integration finds any existing asset with that name in the target layout and **updates it in place** rather than creating a new one. This lets you write audit reports directly into existing device records (e.g. assets synced from Atera). When `-HuduEntryName` is not set, the default name is `HOSTNAME - dd/MM/yyyy`, which is unique per day and always creates.
 
+When `-HuduReportName` is used, the uploaded HTML attachment filename is set to the resolved value (`.html` is appended automatically if not present). When not set, the attachment uses the local report filename (e.g. `2026-03-30 - DESKTOP-ABC123-Audit.html`).
+
 | Exit code | Meaning |
 |---|---|
 | `0` | Audit completed successfully |
 | `1` | GitHub unreachable and no cached script available |
 | `2` | Download failed and no cached script available |
-| `3` | Audit already completed this month — skipped (override with `-ForceRun`) |
+| `3` | Audit already completed this month -- skipped (override with `-ForceRun`) |
 
-Set the Atera script execution policy to `Bypass` and the timeout to **600 seconds**. See [`RMM-Atera-Deploy.ps1`](RMM-Atera-Deploy.ps1) for full setup notes.
+Set the RMM script execution policy to `Bypass` and the timeout to **600 seconds**. See [`RMM-Deploy.ps1`](RMM-Deploy.ps1) for full setup notes.
 
 **Option 5 — With Hudu integration (upload report directly to Hudu):**
 ```powershell
@@ -113,7 +115,7 @@ Output paths are determined by deployment context, not elevation level.
 
 > The first few log entries written before the output directory is resolved always land in `C:\Windows\Temp\AuditLog.txt` (the bootstrap log). Once the deployment context is determined, logging continues at the final path above. The `Windows Audit Tool` output subdirectory is created automatically if it does not exist.
 
-> When using `RMM-Atera-Deploy.ps1`, the script is cached at `C:\Program Files\Windows Audit Tool\Scripts\Run-Audit.ps1` and runs from that path, so RMM mode is activated automatically.
+> When using `RMM-Deploy.ps1`, the script is cached at `C:\Program Files\Windows Audit Tool\Scripts\Run-Audit.ps1` and runs from that path, so RMM mode is activated automatically.
 
 ---
 
