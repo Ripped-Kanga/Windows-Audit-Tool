@@ -59,7 +59,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.2.5"
+$ScriptVersion = "1.4.3.0"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1398,6 +1398,354 @@ function Add-HuduUpload {
     }
 }
 
+function Get-HuduPreviousReport {
+    <#
+      Downloads the most recent HTML file attachment from an existing Hudu asset.
+      Returns the HTML content as a string, or $null if no attachment is found.
+      Never throws.
+    #>
+    param(
+        [string]$AssetName,
+        [int]$CompanyId,
+        [int]$LayoutId
+    )
+    try {
+        $asset = Get-HuduAssetByName -Name $AssetName -CompanyId $CompanyId -LayoutId $LayoutId
+        if (-not $asset) {
+            Log "Hudu diff: no existing asset found for '$AssetName'"
+            return $null
+        }
+
+        # Fetch uploads attached to this asset
+        $assetId = $asset.id
+        $uploads = Invoke-HuduRequest -Endpoint "assets/$assetId" -Method GET
+        if (-not $uploads -or -not $uploads.asset) { return $null }
+
+        # Hudu assets may have uploads[] array
+        $assetData = $uploads.asset
+        $attachments = @()
+        if ($assetData.PSObject.Properties.Name -contains 'uploads' -and $assetData.uploads) {
+            $attachments = @($assetData.uploads)
+        }
+
+        # Find the most recent .html attachment
+        $htmlAttachment = $attachments |
+            Where-Object { $_.file_name -like '*.html' -or $_.content_type -match 'text/html' } |
+            Sort-Object { $_.created_at } -Descending |
+            Select-Object -First 1
+
+        if (-not $htmlAttachment) {
+            Log "Hudu diff: no HTML attachment found on asset $assetId"
+            return $null
+        }
+
+        # Download the attachment
+        $downloadUrl = $htmlAttachment.url
+        if (-not $downloadUrl) {
+            Log "Hudu diff: attachment has no download URL"
+            return $null
+        }
+
+        # If URL is relative, prepend the Hudu base URL
+        if ($downloadUrl -notmatch '^https?://') {
+            $downloadUrl = $script:_HuduBaseURL.TrimEnd('/') + '/' + $downloadUrl.TrimStart('/')
+        }
+
+        $headers = @{ "x-api-key" = $script:_HuduAPIKey }
+        $resp = Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $htmlContent = [System.Text.Encoding]::UTF8.GetString($resp.Content)
+
+        Log ("Hudu diff: downloaded previous report ({0} bytes) from asset {1}" -f $htmlContent.Length, $assetId)
+        return $htmlContent
+    }
+    catch {
+        Log ("Hudu diff: failed to retrieve previous report - {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Extract-AuditMetrics {
+    <#
+      Extracts key metrics from an audit HTML report for comparison.
+      Uses regex patterns to pull values from the structured HTML output.
+      Returns a hashtable of metric name -> value pairs.
+    #>
+    param([string]$Html)
+
+    $metrics = [ordered]@{}
+    if ([string]::IsNullOrWhiteSpace($Html)) { return $metrics }
+
+    # Health score (from the score ring)
+    if ($Html -match "class='num'[^>]*>([0-9]+\.?[0-9]*)</span>") {
+        $metrics['Health Score'] = $Matches[1]
+    }
+
+    # E8 scorecard — extract control names and statuses
+    # Pattern: table rows with control name and badge status
+    $e8Pattern = "<td>(\d+)</td><td>([^<]+)</td><td><span class='badge \w+'>([^<]+)</span>"
+    $e8Matches = [regex]::Matches($Html, $e8Pattern)
+    foreach ($m in $e8Matches) {
+        $control = $m.Groups[2].Value.Trim()
+        $status  = $m.Groups[3].Value.Trim()
+        $metrics["E8: $control"] = $status
+    }
+
+    # Local admin count — from the admin privileges KV row
+    if ($Html -match 'Local Administrator Count[^<]*</th><td[^>]*>(\d+)\s*member') {
+        $metrics['Local Admin Count'] = $Matches[1]
+    }
+
+    # Patch currency — days since last patch
+    if ($Html -match 'Days Since Last Patch[^<]*</th><td[^>]*>(\d+)\s*days') {
+        $metrics['Days Since Last Patch'] = $Matches[1]
+    }
+
+    # Defender real-time protection
+    if ($Html -match 'Real-time protection[^<]*</div><div>(\w+)') {
+        $metrics['Defender Real-Time'] = $Matches[1]
+    }
+
+    # BitLocker — count protected/unprotected volumes
+    $blOnCount  = ([regex]::Matches($Html, "badge good[^>]*>On</span>")).Count
+    $blOffCount = ([regex]::Matches($Html, "badge warn[^>]*>Off</span>")).Count
+    if ($blOnCount -gt 0 -or $blOffCount -gt 0) {
+        $metrics['BitLocker Protected'] = "$blOnCount on, $blOffCount off"
+    }
+
+    # Firewall profiles disabled
+    $fwDisabled = ([regex]::Matches($Html, "badge warn[^>]*>Disabled</span>")).Count
+    if ($Html -match 'Windows Firewall') {
+        $metrics['Firewall Disabled Profiles'] = "$fwDisabled"
+    }
+
+    # Pending updates count
+    if ($Html -match 'Pending updates:\s*(\d+)') {
+        $metrics['Pending Updates'] = $Matches[1]
+    }
+
+    # Software count
+    if ($Html -match 'Applications found:\s*(\d+)') {
+        $metrics['Software Count'] = $Matches[1]
+    }
+
+    # Entra ID joined
+    if ($Html -match 'Entra ID Joined[^<]*</div><div>(\w+)') {
+        $metrics['Entra ID Joined'] = $Matches[1]
+    }
+
+    # Defender exclusion count
+    if ($Html -match 'Defender has (\d+) exclusion') {
+        $metrics['Defender Exclusions'] = $Matches[1]
+    }
+
+    # Remote access tools count
+    if ($Html -match 'Remote access tools detected:\s*(\d+)') {
+        $metrics['Remote Access Tools'] = $Matches[1]
+    }
+
+    # Software names for diff — extract from third-party software table
+    $swNames = [System.Collections.Generic.List[string]]::new()
+    $swPattern = "<tr[^>]*><td>([^<]+)</td><td>([^<]*)</td><td>([^<]*)</td><td>"
+    $swMatches = [regex]::Matches($Html, $swPattern)
+    foreach ($m in $swMatches) {
+        $name = $m.Groups[1].Value.Trim()
+        if ($name -and $name -ne 'Name' -and $name -ne 'N/A') {
+            $swNames.Add($name)
+        }
+    }
+    if ($swNames.Count -gt 0) {
+        $metrics['_SoftwareList'] = @($swNames | Sort-Object -Unique)
+    }
+
+    return $metrics
+}
+
+function Compare-AuditReports {
+    <#
+      Compares metrics from a previous and current audit report.
+      Returns a list of change objects with Section, Metric, Previous, Current, and Kind (good/warn/bad/info).
+    #>
+    param(
+        [hashtable]$Previous,
+        [hashtable]$Current
+    )
+
+    $changes = [System.Collections.Generic.List[object]]::new()
+
+    # Compare scalar metrics
+    $scalarKeys = @($Previous.Keys) + @($Current.Keys) |
+        Where-Object { $_ -ne '_SoftwareList' } |
+        Sort-Object -Unique
+
+    foreach ($key in $scalarKeys) {
+        $prev = if ($Previous.ContainsKey($key)) { [string]$Previous[$key] } else { $null }
+        $curr = if ($Current.ContainsKey($key))  { [string]$Current[$key]  } else { $null }
+
+        if ($prev -eq $curr) { continue }
+
+        $kind = 'info'
+        # Determine if change is positive or negative
+        if ($key -eq 'Health Score' -and $null -ne $prev -and $null -ne $curr) {
+            $kind = if ([double]$curr -gt [double]$prev) { 'good' } elseif ([double]$curr -lt [double]$prev) { 'bad' } else { 'info' }
+        }
+        elseif ($key -match '^E8:') {
+            $goodStatuses = @('Current', 'Detected', 'Restricted', 'Hardened', 'Enrolled')
+            $wasGood = $prev -and ($goodStatuses | Where-Object { $prev -match $_ })
+            $isGood  = $curr -and ($goodStatuses | Where-Object { $curr -match $_ })
+            if ($isGood -and -not $wasGood) { $kind = 'good' }
+            elseif (-not $isGood -and $wasGood) { $kind = 'bad' }
+            else { $kind = 'warn' }
+        }
+        elseif ($key -eq 'Days Since Last Patch') {
+            $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
+        }
+        elseif ($key -eq 'Pending Updates') {
+            $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
+        }
+        elseif ($key -eq 'Local Admin Count') {
+            $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
+        }
+        elseif ($key -eq 'Defender Exclusions') {
+            $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
+        }
+
+        $changes.Add([pscustomobject]@{
+            Metric   = $key
+            Previous = if ($prev) { $prev } else { 'N/A' }
+            Current  = if ($curr) { $curr } else { 'N/A' }
+            Kind     = $kind
+        })
+    }
+
+    # Compare software lists
+    $prevSw = if ($Previous.ContainsKey('_SoftwareList')) { @($Previous['_SoftwareList']) } else { @() }
+    $currSw = if ($Current.ContainsKey('_SoftwareList'))  { @($Current['_SoftwareList'])  } else { @() }
+
+    if ($prevSw.Count -gt 0 -or $currSw.Count -gt 0) {
+        $added   = @($currSw | Where-Object { $_ -notin $prevSw })
+        $removed = @($prevSw | Where-Object { $_ -notin $currSw })
+
+        if ($added.Count -gt 0) {
+            $changes.Add([pscustomobject]@{
+                Metric   = 'Software Added'
+                Previous = ''
+                Current  = "{0} new: {1}" -f $added.Count, (($added | Select-Object -First 10) -join ', ')
+                Kind     = 'info'
+            })
+        }
+        if ($removed.Count -gt 0) {
+            $changes.Add([pscustomobject]@{
+                Metric   = 'Software Removed'
+                Previous = "{0} removed: {1}" -f $removed.Count, (($removed | Select-Object -First 10) -join ', ')
+                Current  = ''
+                Kind     = 'info'
+            })
+        }
+    }
+
+    return @($changes)
+}
+
+function Build-DiffSectionHtml {
+    <#
+      Builds an HTML section showing changes between audit runs.
+      Returns the HTML string for insertion into the report, or empty string if no changes.
+    #>
+    param([object[]]$Changes)
+
+    if (-not $Changes -or $Changes.Count -eq 0) { return '' }
+
+    $sb = New-Object System.Text.StringBuilder
+
+    $goodChanges = @($Changes | Where-Object { $_.Kind -eq 'good' })
+    $badChanges  = @($Changes | Where-Object { $_.Kind -eq 'bad' })
+    $warnChanges = @($Changes | Where-Object { $_.Kind -eq 'warn' })
+    $infoChanges = @($Changes | Where-Object { $_.Kind -eq 'info' })
+
+    [void]$sb.AppendLine("<div class='section' style='border-left:4px solid var(--accent);'>")
+    [void]$sb.AppendLine("<h2 style='color:var(--accent); margin:0 0 14px;'>Changes Since Last Audit</h2>")
+
+    if ($goodChanges.Count -gt 0) {
+        [void]$sb.AppendLine("<div class='callout callout-good'><strong>Improvements</strong><ul>")
+        foreach ($c in $goodChanges) {
+            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
+        }
+        [void]$sb.AppendLine("</ul></div>")
+    }
+
+    if ($badChanges.Count -gt 0) {
+        [void]$sb.AppendLine("<div class='callout callout-bad'><strong>Regressions</strong><ul>")
+        foreach ($c in $badChanges) {
+            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
+        }
+        [void]$sb.AppendLine("</ul></div>")
+    }
+
+    if ($warnChanges.Count -gt 0 -or $infoChanges.Count -gt 0) {
+        [void]$sb.AppendLine("<div class='callout callout-info'><strong>Other Changes</strong><ul>")
+        foreach ($c in (@($warnChanges) + @($infoChanges))) {
+            $prev = if ($c.Previous) { $c.Previous } else { '-' }
+            $curr = if ($c.Current) { $c.Current } else { '-' }
+            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($prev), [System.Net.WebUtility]::HtmlEncode($curr)))
+        }
+        [void]$sb.AppendLine("</ul></div>")
+    }
+
+    [void]$sb.AppendLine("</div>")
+
+    return $sb.ToString()
+}
+
+function Build-DiffSectionHuduHtml {
+    <#
+      Builds the Hudu-compatible inline-styled version of the diff section.
+    #>
+    param([object[]]$Changes)
+
+    if (-not $Changes -or $Changes.Count -eq 0) { return '' }
+
+    $sb = New-Object System.Text.StringBuilder
+
+    $goodChanges = @($Changes | Where-Object { $_.Kind -eq 'good' })
+    $badChanges  = @($Changes | Where-Object { $_.Kind -eq 'bad' })
+    $warnChanges = @($Changes | Where-Object { $_.Kind -eq 'warn' })
+    $infoChanges = @($Changes | Where-Object { $_.Kind -eq 'info' })
+
+    [void]$sb.AppendLine("<hr style='border:none; border-top:2px solid rgba(128,128,128,0.15); margin:28px 0 0;'>")
+    [void]$sb.AppendLine("<h2 style='margin:14px 0; font-size:18px; font-weight:700;'>Changes Since Last Audit</h2>")
+
+    if ($goodChanges.Count -gt 0) {
+        [void]$sb.AppendLine("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>")
+        [void]$sb.AppendLine("<strong>Improvements</strong>")
+        foreach ($c in $goodChanges) {
+            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
+        }
+        [void]$sb.AppendLine("</div>")
+    }
+
+    if ($badChanges.Count -gt 0) {
+        [void]$sb.AppendLine("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #dc2626; background:rgba(220,38,38,0.1);'>")
+        [void]$sb.AppendLine("<strong>Regressions</strong>")
+        foreach ($c in $badChanges) {
+            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
+        }
+        [void]$sb.AppendLine("</div>")
+    }
+
+    if ($warnChanges.Count -gt 0 -or $infoChanges.Count -gt 0) {
+        [void]$sb.AppendLine("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #2E5C6E; background:rgba(46,92,110,0.1);'>")
+        [void]$sb.AppendLine("<strong>Other Changes</strong>")
+        foreach ($c in (@($warnChanges) + @($infoChanges))) {
+            $prev = if ($c.Previous) { $c.Previous } else { '-' }
+            $curr = if ($c.Current) { $c.Current } else { '-' }
+            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($prev), [System.Net.WebUtility]::HtmlEncode($curr)))
+        }
+        [void]$sb.AppendLine("</div>")
+    }
+
+    return $sb.ToString()
+}
+
 function Publish-HuduAsset {
     <#
       Creates or updates a Hudu asset under the specified company and asset layout.
@@ -1796,7 +2144,7 @@ if ($CustomerName) {
 # ============================================================
 # [1] SYSTEM INFORMATION
 # ============================================================
-Write-Step -Index 1 -Total 13 -Title "Collecting system information..."
+Write-Step -Index 1 -Total 16 -Title "Collecting system information..."
 Write-Action -What "Running: System Information (CIM/Registry)" -Kind run
 Html-StartSection "System Information"
 
@@ -1830,6 +2178,7 @@ $uptime = if ($boot -ne "Error" -and $boot) { New-TimeSpan -Start $boot } else {
 
 $disks    = Safe-Invoke { Get-CimInstance Win32_DiskDrive | Select-Object Model, Size } "Disk Info"
 $logDisks = Safe-Invoke { @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID, VolumeName, Size, FreeSpace) } "Logical Disk Info"
+$physDisks = Safe-Invoke { @(Get-PhysicalDisk | Select-Object FriendlyName, MediaType, HealthStatus, OperationalStatus, Size, BusType) } "Physical Disk Health"
 
 # --- Operating System ---
 Html-Add "<h3>Operating System</h3>"
@@ -1854,7 +2203,45 @@ if ($cpu -ne "Error" -and $cpu) {
 if ($null -ne $ramGB) { $hwKv["Installed RAM (GB)"] = $ramGB }
 if ($hwKv.Count -gt 0) { Html-AddKV -Pairs $hwKv }
 
-if ($disks -ne "Error" -and $disks) {
+if ($physDisks -ne "Error" -and $physDisks -and @($physDisks).Count -gt 0) {
+    $pdList = @($physDisks) | ForEach-Object {
+        $healthy = ($_.HealthStatus -eq 'Healthy')
+        $opOk    = ($_.OperationalStatus -eq 'OK')
+        [pscustomobject]@{
+            Name       = $_.FriendlyName
+            MediaType  = if ($_.MediaType) { $_.MediaType } else { 'Unknown' }
+            BusType    = if ($_.BusType) { $_.BusType } else { 'Unknown' }
+            SizeGB     = [math]::Round($_.Size / 1GB, 2)
+            Health     = [string]$_.HealthStatus
+            OpStatus   = [string]$_.OperationalStatus
+            _Healthy   = $healthy
+            _OpOk      = $opOk
+        }
+    }
+    Html-Add "<h4>Physical Disks</h4>"
+    Html-AddTable -Items $pdList -Columns @(
+        @{ Header="Name";      Property="Name" },
+        @{ Header="Type";      Property="MediaType" },
+        @{ Header="Bus";       Property="BusType" },
+        @{ Header="Size (GB)"; Property="SizeGB" },
+        @{ Header="Health";    Raw=$true; Value={ param($r) if ($r._Healthy) { "<span class='badge good'>$($r.Health)</span>" } else { "<span class='badge bad'>$($r.Health)</span>" } } },
+        @{ Header="Status";    Raw=$true; Value={ param($r) if ($r._OpOk) { "<span class='badge good'>$($r.OpStatus)</span>" } else { "<span class='badge bad'>$($r.OpStatus)</span>" } } }
+    ) -RowClass {
+        param($r)
+        if (-not $r._Healthy -or -not $r._OpOk) { 'sev-bad' }
+        else { '' }
+    }
+    $unhealthy = @($pdList | Where-Object { -not $_._Healthy -or -not $_._OpOk })
+    if ($unhealthy.Count -gt 0) {
+        $badNames = ($unhealthy | ForEach-Object { $_.Name }) -join ', '
+        Write-Action -What ("Disk health issue: {0}" -f $badNames) -Kind bad
+        Html-AddNote -Text ("Disk health issue detected on: {0}. Back up data immediately and plan replacement." -f $badNames) -Kind bad `
+            -KbUrl "https://learn.microsoft.com/en-us/windows-server/storage/disk-management/overview-of-disk-management" -KbTitle "Disk Management"
+    } else {
+        Write-Action -What ("All {0} physical disk(s) healthy" -f $pdList.Count) -Kind ok
+    }
+} elseif ($disks -ne "Error" -and $disks) {
+    # Fallback to Win32_DiskDrive when Get-PhysicalDisk is unavailable
     $diskList = @($disks) | ForEach-Object {
         [pscustomobject]@{
             Model  = $_.Model
@@ -1866,6 +2253,7 @@ if ($disks -ne "Error" -and $disks) {
         @{ Header="Model"; Property="Model" },
         @{ Header="Size (GB)"; Property="SizeGB" }
     )
+    Html-AddNote -Text "Disk health status not available (Get-PhysicalDisk not supported on this system)." -Kind info
 }
 
 if ($logDisks -ne "Error" -and $logDisks) {
@@ -1928,7 +2316,7 @@ Html-EndSection
 # ============================================================
 # [2] INSTALLED SOFTWARE
 # ============================================================
-Write-Step -Index 2 -Total 13 -Title "Collecting installed software..."
+Write-Step -Index 2 -Total 16 -Title "Collecting installed software..."
 Write-Action -What ("Running: Installed Software (Scope: {0})" -f ($(if($IsElevated){"HKLM/HKCU + HKU/offline + AppX(all users) + Winget(best-effort)"} else {"HKLM/HKCU + AppX(current user) + Winget(best-effort)"}))) -Kind run
 Html-StartSection "Installed Software"
 
@@ -2014,7 +2402,7 @@ Html-EndSection
 #   - Try Get-HotFix in BOTH elevated and non-elevated sessions.
 #   - Only suggest elevation if it fails while non-elevated.
 # ============================================================
-Write-Step -Index 3 -Total 13 -Title "Collecting installed Windows patches..."
+Write-Step -Index 3 -Total 16 -Title "Collecting installed Windows patches..."
 Write-Action -What "Running: Installed patches/hotfixes (Get-HotFix)" -Kind run
 Html-StartSection "Windows Patches / Hotfixes"
 
@@ -2082,7 +2470,7 @@ Html-EndSection
 # ============================================================
 # [4] PENDING WINDOWS UPDATES (WUA API)
 # ============================================================
-Write-Step -Index 4 -Total 13 -Title "Checking pending Windows Updates..."
+Write-Step -Index 4 -Total 16 -Title "Checking pending Windows Updates..."
 Html-StartSection "Pending Windows Updates"
 
 # ---- Last successful scan time ----
@@ -2290,7 +2678,7 @@ Html-EndSection
 # ============================================================
 # [5] NETWORK ADAPTERS
 # ============================================================
-Write-Step -Index 5 -Total 13 -Title "Gathering network information..."
+Write-Step -Index 5 -Total 16 -Title "Gathering network information..."
 Html-StartSection "Network"
 
 # ---- Adapter inventory ----
@@ -2457,12 +2845,71 @@ if ($ipConfigs -ne "Error" -and $ipConfigs) {
     Html-AddNote -Text "Could not retrieve IP configuration details." -Kind warn
 }
 
+# ---- Connectivity Checks ----
+Write-Action -What "Running: Network connectivity checks" -Kind run
+Html-Add "<h3>Connectivity</h3>"
+
+$gwReachable = Safe-Invoke {
+    # Find the default gateway from active adapters
+    $gw = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty NextHop -First 1)
+    if ($gw -and $gw.Count -gt 0) {
+        $target = $gw[0]
+        $ping = Test-Connection -ComputerName $target -Count 2 -Quiet -ErrorAction SilentlyContinue
+        [pscustomobject]@{ Gateway = $target; Reachable = $ping }
+    } else {
+        [pscustomobject]@{ Gateway = 'N/A'; Reachable = $false }
+    }
+} "Gateway Reachability"
+
+$dnsResolve = Safe-Invoke {
+    $result = Resolve-DnsName -Name 'www.microsoft.com' -Type A -DnsOnly -ErrorAction Stop | Select-Object -First 1
+    [pscustomobject]@{ Host = 'www.microsoft.com'; Resolved = $true; Address = [string]$result.IPAddress }
+} "DNS Resolution"
+
+$internetReach = Safe-Invoke {
+    $resp = Invoke-WebRequest -Uri 'http://www.msftconnecttest.com/connecttest.txt' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+    [pscustomobject]@{ Reachable = ($resp.StatusCode -eq 200); StatusCode = $resp.StatusCode }
+} "Internet Connectivity"
+
+Html-StartKvTable
+
+if ($gwReachable -ne "Error" -and $gwReachable) {
+    $gwClass = if ($gwReachable.Reachable) { 'sev-good' } else { 'sev-bad' }
+    $gwLabel = if ($gwReachable.Reachable) { "Reachable ($($gwReachable.Gateway))" } else { "Unreachable ($($gwReachable.Gateway))" }
+    Html-AddKvRow -Key "Default Gateway" -Value $gwLabel -RowClass $gwClass
+    Write-Action -What ("Gateway {0}: {1}" -f $gwReachable.Gateway, $(if ($gwReachable.Reachable) { "reachable" } else { "UNREACHABLE" })) -Kind $(if ($gwReachable.Reachable) { "ok" } else { "bad" })
+} else {
+    Html-AddKvRow -Key "Default Gateway" -Value "Test failed" -RowClass "sev-warn"
+}
+
+if ($dnsResolve -ne "Error" -and $dnsResolve) {
+    $dnsClass = if ($dnsResolve.Resolved) { 'sev-good' } else { 'sev-bad' }
+    $dnsLabel = if ($dnsResolve.Resolved) { "OK (www.microsoft.com -> $($dnsResolve.Address))" } else { "Failed" }
+    Html-AddKvRow -Key "DNS Resolution" -Value $dnsLabel -RowClass $dnsClass
+    Write-Action -What ("DNS: {0}" -f $dnsLabel) -Kind $(if ($dnsResolve.Resolved) { "ok" } else { "bad" })
+} else {
+    Html-AddKvRow -Key "DNS Resolution" -Value "Failed (could not resolve www.microsoft.com)" -RowClass "sev-bad"
+    Write-Action -What "DNS resolution failed" -Kind bad
+}
+
+if ($internetReach -ne "Error" -and $internetReach) {
+    $inetClass = if ($internetReach.Reachable) { 'sev-good' } else { 'sev-bad' }
+    $inetLabel = if ($internetReach.Reachable) { "Connected (msftconnecttest.com)" } else { "No internet (HTTP $($internetReach.StatusCode))" }
+    Html-AddKvRow -Key "Internet Access" -Value $inetLabel -RowClass $inetClass
+    Write-Action -What ("Internet: {0}" -f $inetLabel) -Kind $(if ($internetReach.Reachable) { "ok" } else { "bad" })
+} else {
+    Html-AddKvRow -Key "Internet Access" -Value "No internet connectivity detected" -RowClass "sev-bad"
+    Write-Action -What "Internet connectivity test failed" -Kind bad
+}
+
+Html-EndKvTable
+
 Html-EndSection
 
 # ============================================================
 # [6] SMB SHARES
 # ============================================================
-Write-Step -Index 6 -Total 13 -Title "Gathering SMB shares..."
+Write-Step -Index 6 -Total 16 -Title "Gathering SMB shares..."
 Write-Action -What "Running: SMB shares (Get-SmbShare)" -Kind run
 Html-StartSection "SMB Shares"
 
@@ -2504,7 +2951,7 @@ Html-EndSection
 # ============================================================
 # [7] PRINTERS
 # ============================================================
-Write-Step -Index 7 -Total 13 -Title "Gathering printers..."
+Write-Step -Index 7 -Total 16 -Title "Gathering printers..."
 Write-Action -What "Running: Printers (Get-Printer)" -Kind run
 Html-StartSection "Printers"
 
@@ -2541,7 +2988,7 @@ Html-EndSection
 # ============================================================
 # [8] SECURITY BASELINE CHECKS
 # ============================================================
-Write-Step -Index 8 -Total 13 -Title "Performing security baseline checks..."
+Write-Step -Index 8 -Total 16 -Title "Performing security baseline checks..."
 Html-StartSection "Security Baseline Checks"
 
 if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLocker/TPM/SecureBoot/Firewall/Defender/Admins)") {
@@ -2768,6 +3215,56 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         Html-AddNote -Text "Could not retrieve Defender status." -Kind warn
     }
 
+    # --- Defender Exclusions ---
+    Html-Add "<h3>Defender Exclusions</h3>"
+    $defExclusions = Safe-Invoke { Get-MpPreference | Select-Object ExclusionPath, ExclusionProcess, ExclusionExtension } "Defender Exclusions"
+    if ($defExclusions -ne "Error" -and $defExclusions) {
+        $exclPaths = @($defExclusions.ExclusionPath | Where-Object { $_ })
+        $exclProcs = @($defExclusions.ExclusionProcess | Where-Object { $_ })
+        $exclExts  = @($defExclusions.ExclusionExtension | Where-Object { $_ })
+        $totalExcl = $exclPaths.Count + $exclProcs.Count + $exclExts.Count
+
+        if ($totalExcl -eq 0) {
+            Write-Action -What "No Defender exclusions configured" -Kind ok
+            Html-AddNote -Text "No Defender exclusions configured." -Kind good
+        } else {
+            Write-Action -What ("Defender exclusions: {0} path(s), {1} process(es), {2} extension(s)" -f $exclPaths.Count, $exclProcs.Count, $exclExts.Count) -Kind warn
+            Html-AddNote -Text ("Defender has {0} exclusion(s) configured. Each exclusion creates a blind spot. Verify these are legitimate and necessary." -f $totalExcl) -Kind warn `
+                -KbUrl "https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/configure-exclusions-microsoft-defender-antivirus" -KbTitle "Defender exclusions"
+
+            if ($exclPaths.Count -gt 0) {
+                $pathRows = $exclPaths | ForEach-Object { [pscustomobject]@{ Type = "Path"; Value = $_ } }
+                Html-StartDetails -Summary ("Path Exclusions ({0})" -f $exclPaths.Count)
+                Html-AddTable -Items $pathRows -Columns @(
+                    @{ Header="Type"; Property="Type" },
+                    @{ Header="Exclusion"; Property="Value" }
+                ) -RowClass { param($r) 'sev-warn' }
+                Html-EndDetails
+            }
+            if ($exclProcs.Count -gt 0) {
+                $procRows = $exclProcs | ForEach-Object { [pscustomobject]@{ Type = "Process"; Value = $_ } }
+                Html-StartDetails -Summary ("Process Exclusions ({0})" -f $exclProcs.Count)
+                Html-AddTable -Items $procRows -Columns @(
+                    @{ Header="Type"; Property="Type" },
+                    @{ Header="Exclusion"; Property="Value" }
+                ) -RowClass { param($r) 'sev-warn' }
+                Html-EndDetails
+            }
+            if ($exclExts.Count -gt 0) {
+                $extRows = $exclExts | ForEach-Object { [pscustomobject]@{ Type = "Extension"; Value = $_ } }
+                Html-StartDetails -Summary ("Extension Exclusions ({0})" -f $exclExts.Count)
+                Html-AddTable -Items $extRows -Columns @(
+                    @{ Header="Type"; Property="Type" },
+                    @{ Header="Exclusion"; Property="Value" }
+                ) -RowClass { param($r) 'sev-warn' }
+                Html-EndDetails
+            }
+        }
+    } else {
+        Write-Action -What "Defender exclusions query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve Defender exclusion list." -Kind warn
+    }
+
     # --- Local Administrators ---
     Html-Add "<h3>Local Administrators</h3>"
     $admins = Safe-Invoke { Get-LocalGroupMember -Group 'Administrators' } "Local Admin Group"
@@ -2787,6 +3284,133 @@ if (Write-PrivilegedGate -IsElevated:$IsElevated -What "Security baseline (BitLo
         Write-Action -What "Local Administrators query failed." -Kind warn
         Html-AddNote -Text "Could not retrieve local administrator list." -Kind warn
     }
+
+    # --- Password Policy ---
+    Html-Add "<h3>Password Policy</h3>"
+    $pwPolicy = Safe-Invoke {
+        $raw = & net.exe accounts 2>&1
+        $lines = @($raw) | ForEach-Object { [string]$_ }
+        $result = [ordered]@{}
+        foreach ($line in $lines) {
+            if ($line -match '^\s*(.+?):\s+(.+)$') {
+                $result[$Matches[1].Trim()] = $Matches[2].Trim()
+            }
+        }
+        $result
+    } "Password Policy"
+
+    if ($pwPolicy -ne "Error" -and $pwPolicy -and $pwPolicy.Count -gt 0) {
+        Write-Action -What "Password policy retrieved" -Kind ok
+        Html-StartKvTable
+        foreach ($key in $pwPolicy.Keys) {
+            $val   = $pwPolicy[$key]
+            $rClass = ''
+            if ($key -match 'Minimum password length' -and $val -match '^\d+$' -and [int]$val -lt 8) {
+                $rClass = 'sev-bad'
+            }
+            if ($key -match 'Lockout threshold' -and $val -match 'Never') {
+                $rClass = 'sev-warn'
+            }
+            if ($key -match 'Maximum password age' -and $val -match 'Unlimited') {
+                $rClass = 'sev-warn'
+            }
+            Html-AddKvRow -Key $key -Value $val -RowClass $rClass
+        }
+        Html-EndKvTable
+
+        # Specific findings
+        $minLen = if ($pwPolicy.Keys -match 'Minimum password length') {
+            $v = $pwPolicy[($pwPolicy.Keys | Where-Object { $_ -match 'Minimum password length' } | Select-Object -First 1)]
+            if ($v -match '^\d+$') { [int]$v } else { $null }
+        } else { $null }
+
+        if ($null -ne $minLen -and $minLen -lt 8) {
+            Html-AddNote -Text ("Minimum password length is {0} characters. Microsoft recommends at least 8, ideally 14+." -f $minLen) -Kind bad `
+                -KbUrl "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/minimum-password-length" -KbTitle "Minimum password length"
+        }
+
+        $lockoutKey = $pwPolicy.Keys | Where-Object { $_ -match 'Lockout threshold' } | Select-Object -First 1
+        if ($lockoutKey -and $pwPolicy[$lockoutKey] -match 'Never') {
+            Html-AddNote -Text "Account lockout threshold is not set. Accounts are vulnerable to brute-force attacks." -Kind warn `
+                -KbUrl "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/account-lockout-threshold" -KbTitle "Account lockout threshold"
+        }
+    } else {
+        Write-Action -What "Password policy query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve local password policy." -Kind warn
+    }
+
+    # --- TLS/SSL Configuration ---
+    Html-Add "<h3>TLS/SSL Configuration</h3>"
+    $tlsProtocols = Safe-Invoke {
+        $results = [System.Collections.Generic.List[object]]::new()
+        $basePath = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
+        $protocols = @('SSL 2.0', 'SSL 3.0', 'TLS 1.0', 'TLS 1.1', 'TLS 1.2', 'TLS 1.3')
+        foreach ($proto in $protocols) {
+            foreach ($side in @('Server', 'Client')) {
+                $regPath = "$basePath\$proto\$side"
+                $enabled = $null; $disabledByDefault = $null
+                if (Test-Path $regPath) {
+                    $props = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+                    if ($null -ne $props.Enabled) { $enabled = $props.Enabled }
+                    if ($null -ne $props.DisabledByDefault) { $disabledByDefault = $props.DisabledByDefault }
+                }
+                $statusLabel = if ($null -ne $enabled -and $enabled -eq 0) { "Explicitly Disabled" }
+                              elseif ($null -ne $enabled -and $enabled -eq 1) { "Explicitly Enabled" }
+                              elseif ($null -ne $disabledByDefault -and $disabledByDefault -eq 1) { "Disabled by Default" }
+                              else { "OS Default" }
+                $results.Add([pscustomobject]@{
+                    Protocol          = $proto
+                    Side              = $side
+                    Status            = $statusLabel
+                    _Insecure         = ($proto -match '^(SSL|TLS 1\.[01])$')
+                    _ExplicitDisabled = ($null -ne $enabled -and $enabled -eq 0)
+                    _ExplicitEnabled  = ($null -ne $enabled -and $enabled -eq 1)
+                })
+            }
+        }
+        @($results)
+    } "TLS/SSL Protocols"
+
+    if ($tlsProtocols -ne "Error" -and $tlsProtocols) {
+        Write-Action -What "TLS/SSL protocol configuration retrieved" -Kind ok
+        Html-AddTable -Items $tlsProtocols -Columns @(
+            @{ Header="Protocol"; Property="Protocol" },
+            @{ Header="Side";     Property="Side" },
+            @{ Header="Status";   Raw=$true; Value={ param($r)
+                if ($r._Insecure -and $r._ExplicitEnabled)  { "<span class='badge bad'>$($r.Status)</span>" }
+                elseif ($r._Insecure -and $r._ExplicitDisabled) { "<span class='badge good'>$($r.Status)</span>" }
+                elseif (-not $r._Insecure -and $r._ExplicitDisabled) { "<span class='badge warn'>$($r.Status)</span>" }
+                elseif (-not $r._Insecure -and ($r._ExplicitEnabled -or $r.Status -eq 'OS Default')) { "<span class='badge good'>$($r.Status)</span>" }
+                else { $r.Status }
+            }}
+        ) -RowClass {
+            param($r)
+            if ($r._Insecure -and $r._ExplicitEnabled) { 'sev-bad' }
+            elseif ($r._Insecure -and -not $r._ExplicitDisabled -and $r.Status -eq 'OS Default') { 'sev-warn' }
+            elseif (-not $r._Insecure -and $r._ExplicitDisabled) { 'sev-warn' }
+            else { '' }
+        }
+
+        # Flag insecure protocols still active
+        $insecureActive = @($tlsProtocols | Where-Object { $_._Insecure -and $_._ExplicitEnabled })
+        $insecureDefault = @($tlsProtocols | Where-Object { $_._Insecure -and -not $_._ExplicitDisabled -and $_.Status -eq 'OS Default' })
+        if ($insecureActive.Count -gt 0) {
+            $protoNames = ($insecureActive | ForEach-Object { $_.Protocol } | Sort-Object -Unique) -join ', '
+            Html-AddNote -Text ("Insecure protocol(s) explicitly enabled: {0}. These should be disabled." -f $protoNames) -Kind bad `
+                -KbUrl "https://learn.microsoft.com/en-us/windows-server/security/tls/tls-registry-settings" -KbTitle "TLS registry settings"
+        }
+        if ($insecureDefault.Count -gt 0) {
+            $protoNames = ($insecureDefault | ForEach-Object { $_.Protocol } | Sort-Object -Unique) -join ', '
+            Html-AddNote -Text ("Legacy protocol(s) at OS default (may still be negotiable): {0}. Consider explicitly disabling." -f $protoNames) -Kind warn `
+                -KbUrl "https://learn.microsoft.com/en-us/windows-server/security/tls/tls-registry-settings" -KbTitle "TLS registry settings"
+        }
+        if ($insecureActive.Count -eq 0 -and $insecureDefault.Count -eq 0) {
+            Html-AddNote -Text "No insecure legacy protocols (SSL 2.0/3.0, TLS 1.0/1.1) are explicitly enabled." -Kind good
+        }
+    } else {
+        Write-Action -What "TLS/SSL configuration query failed." -Kind warn
+        Html-AddNote -Text "Could not retrieve TLS/SSL protocol configuration." -Kind warn
+    }
 }
 else {
     Html-AddNote -Text "Skipped (requires elevation)." -Kind warn
@@ -2797,7 +3421,7 @@ Html-EndSection
 # ============================================================
 # [9] USER ACCOUNTS
 # ============================================================
-Write-Step -Index 9 -Total 13 -Title "Enumerating user accounts..."
+Write-Step -Index 9 -Total 16 -Title "Enumerating user accounts..."
 Write-Action -What "Running: Local user accounts (Get-LocalUser) + Entra ID profiles (ProfileList registry)" -Kind run
 Html-StartSection "User Accounts"
 
@@ -2909,7 +3533,7 @@ Html-EndSection
 # ============================================================
 # [10] STARTUP PROGRAMS
 # ============================================================
-Write-Step -Index 10 -Total 13 -Title "Enumerating startup programs..."
+Write-Step -Index 10 -Total 16 -Title "Enumerating startup programs..."
 Write-Action -What "Running: Startup programs (Registry Run keys + WMI)" -Kind run
 Html-StartSection "Startup Programs"
 
@@ -2984,9 +3608,314 @@ else {
 Html-EndSection
 
 # ============================================================
-# [11] EVENT LOG HEALTH
+# [11] SCHEDULED TASKS
 # ============================================================
-Write-Step -Index 11 -Total 13 -Title "Checking event log health..."
+Write-Step -Index 11 -Total 16 -Title "Enumerating scheduled tasks..."
+Write-Action -What "Running: Scheduled tasks (non-Microsoft)" -Kind run
+Html-StartSection "Scheduled Tasks"
+
+$scheduledTasks = Safe-Invoke {
+    $allTasks = @(Get-ScheduledTask -ErrorAction Stop)
+    # Filter out Microsoft built-in tasks
+    $nonMs = @($allTasks | Where-Object {
+        $_.TaskPath -notmatch '^\\Microsoft\\' -and
+        $_.TaskPath -notmatch '^\\Apple\\' -and
+        $_.TaskName -notmatch '^User_Feed_Synchronization-' -and
+        $_.TaskName -notmatch '^CreateExplorerShellUnelevatedTask$'
+    })
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($t in $nonMs) {
+        $info = $null
+        try { $info = $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue } catch {}
+        $actions = @($t.Actions | ForEach-Object {
+            $exe  = if ($_.Execute) { [string]$_.Execute } else { '' }
+            $args = if ($_.Arguments) { [string]$_.Arguments } else { '' }
+            if ($args) { "$exe $args" } else { $exe }
+        })
+        $results.Add([pscustomobject]@{
+            Name        = $t.TaskName
+            Path        = $t.TaskPath
+            State       = [string]$t.State
+            Author      = if ($t.Author) { [string]$t.Author } else { '' }
+            RunAs       = if ($t.Principal.UserId) { [string]$t.Principal.UserId } else { '' }
+            Action      = ($actions -join ' | ')
+            LastRun     = if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 1) { $info.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
+            LastResult  = if ($info) { "0x{0:X}" -f $info.LastTaskResult } else { 'N/A' }
+        })
+    }
+    @($results)
+} "Scheduled Tasks"
+
+if ($scheduledTasks -ne "Error" -and $scheduledTasks) {
+    $taskList  = @($scheduledTasks) | Sort-Object Path, Name
+    $taskCount = $taskList.Count
+
+    # Flag tasks running as SYSTEM or with elevated privileges
+    $systemTasks = @($taskList | Where-Object { $_.RunAs -match 'SYSTEM|S-1-5-18' })
+    $failedTasks = @($taskList | Where-Object { $_.LastResult -ne 'N/A' -and $_.LastResult -ne '0x0' -and $_.LastResult -ne '0x41325' })
+
+    Write-Action -What ("Non-Microsoft scheduled tasks: {0} ({1} run as SYSTEM)" -f $taskCount, $systemTasks.Count) -Kind ok
+    Html-AddNote -Text ("Non-Microsoft scheduled tasks: {0}" -f $taskCount) -Kind info
+
+    if ($systemTasks.Count -gt 0) {
+        Html-AddNote -Text ("{0} task(s) run as SYSTEM. Verify these are legitimate." -f $systemTasks.Count) -Kind warn
+    }
+    if ($failedTasks.Count -gt 0) {
+        Html-AddNote -Text ("{0} task(s) have non-zero last result codes." -f $failedTasks.Count) -Kind warn
+    }
+
+    Html-StartDetails -Summary ("Scheduled Tasks ({0})" -f $taskCount) -Open:($taskCount -le 50)
+    Html-AddTable -Items $taskList -Columns @(
+        @{ Header="Name";        Property="Name" },
+        @{ Header="Path";        Property="Path" },
+        @{ Header="State";       Property="State" },
+        @{ Header="Run As";      Property="RunAs" },
+        @{ Header="Action";      Property="Action" },
+        @{ Header="Last Run";    Property="LastRun" },
+        @{ Header="Result";      Property="LastResult" }
+    ) -RowClass {
+        param($r)
+        if ($r.RunAs -match 'SYSTEM|S-1-5-18') { 'sev-warn' }
+        elseif ($r.LastResult -ne 'N/A' -and $r.LastResult -ne '0x0' -and $r.LastResult -ne '0x41325') { 'sev-warn' }
+        else { '' }
+    }
+    Html-EndDetails
+}
+elseif ($scheduledTasks -eq "Error") {
+    Write-Action -What "Scheduled tasks query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve scheduled tasks." -Kind warn
+}
+else {
+    Write-Action -What "No non-Microsoft scheduled tasks found." -Kind info
+    Html-AddNote -Text "No non-Microsoft scheduled tasks found." -Kind info
+}
+
+Html-EndSection
+
+# ============================================================
+# [12] WINDOWS SERVICES
+# ============================================================
+Write-Step -Index 12 -Total 16 -Title "Auditing Windows services..."
+Write-Action -What "Running: Windows services audit" -Kind run
+Html-StartSection "Windows Services"
+
+$services = Safe-Invoke {
+    $standardAccounts = @('LocalSystem', 'NT AUTHORITY\LocalService', 'NT AUTHORITY\NetworkService',
+                          'NT Authority\LocalService', 'NT Authority\NetworkService',
+                          'localSystem', 'Local System', 'LocalService', 'NetworkService')
+    $allSvc = @(Get-CimInstance Win32_Service | Select-Object Name, DisplayName, State, StartMode, StartName, PathName)
+
+    $nonStandard = @($allSvc | Where-Object {
+        $_.StartName -and
+        $_.StartName -notin $standardAccounts -and
+        $_.StartName -notmatch '^NT (AUTHORITY|SERVICE)\\' -and
+        $_.StartName -notmatch '^NT-AUTORIT'
+    })
+
+    $criticalDisabled = @($allSvc | Where-Object {
+        $_.StartMode -eq 'Disabled' -and
+        $_.Name -in @('wuauserv', 'WinDefend', 'EventLog', 'Dnscache', 'mpssvc', 'BITS',
+                       'Schedule', 'Winmgmt', 'CryptSvc', 'TrustedInstaller', 'W32Time')
+    })
+
+    $stoppedAuto = @($allSvc | Where-Object {
+        $_.StartMode -eq 'Auto' -and $_.State -ne 'Running' -and
+        $_.Name -notin @('sppsvc', 'SysMain', 'WbioSrvc', 'TabletInputService', 'MapsBroker')
+    })
+
+    [pscustomobject]@{
+        NonStandard     = $nonStandard
+        CriticalDisabled = $criticalDisabled
+        StoppedAuto     = $stoppedAuto
+        TotalCount      = $allSvc.Count
+    }
+} "Windows Services"
+
+if ($services -ne "Error" -and $services) {
+    Write-Action -What ("Services: {0} total, {1} non-standard account(s), {2} critical disabled" -f $services.TotalCount, $services.NonStandard.Count, $services.CriticalDisabled.Count) -Kind ok
+    Html-AddNote -Text ("Total services: {0}" -f $services.TotalCount) -Kind info
+
+    if ($services.CriticalDisabled.Count -gt 0) {
+        $critNames = ($services.CriticalDisabled | ForEach-Object { $_.DisplayName }) -join ', '
+        Write-Action -What ("Critical services disabled: {0}" -f $critNames) -Kind bad
+        Html-AddNote -Text ("Critical service(s) are disabled: {0}" -f $critNames) -Kind bad
+    }
+
+    if ($services.NonStandard.Count -gt 0) {
+        Html-AddNote -Text ("{0} service(s) running under non-standard accounts. Verify these credentials are appropriate." -f $services.NonStandard.Count) -Kind warn
+
+        Html-StartDetails -Summary ("Services with Non-Standard Accounts ({0})" -f $services.NonStandard.Count) -Open
+        Html-AddTable -Items @($services.NonStandard | Sort-Object StartName, Name) -Columns @(
+            @{ Header="Service";  Property="DisplayName" },
+            @{ Header="Name";     Property="Name" },
+            @{ Header="Run As";   Property="StartName" },
+            @{ Header="State";    Property="State" },
+            @{ Header="Startup";  Property="StartMode" }
+        ) -RowClass { param($r) 'sev-warn' }
+        Html-EndDetails
+    } else {
+        Html-AddNote -Text "All services run under standard system accounts." -Kind good
+    }
+
+    if ($services.CriticalDisabled.Count -gt 0) {
+        Html-StartDetails -Summary ("Disabled Critical Services ({0})" -f $services.CriticalDisabled.Count)
+        Html-AddTable -Items @($services.CriticalDisabled | Sort-Object Name) -Columns @(
+            @{ Header="Service"; Property="DisplayName" },
+            @{ Header="Name";    Property="Name" },
+            @{ Header="Startup"; Property="StartMode" },
+            @{ Header="State";   Property="State" }
+        ) -RowClass { param($r) 'sev-bad' }
+        Html-EndDetails
+    }
+
+    if ($services.StoppedAuto.Count -gt 0) {
+        Html-StartDetails -Summary ("Stopped Auto-Start Services ({0})" -f $services.StoppedAuto.Count)
+        Html-AddTable -Items @($services.StoppedAuto | Sort-Object Name) -Columns @(
+            @{ Header="Service"; Property="DisplayName" },
+            @{ Header="Name";    Property="Name" },
+            @{ Header="Run As";  Property="StartName" },
+            @{ Header="Startup"; Property="StartMode" },
+            @{ Header="State";   Property="State" }
+        ) -RowClass { param($r) 'sev-warn' }
+        Html-EndDetails
+    }
+}
+else {
+    Write-Action -What "Windows services query failed." -Kind warn
+    Html-AddNote -Text "Could not retrieve Windows service information." -Kind warn
+}
+
+Html-EndSection
+
+# ============================================================
+# [13] REMOTE ACCESS TOOLS
+# ============================================================
+Write-Step -Index 13 -Total 16 -Title "Detecting remote access tools..."
+Write-Action -What "Running: Remote access tool detection" -Kind run
+Html-StartSection "Remote Access Tools"
+
+# Known remote access tool patterns (name regex -> category)
+$ratPatterns = @(
+    @{ Pattern = 'TeamViewer';                  Category = 'Remote Desktop' },
+    @{ Pattern = 'AnyDesk';                     Category = 'Remote Desktop' },
+    @{ Pattern = 'Splashtop';                   Category = 'Remote Desktop' },
+    @{ Pattern = 'LogMeIn|GoTo';                Category = 'Remote Desktop' },
+    @{ Pattern = 'ConnectWise.*Control|ScreenConnect'; Category = 'RMM / Remote Desktop' },
+    @{ Pattern = 'BeyondTrust|Bomgar';          Category = 'Privileged Access' },
+    @{ Pattern = 'RustDesk';                    Category = 'Remote Desktop' },
+    @{ Pattern = 'Chrome Remote Desktop';       Category = 'Remote Desktop' },
+    @{ Pattern = 'VNC|RealVNC|TightVNC|UltraVNC'; Category = 'Remote Desktop' },
+    @{ Pattern = 'Remote Desktop Plus|RDP\+';   Category = 'Remote Desktop' },
+    @{ Pattern = 'Parsec';                      Category = 'Remote Desktop' },
+    @{ Pattern = 'Atera';                       Category = 'RMM' },
+    @{ Pattern = 'NinjaRMM|NinjaOne|Ninja';    Category = 'RMM' },
+    @{ Pattern = 'ConnectWise.*Automate|LabTech'; Category = 'RMM' },
+    @{ Pattern = 'Datto.*RMM|Autotask';        Category = 'RMM' },
+    @{ Pattern = 'N-able|N-central|SolarWinds.*MSP'; Category = 'RMM' },
+    @{ Pattern = 'Syncro';                      Category = 'RMM' },
+    @{ Pattern = 'Kaseya|VSA';                  Category = 'RMM' },
+    @{ Pattern = 'Pulseway';                    Category = 'RMM' },
+    @{ Pattern = 'Level\.io|Level RMM';         Category = 'RMM' },
+    @{ Pattern = 'Intune.*Management|Microsoft.*Intune'; Category = 'MDM' },
+    @{ Pattern = 'MeshAgent|MeshCentral';       Category = 'Remote Desktop' },
+    @{ Pattern = 'Supremo';                     Category = 'Remote Desktop' },
+    @{ Pattern = 'ISL Online|ISL Light';        Category = 'Remote Desktop' },
+    @{ Pattern = 'Radmin';                      Category = 'Remote Desktop' },
+    @{ Pattern = 'SimpleHelp';                  Category = 'Remote Desktop' },
+    @{ Pattern = 'ZohoAssist|Zoho Assist';      Category = 'Remote Desktop' },
+    @{ Pattern = 'TacticalRMM';                 Category = 'RMM' },
+    @{ Pattern = 'Action1';                     Category = 'RMM' }
+)
+
+$ratDetected = Safe-Invoke {
+    $found = [System.Collections.Generic.List[object]]::new()
+    if ($appsList -and $appsList -ne "Error") {
+        foreach ($rp in $ratPatterns) {
+            $matches = @($appsList | Where-Object { $_.DisplayName -match $rp.Pattern })
+            foreach ($m in $matches) {
+                # Deduplicate by name
+                $existing = $found | Where-Object { $_.Name -eq $m.DisplayName }
+                if (-not $existing) {
+                    $found.Add([pscustomobject]@{
+                        Name     = $m.DisplayName
+                        Version  = $m.DisplayVersion
+                        Category = $rp.Category
+                        Source   = if ($m.PSObject.Properties.Name -contains 'Sources') { $m.Sources } else { $m.Source }
+                    })
+                }
+            }
+        }
+    }
+
+    # Also check for running processes that indicate active remote tools
+    $ratProcesses = @('TeamViewer', 'AnyDesk', 'ScreenConnect', 'SplashtopStreamer',
+        'LMIGuardianSvc', 'BeyondTrustAgent', 'rustdesk', 'tvnserver', 'winvnc',
+        'AteraAgent', 'NinjaRMMAgent', 'meshagent', 'Supremo', 'radmin')
+    foreach ($proc in $ratProcesses) {
+        $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
+        if ($running) {
+            $existing = $found | Where-Object { $_.Name -match [regex]::Escape($proc) }
+            if (-not $existing) {
+                $found.Add([pscustomobject]@{
+                    Name     = "$proc (running process)"
+                    Version  = 'N/A'
+                    Category = 'Detected via process'
+                    Source   = 'Process'
+                })
+            }
+        }
+    }
+
+    @($found)
+} "Remote Access Tools"
+
+if ($ratDetected -ne "Error" -and $ratDetected -and $ratDetected.Count -gt 0) {
+    $ratList = @($ratDetected) | Sort-Object Category, Name
+    $rmmCount  = @($ratList | Where-Object { $_.Category -eq 'RMM' }).Count
+    $rdCount   = @($ratList | Where-Object { $_.Category -match 'Remote Desktop|Privileged' }).Count
+    $mdmCount  = @($ratList | Where-Object { $_.Category -eq 'MDM' }).Count
+
+    $summaryParts = [System.Collections.Generic.List[string]]::new()
+    if ($rmmCount -gt 0)  { $summaryParts.Add("RMM: $rmmCount") }
+    if ($rdCount -gt 0)   { $summaryParts.Add("Remote Desktop: $rdCount") }
+    if ($mdmCount -gt 0)  { $summaryParts.Add("MDM: $mdmCount") }
+
+    Write-Action -What ("Remote access tools: {0} detected ({1})" -f $ratList.Count, ($summaryParts -join ', ')) -Kind warn
+    Html-AddNote -Text ("Remote access tools detected: {0}. Verify all are authorised and expected." -f $ratList.Count) -Kind warn
+
+    if ($ratList.Count -gt 1) {
+        $catCounts = ($ratList | Where-Object { $_.Category -match 'RMM' } | Measure-Object).Count
+        if ($catCounts -gt 1) {
+            Html-AddNote -Text "Multiple RMM agents detected. This commonly occurs during MSP transitions and may indicate orphaned agents from a previous provider." -Kind warn
+        }
+    }
+
+    Html-AddTable -Items $ratList -Columns @(
+        @{ Header="Tool";     Property="Name" },
+        @{ Header="Version";  Property="Version" },
+        @{ Header="Category"; Property="Category" },
+        @{ Header="Source";   Property="Source" }
+    ) -RowClass {
+        param($r)
+        if ($r.Category -eq 'RMM') { 'sev-warn' }
+        else { '' }
+    }
+}
+elseif ($ratDetected -eq "Error") {
+    Write-Action -What "Remote access tool detection failed." -Kind warn
+    Html-AddNote -Text "Could not scan for remote access tools." -Kind warn
+}
+else {
+    Write-Action -What "No remote access tools detected." -Kind ok
+    Html-AddNote -Text "No known remote access tools detected in installed software or running processes." -Kind good
+}
+
+Html-EndSection
+
+# ============================================================
+# [14] EVENT LOG HEALTH
+# ============================================================
+Write-Step -Index 14 -Total 16 -Title "Checking event log health..."
 Write-Action -What "Running: Event log configuration (Get-WinEvent)" -Kind run
 Html-StartSection "Event Log Health"
 
@@ -3063,9 +3992,9 @@ else {
 Html-EndSection
 
 # ============================================================
-# [12] MICROSOFT ENTRA ID JOIN STATUS
+# [15] MICROSOFT ENTRA ID JOIN STATUS
 # ============================================================
-Write-Step -Index 12 -Total 13 -Title "Checking Microsoft Entra ID join status..."
+Write-Step -Index 15 -Total 16 -Title "Checking Microsoft Entra ID join status..."
 Write-Action -What "Running: dsregcmd /status parse" -Kind run
 Html-StartSection "Microsoft Entra ID Join Status"
 
@@ -3106,9 +4035,9 @@ else {
 Html-EndSection
 
 # ============================================================
-# [13] ESSENTIAL EIGHT ASSESSMENT
+# [16] ESSENTIAL EIGHT ASSESSMENT
 # ============================================================
-Write-Step -Index 13 -Total 13 -Title "Performing Essential Eight assessment..."
+Write-Step -Index 16 -Total 16 -Title "Performing Essential Eight assessment..."
 Write-Action -What "Running: ASD Essential Eight Maturity Model checks" -Kind run
 Html-StartSection "Essential Eight Assessment"
 Html-AddNote -Text "Assessment based on the ASD Essential Eight Maturity Model. This tool performs read-only detection only; results reflect observed endpoint configuration and cannot substitute for a formal E8 assessment." -Kind info
@@ -4482,10 +5411,109 @@ $huduBodyFragment
     Write-Host "Hudu HTML preview saved to $HuduHtmlReportPath" -ForegroundColor Green
     Log "Hudu HTML preview written to $HuduHtmlReportPath"
 
+    # ---- Hudu Diff: Compare with previous report ----
+    $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
+    $diffSectionHtml     = ''
+    $diffSectionHuduHtml = ''
+    try {
+        Write-Host "[Hudu] Checking for previous report to compare..." -ForegroundColor Cyan
+        Log "Hudu diff: looking up previous report for '$huduAssetName'"
+
+        # Need the layout ID to find the asset
+        $diffLayout = Get-HuduAssetLayoutByName -Name $HuduAssetLayoutName
+        if ($diffLayout) {
+            $previousHtml = Get-HuduPreviousReport -AssetName $huduAssetName -CompanyId $script:_HuduCompanyId -LayoutId $diffLayout.id
+            if ($previousHtml) {
+                Write-Action -What "Previous report found, extracting metrics for comparison" -Kind run
+
+                $prevMetrics = Extract-AuditMetrics -Html $previousHtml
+
+                # Build current metrics from the standalone HTML report we just wrote
+                $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
+                $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
+
+                $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
+
+                if ($auditChanges -and $auditChanges.Count -gt 0) {
+                    Write-Action -What ("{0} change(s) detected since last audit" -f $auditChanges.Count) -Kind info
+                    Log ("Hudu diff: {0} change(s) detected" -f $auditChanges.Count)
+
+                    $diffSectionHtml     = Build-DiffSectionHtml -Changes $auditChanges
+                    $diffSectionHuduHtml = Build-DiffSectionHuduHtml -Changes $auditChanges
+                } else {
+                    Write-Action -What "No significant changes since last audit" -Kind ok
+                    Log "Hudu diff: no changes detected"
+                    $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
+                }
+            } else {
+                Write-Action -What "No previous report found (first run or no attachment)" -Kind info
+                Log "Hudu diff: no previous report available"
+            }
+        } else {
+            Log "Hudu diff: could not find layout '$HuduAssetLayoutName' for diff lookup"
+        }
+    } catch {
+        Write-Action -What ("Report comparison failed: {0}" -f $_.Exception.Message) -Kind warn
+        Log ("Hudu diff: comparison failed - {0}" -f $_.Exception.Message)
+        # Non-fatal: continue with upload without diff section
+    }
+
+    # Inject diff section into Hudu body fragment (after score card, before global summary)
+    if ($diffSectionHuduHtml) {
+        $huduBodyFragment = @"
+$huduHeaderHtml
+
+$huduScoreCardHtml
+
+$diffSectionHuduHtml
+
+$huduGlobalSummaryHtml
+
+$huduTocHtml
+
+$($HuduHtml.ToString())
+
+<hr style='border:none; border-top:1px solid rgba(128,128,128,0.2); margin:24px 0 0;'>
+<p style='opacity:0.6; font-size:12px; text-align:center; padding-top:16px;'>
+  Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+</p>
+"@
+    }
+
+    # Also inject diff into standalone HTML if present
+    if ($diffSectionHtml) {
+        $htmlContent = $htmlContent -replace '(</div>\s*<!-- scoreCardHtml -->)', "`$1`n$diffSectionHtml"
+        # If the marker isn't present, inject after the first score-card div
+        if ($htmlContent -notmatch '<!-- scoreCardHtml -->') {
+            $htmlContent = $htmlContent -replace "(<div class='issues-summary'>)", "$diffSectionHtml`n`$1"
+        }
+        $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
+    }
+
+    # Re-write Hudu preview with diff section included
+    if ($diffSectionHuduHtml) {
+        $huduContent = @"
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Audit Report - $safeReportTitle (Hudu)</title>
+</head>
+<body style="font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; margin:0; padding:24px; line-height:1.5;">
+
+$huduBodyFragment
+
+</body>
+</html>
+"@
+        $huduContent | Out-File -FilePath $HuduHtmlReportPath -Force -Encoding utf8
+        Log "Hudu HTML preview updated with diff section"
+    }
+
     # ---- Upload to Hudu via API ----
     Write-Host "[Hudu] Uploading report to Hudu..." -ForegroundColor Yellow
     Log "STEP Hudu: Uploading report to Hudu"
-    $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
     # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) - they are
     # invalid in JSON strings (RFC 8259) and cause Rails to return 500 with no error detail.
     # These can originate from registry software entries containing embedded null bytes.
