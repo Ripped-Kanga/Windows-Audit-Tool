@@ -1593,8 +1593,8 @@ function Compare-AuditReports {
         Sort-Object -Unique
 
     foreach ($key in $scalarKeys) {
-        $prev = if ($Previous.ContainsKey($key)) { [string]$Previous[$key] } else { $null }
-        $curr = if ($Current.ContainsKey($key))  { [string]$Current[$key]  } else { $null }
+        $prev = if ($Previous.Contains($key)) { [string]$Previous[$key] } else { $null }
+        $curr = if ($Current.Contains($key))  { [string]$Current[$key]  } else { $null }
 
         if ($prev -eq $curr) { continue }
 
@@ -1633,8 +1633,8 @@ function Compare-AuditReports {
     }
 
     # Compare software lists
-    $prevSw = if ($Previous.ContainsKey('_SoftwareList')) { @($Previous['_SoftwareList']) } else { @() }
-    $currSw = if ($Current.ContainsKey('_SoftwareList'))  { @($Current['_SoftwareList'])  } else { @() }
+    $prevSw = if ($Previous.Contains('_SoftwareList')) { @($Previous['_SoftwareList']) } else { @() }
+    $currSw = if ($Current.Contains('_SoftwareList'))  { @($Current['_SoftwareList'])  } else { @() }
 
     if ($prevSw.Count -gt 0 -or $currSw.Count -gt 0) {
         $added   = @($currSw | Where-Object { $_ -notin $prevSw })
@@ -5510,7 +5510,7 @@ $huduBodyFragment
                 $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
 
                 # Calculate numeric score change for the Hudu field
-                if ($prevMetrics.ContainsKey('Health Score') -and $currMetrics.ContainsKey('Health Score')) {
+                if ($prevMetrics.Contains('Health Score') -and $currMetrics.Contains('Health Score')) {
                     try {
                         $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
                         Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
