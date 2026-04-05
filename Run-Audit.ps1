@@ -1439,21 +1439,32 @@ function Get-HuduPreviousReport {
 
         Log ("Hudu diff: found {0} upload(s) on asset {1}" -f $attachments.Count, $assetId)
 
-        # Find the most recent .html attachment
-        $htmlAttachment = $attachments |
-            Where-Object { $_.file_name -like '*.html' -or $_.content_type -match 'text/html' } |
-            Sort-Object { $_.created_at } -Descending |
-            Select-Object -First 1
+        # Log the first upload's property names to diagnose field naming
+        if ($attachments.Count -gt 0) {
+            $sample = $attachments[0]
+            $props = @($sample.PSObject.Properties | ForEach-Object { "{0}={1}" -f $_.Name, ($_.Value -as [string]).Substring(0, [Math]::Min(($_.Value -as [string]).Length, 80)) })
+            Log ("Hudu diff: sample upload props: {0}" -f ($props -join ' | '))
+        }
+
+        # Find the most recent .html attachment -- try multiple possible field names
+        $htmlAttachment = $attachments | Where-Object {
+            ($_.file_name -and $_.file_name -like '*.html') -or
+            ($_.filename -and $_.filename -like '*.html') -or
+            ($_.name -and $_.name -like '*.html') -or
+            ($_.content_type -and $_.content_type -match 'text/html') -or
+            ($_.ext -and $_.ext -match 'html')
+        } | Select-Object -Last 1
 
         if (-not $htmlAttachment) {
             Log "Hudu diff: no HTML attachment found on asset $assetId"
             return $null
         }
 
-        Log ("Hudu diff: found attachment '{0}' (ID {1})" -f $htmlAttachment.file_name, $htmlAttachment.id)
+        $attachName = if ($htmlAttachment.file_name) { $htmlAttachment.file_name } elseif ($htmlAttachment.filename) { $htmlAttachment.filename } elseif ($htmlAttachment.name) { $htmlAttachment.name } else { '(unknown)' }
+        Log ("Hudu diff: found attachment '{0}' (ID {1})" -f $attachName, $htmlAttachment.id)
 
-        # Download the attachment
-        $downloadUrl = $htmlAttachment.url
+        # Download the attachment -- try multiple possible URL field names
+        $downloadUrl = if ($htmlAttachment.url) { $htmlAttachment.url } elseif ($htmlAttachment.file_url) { $htmlAttachment.file_url } elseif ($htmlAttachment.download_url) { $htmlAttachment.download_url } else { $null }
         if (-not $downloadUrl) {
             Log "Hudu diff: attachment has no download URL"
             return $null
