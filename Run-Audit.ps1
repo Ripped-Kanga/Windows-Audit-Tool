@@ -1776,7 +1776,8 @@ function Publish-HuduAsset {
         [string]$HtmlContent,
         [string]$AttachmentPath,
         [string]$AttachmentName,  # Optional: override the filename Hudu sees for the attachment
-        [double]$HealthScore = 0
+        [double]$HealthScore = 0,
+        $ScoreChange = $null     # Optional: numeric change since last audit (e.g. +2.5 or -1.0)
     )
     try {
         $companyId = $script:_HuduCompanyId
@@ -1828,6 +1829,19 @@ function Publish-HuduAsset {
             Log "Hudu: 'Health Score' field not found in layout '$LayoutName' - skipping score field"
         }
 
+        # 2c. Find the optional Health Score Change (Text) field for the asset list view column.
+        $changeFieldKey = $null
+        foreach ($f in @($layout.fields)) {
+            if ($f.label -eq 'Health Score Change') {
+                $changeFieldKey = ($f.label -replace '[^a-zA-Z0-9\s]', '' -replace '\s+', '_').ToLower()
+                break
+            }
+        }
+        if ($changeFieldKey) {
+            Write-Action -What ("Health Score Change field found: {0}" -f $changeFieldKey) -Kind info
+            Log ("Hudu: Health Score Change field found (key '{0}')" -f $changeFieldKey)
+        }
+
         # 3. Build request body (shared by create and update paths)
         $customFields = [System.Collections.Generic.List[object]]::new()
         $customFields.Add(@{ $fieldKey = $HtmlContent })
@@ -1835,6 +1849,12 @@ function Publish-HuduAsset {
         # Avoids locale-dependent decimal separators that would corrupt the value on
         # European-locale machines when ConvertTo-Json serialises the payload.
         if ($scoreFieldKey) { $customFields.Add(@{ $scoreFieldKey = $HealthScore.ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture) }) }
+        if ($changeFieldKey -and $null -ne $ScoreChange) {
+            $sign = if ([double]$ScoreChange -ge 0) { '+' } else { '' }
+            $changeStr = $sign + ([double]$ScoreChange).ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture)
+            $customFields.Add(@{ $changeFieldKey = $changeStr })
+            Log ("Hudu: writing score change '{0}' to field '{1}'" -f $changeStr, $changeFieldKey)
+        }
         $body = @{
             asset = @{
                 name            = $AssetName
@@ -5468,6 +5488,7 @@ $huduBodyFragment
     $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
     $diffSectionHtml     = ''
     $diffSectionHuduHtml = ''
+    $huduScoreChange     = $null
     try {
         Write-Host "[Hudu] Checking for previous report to compare..." -ForegroundColor Cyan
         Log "Hudu diff: looking up previous report for '$huduAssetName'"
@@ -5486,6 +5507,14 @@ $huduBodyFragment
                 $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
 
                 $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
+
+                # Calculate numeric score change for the Hudu field
+                if ($prevMetrics.ContainsKey('Health Score') -and $currMetrics.ContainsKey('Health Score')) {
+                    try {
+                        $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
+                        Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
+                    } catch {}
+                }
 
                 if ($auditChanges -and $auditChanges.Count -gt 0) {
                     Write-Action -What ("{0} change(s) detected since last audit" -f $auditChanges.Count) -Kind info
@@ -5590,6 +5619,7 @@ $huduBodyFragment
         HealthScore    = $score
     }
     if ($resolvedReportName) { $publishParams['AttachmentName'] = $resolvedReportName }
+    if ($null -ne $huduScoreChange) { $publishParams['ScoreChange'] = $huduScoreChange }
     $huduResult = Publish-HuduAsset @publishParams
     if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
