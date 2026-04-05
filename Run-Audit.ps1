@@ -1411,9 +1411,12 @@ function Add-HuduUpload {
 function Get-HuduPreviousReport {
     <#
       Downloads the most recent HTML file attachment from an existing Hudu asset.
-      Returns the HTML content as a string, or $null if no attachment is found.
-      Never throws. Each API call is independently wrapped so one failure
-      does not prevent subsequent approaches from being tried.
+      Uses GET /api/v1/uploads (returns all uploads instance-wide) and filters
+      client-side by uploadable_id + ext. Never throws.
+
+      Hudu upload object fields:
+        id, slug, url, name, ext, mime, size, created_date,
+        archived_at, uploadable_id, uploadable_type
     #>
     param(
         [string]$AssetName,
@@ -1428,113 +1431,43 @@ function Get-HuduPreviousReport {
         }
         $assetId = $asset.id
 
-        # Log the property names available on the asset search result
-        try {
-            $assetProps = @($asset.PSObject.Properties.Name)
-            Log ("Hudu diff: asset props from search: {0}" -f ($assetProps -join ', '))
-        } catch {}
+        # Fetch all uploads via the uploads API (returns every upload in the instance)
+        $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
+        $headers = @{ "x-api-key" = $script:_HuduAPIKey }
+        $rawResp = Invoke-WebRequest -Uri "$baseUrl/api/v1/uploads" -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $rawBody = if ($rawResp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($rawResp.Content) } else { $rawResp.Content }
+        $allUploads = @($rawBody | ConvertFrom-Json)
 
-        # Check if the search result already includes upload/attachment info
-        $attachments = @()
-        foreach ($propName in @('uploads', 'attachments', 'files')) {
-            if ($asset.PSObject.Properties.Name -contains $propName -and $asset.$propName) {
-                $attachments = @($asset.$propName)
-                Log ("Hudu diff: found {0} item(s) via asset search .{1}" -f $attachments.Count, $propName)
-                break
-            }
-        }
+        # Filter to HTML uploads belonging to this asset
+        $assetHtmlUploads = @($allUploads | Where-Object {
+            $_.uploadable_type -eq 'Asset' -and
+            $_.uploadable_id -eq $assetId -and
+            $_.ext -eq 'html'
+        })
 
-        # Approach 1: GET /api/v1/assets/{id} for full detail
-        if ($attachments.Count -eq 0) {
-            try {
-                $assetDetail = Invoke-HuduRequest -Endpoint "assets/$assetId" -Method GET
-                $ad = if ($assetDetail.asset) { $assetDetail.asset } else { $assetDetail }
-                try {
-                    $adProps = @($ad.PSObject.Properties.Name)
-                    Log ("Hudu diff: asset detail props: {0}" -f ($adProps -join ', '))
-                } catch {}
-                foreach ($propName in @('uploads', 'attachments', 'files')) {
-                    if ($ad.PSObject.Properties.Name -contains $propName -and $ad.$propName) {
-                        $attachments = @($ad.$propName)
-                        Log ("Hudu diff: found {0} item(s) via asset detail .{1}" -f $attachments.Count, $propName)
-                        break
-                    }
-                }
-            } catch {
-                Log ("Hudu diff: asset detail GET failed (non-fatal): {0}" -f $_.Exception.Message)
-            }
-        }
+        Log ("Hudu diff: {0} total uploads, {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $assetHtmlUploads.Count, $assetId)
 
-        # Approach 2: dedicated uploads API
-        if ($attachments.Count -eq 0) {
-            try {
-                $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
-                $uploadsUri = "$baseUrl/api/v1/uploads?uploadable_type=Asset&uploadable_id=$assetId"
-                $headers = @{ "x-api-key" = $script:_HuduAPIKey }
-                # Use Invoke-WebRequest to get raw response for inspection
-                $rawResp = Invoke-WebRequest -Uri $uploadsUri -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-                $rawBody = $rawResp.Content
-                if ($rawBody -is [byte[]]) { $rawBody = [System.Text.Encoding]::UTF8.GetString($rawBody) }
-                Log ("Hudu diff: uploads API raw ({0} chars): {1}" -f $rawBody.Length, $rawBody.Substring(0, [Math]::Min($rawBody.Length, 500)))
-                $parsed = $rawBody | ConvertFrom-Json
-                if ($parsed.uploads) {
-                    $attachments = @($parsed.uploads)
-                } elseif ($parsed -is [array]) {
-                    $attachments = @($parsed)
-                }
-                Log ("Hudu diff: uploads API parsed {0} item(s)" -f $attachments.Count)
-            } catch {
-                Log ("Hudu diff: uploads API failed (non-fatal): {0}" -f $_.Exception.Message)
-            }
-        }
-
-        if ($attachments.Count -eq 0) {
-            Log "Hudu diff: no uploads found via any method on asset $assetId"
+        if ($assetHtmlUploads.Count -eq 0) {
+            Log "Hudu diff: no HTML attachment found for asset $assetId"
             return $null
         }
 
-        # Log first item structure
-        try {
-            $sampleJson = $attachments[0] | ConvertTo-Json -Depth 2 -Compress
-            Log ("Hudu diff: upload[0] type={0} json={1}" -f $attachments[0].GetType().Name, $sampleJson.Substring(0, [Math]::Min($sampleJson.Length, 400)))
-        } catch {
-            Log ("Hudu diff: upload[0] type={0} value={1}" -f $attachments[0].GetType().Name, $attachments[0])
-        }
+        # Pick the most recent by ID (highest ID = most recently created)
+        $target = $assetHtmlUploads | Sort-Object id -Descending | Select-Object -First 1
+        Log ("Hudu diff: selected attachment '{0}' (ID {1}, {2})" -f $target.name, $target.id, $target.size)
 
-        # Find the most recent .html attachment -- try every plausible field name
-        $htmlAttachment = $attachments | Where-Object {
-            ($_.file_name -and $_.file_name -like '*.html') -or
-            ($_.filename -and $_.filename -like '*.html') -or
-            ($_.name -and $_.name -like '*.html') -or
-            ($_.content_type -and $_.content_type -match 'text/html') -or
-            ($_.ext -and $_.ext -match 'html')
-        } | Select-Object -Last 1
-
-        if (-not $htmlAttachment) {
-            Log ("Hudu diff: no HTML attachment matched from {0} item(s) on asset {1}" -f $attachments.Count, $assetId)
-            return $null
-        }
-
-        $attachName = if ($htmlAttachment.file_name) { $htmlAttachment.file_name } elseif ($htmlAttachment.filename) { $htmlAttachment.filename } elseif ($htmlAttachment.name) { $htmlAttachment.name } else { '(unknown)' }
-        Log ("Hudu diff: matched attachment '{0}' (ID {1})" -f $attachName, $htmlAttachment.id)
-
-        # Download the attachment -- try multiple possible URL field names
-        $downloadUrl = if ($htmlAttachment.url) { $htmlAttachment.url } elseif ($htmlAttachment.file_url) { $htmlAttachment.file_url } elseif ($htmlAttachment.download_url) { $htmlAttachment.download_url } else { $null }
+        # Download the HTML content
+        $downloadUrl = $target.url
         if (-not $downloadUrl) {
-            Log "Hudu diff: attachment has no download URL"
+            Log "Hudu diff: attachment has no URL"
             return $null
-        }
-
-        # If URL is relative, prepend the Hudu base URL
-        if ($downloadUrl -notmatch '^https?://') {
-            $downloadUrl = $script:_HuduBaseURL.TrimEnd('/') + '/' + $downloadUrl.TrimStart('/')
         }
 
         Log ("Hudu diff: downloading from {0}" -f $downloadUrl)
-        $resp = Invoke-WebRequest -Uri $downloadUrl -Headers @{ "x-api-key" = $script:_HuduAPIKey } -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $htmlContent = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { $resp.Content }
 
-        Log ("Hudu diff: downloaded previous report ({0} bytes) from asset {1}" -f $htmlContent.Length, $assetId)
+        Log ("Hudu diff: downloaded previous report ({0} chars) from asset {1}" -f $htmlContent.Length, $assetId)
         return $htmlContent
     }
     catch {
