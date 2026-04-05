@@ -31,7 +31,7 @@
       -HuduAssetLayoutName    Hudu asset layout name.
       -HuduEntryName          Override the Hudu asset name. Accepts tokens:
                                 $ComputerName, $Date, $CustomerName
-      -HuduReportName         Override the Hudu HTML attachment filename. Accepts
+      -HtmlAttachmentName         Override the Hudu HTML attachment filename. Accepts
                               the same tokens. Default: "$Date - $ComputerName".
 
     EXIT CODES
@@ -55,7 +55,7 @@ param(
     [string]$HuduCompanySlug,
     [string]$HuduAssetLayoutName,
     [string]$HuduEntryName,
-    [string]$HuduReportName,
+    [string]$HtmlAttachmentName,
     [switch]$ForceRun
 )
 
@@ -297,7 +297,7 @@ if ($NeedDownload) {
 }
 
 # ============================================================
-# HuduEntryName / HuduReportName token expansion
+# HuduEntryName / HtmlAttachmentName token expansion
 # ============================================================
 $tokenDate         = Get-Date -Format 'yyyy-MM-dd'
 $tokenCustomerName = if ($CustomerName) { $CustomerName } else { '' }
@@ -311,13 +311,13 @@ if ($HuduEntryName) {
     Write-DeployLog ("HuduEntryName resolved: '{0}' -> '{1}'" -f $HuduEntryName, $ResolvedHuduEntryName)
 }
 
-$ResolvedHuduReportName = $null
-if ($HuduReportName) {
-    $ResolvedHuduReportName = $HuduReportName `
+$ResolvedHtmlAttachmentName = $null
+if ($HtmlAttachmentName) {
+    $ResolvedHtmlAttachmentName = $HtmlAttachmentName `
         -replace '\$ComputerName', $env:COMPUTERNAME `
         -replace '\$Date',         $tokenDate `
         -replace '\$CustomerName', $tokenCustomerName
-    Write-DeployLog ("HuduReportName resolved: '{0}' -> '{1}'" -f $HuduReportName, $ResolvedHuduReportName)
+    Write-DeployLog ("HtmlAttachmentName resolved: '{0}' -> '{1}'" -f $HtmlAttachmentName, $ResolvedHtmlAttachmentName)
 }
 
 # ============================================================
@@ -331,7 +331,7 @@ if ($PSBoundParameters.ContainsKey('HuduBaseURL'))         { $argList += @('-Hud
 if ($PSBoundParameters.ContainsKey('HuduCompanySlug'))     { $argList += @('-HuduCompanySlug', $HuduCompanySlug) }
 if ($PSBoundParameters.ContainsKey('HuduAssetLayoutName')) { $argList += @('-HuduAssetLayoutName', $HuduAssetLayoutName) }
 if ($ResolvedHuduEntryName)                                { $argList += @('-HuduEntryName', $ResolvedHuduEntryName) }
-if ($ResolvedHuduReportName)                               { $argList += @('-HuduReportName', $ResolvedHuduReportName) }
+if ($ResolvedHtmlAttachmentName)                               { $argList += @('-HtmlAttachmentName', $ResolvedHtmlAttachmentName) }
 
 # Log argument list with API key masked
 $logArgs = $argList | ForEach-Object {

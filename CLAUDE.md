@@ -278,7 +278,7 @@ These are non-negotiable design decisions. Do not work around them:
    - `-HuduReport` — enable Hudu integration; requires the four parameters below
    - `-HuduAPIKey` / `-HuduBaseURL` / `-HuduCompanySlug` / `-HuduAssetLayoutName` — Hudu API credentials and target layout
    - `-HuduEntryName "Name"` — optional; sets the name of the individual Hudu entry; enables find-or-update behaviour (existing entry updated in place, new entry created if not found); when omitted the default name is `"HOSTNAME - dd/MM/yyyy"`
-   - `-HuduReportName "Name"` — optional; sets the filename of the HTML report attachment uploaded to Hudu; accepts `$ComputerName`, `$Date`, `$CustomerName` tokens; `.html` appended automatically if missing; when omitted uses the local report filename
+   - `-HtmlAttachmentName "Name"` — optional; sets the filename of the HTML report attachment uploaded to Hudu; accepts `$ComputerName`, `$Date`, `$CustomerName` tokens; `.html` appended automatically if missing; when omitted uses the local report filename
    Do not add configuration parameters such as `-Verbose`, `-OutputPath`, or `-SkipSection`.
 
 3. **Preserve graceful degradation.** Every data-gathering call must use `Safe-Invoke` and handle the `"Error"` return gracefully. A broken section must never stop the audit.

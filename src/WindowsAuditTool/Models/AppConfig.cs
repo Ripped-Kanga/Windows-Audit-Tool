@@ -12,5 +12,5 @@ public sealed class AppConfig
     public string HuduCompanySlug { get; set; } = string.Empty;
     public string HuduAssetLayoutName { get; set; } = string.Empty;
     public string HuduEntryName { get; set; } = string.Empty;
-    public string HuduReportName { get; set; } = string.Empty;
+    public string HtmlAttachmentName { get; set; } = string.Empty;
 }

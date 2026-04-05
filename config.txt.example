@@ -11,4 +11,4 @@ CustomerName=
 # HuduCompanySlug=abc123
 # HuduAssetLayoutName=Audit Reports
 # HuduEntryName=$ComputerName
-# HuduReportName=$Date - $ComputerName
+# HtmlAttachmentName=$Date - $ComputerName

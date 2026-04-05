@@ -54,10 +54,10 @@ The deploy script is designed to be scheduled as a **daily RMM automation**. It 
 
 # With Hudu integration -- write into an existing asset named after the computer
 # (finds the asset by name and updates it in place; creates it if it doesn't exist):
--HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Computers" -HuduEntryName $ComputerName -HuduReportName "$Date - $ComputerName"
+-HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Computers" -HuduEntryName $ComputerName -HtmlAttachmentName "$Date - $ComputerName"
 ```
 
-The `-HuduEntryName` parameter controls the Hudu asset name. The `-HuduReportName` parameter controls the filename of the HTML report attachment uploaded to Hudu. Both support the following tokens, which are expanded on the endpoint at runtime (enter them literally in the RMM parameter field -- no quotes needed):
+The `-HuduEntryName` parameter controls the Hudu asset name. The `-HtmlAttachmentName` parameter controls the filename of the HTML report attachment uploaded to Hudu. Both support the following tokens, which are expanded on the endpoint at runtime (enter them literally in the RMM parameter field -- no quotes needed):
 
 | Token | Expands to | Example |
 |---|---|---|
@@ -67,7 +67,7 @@ The `-HuduEntryName` parameter controls the Hudu asset name. The `-HuduReportNam
 
 When `-HuduEntryName` is used, the Hudu integration finds any existing asset with that name in the target layout and **updates it in place** rather than creating a new one. This lets you write audit reports directly into existing device records (e.g. assets synced from Atera). When `-HuduEntryName` is not set, the default name is `HOSTNAME - dd/MM/yyyy`, which is unique per day and always creates.
 
-When `-HuduReportName` is used, the uploaded HTML attachment filename is set to the resolved value (`.html` is appended automatically if not present). When not set, the attachment uses the local report filename (e.g. `2026-03-30 - DESKTOP-ABC123-Audit.html`).
+When `-HtmlAttachmentName` is used, the uploaded HTML attachment filename is set to the resolved value (`.html` is appended automatically if not present). When not set, the attachment uses the local report filename (e.g. `2026-03-30 - DESKTOP-ABC123-Audit.html`).
 
 | Exit code | Meaning |
 |---|---|

@@ -55,10 +55,10 @@ param(
 
     # Override the filename of the HTML report attachment uploaded to Hudu.
     # Accepts tokens: $ComputerName, $Date, $CustomerName (expanded at runtime).
-    # When not set the default is "$Date - $ComputerName".
+    # When not set the attachment uses the local report filename.
     # The .html extension is added automatically if not present.
-    [Alias('hudu-report-name')]
-    [string]$HuduReportName
+    [Alias('html-attachment-name')]
+    [string]$HtmlAttachmentName
 )
 
 $ErrorActionPreference = "Stop"
@@ -5526,13 +5526,13 @@ $huduBodyFragment
 
     # ---- Resolve Hudu attachment filename ----
     $resolvedReportName = $null
-    if ($HuduReportName) {
-        $resolvedReportName = $HuduReportName `
+    if ($HtmlAttachmentName) {
+        $resolvedReportName = $HtmlAttachmentName `
             -replace '\$ComputerName', $ComputerName `
             -replace '\$Date',         (Get-Date -Format 'yyyy-MM-dd') `
             -replace '\$CustomerName', $(if ($CustomerName) { $CustomerName } else { '' })
         if ($resolvedReportName -notlike '*.html') { $resolvedReportName += '.html' }
-        Log ("Hudu report attachment name: '{0}' -> '{1}'" -f $HuduReportName, $resolvedReportName)
+        Log ("Hudu attachment name: '{0}' -> '{1}'" -f $HtmlAttachmentName, $resolvedReportName)
     }
 
     # ---- Upload to Hudu via API ----
