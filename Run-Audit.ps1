@@ -1629,14 +1629,14 @@ function Compare-AuditReports {
             $changes.Add([pscustomobject]@{
                 Metric   = 'Software Added'
                 Previous = ''
-                Current  = "{0} new: {1}" -f $added.Count, (($added | Select-Object -First 10) -join ', ')
+                Current  = ("{0} new: {1}" -f $added.Count, (($added | Select-Object -First 10) -join ', '))
                 Kind     = 'info'
             })
         }
         if ($removed.Count -gt 0) {
             $changes.Add([pscustomobject]@{
                 Metric   = 'Software Removed'
-                Previous = "{0} removed: {1}" -f $removed.Count, (($removed | Select-Object -First 10) -join ', ')
+                Previous = ("{0} removed: {1}" -f $removed.Count, (($removed | Select-Object -First 10) -join ', '))
                 Current  = ''
                 Kind     = 'info'
             })
