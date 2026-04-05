@@ -1470,7 +1470,26 @@ function Get-HuduPreviousReport {
         $resp = Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $htmlContent = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { $resp.Content }
 
-        Log ("Hudu diff: downloaded previous report ({0} chars) from asset {1}" -f $htmlContent.Length, $assetId)
+        Log ("Hudu diff: downloaded {0} chars, starts with: {1}" -f $htmlContent.Length, $htmlContent.Substring(0, [Math]::Min($htmlContent.Length, 120)))
+
+        # If the response is too small, it is likely a Hudu preview page rather than the actual file.
+        # Try appending /download or using the slug-based direct download URL.
+        if ($htmlContent.Length -lt 5000 -and $htmlContent -notmatch '<!doctype html>.*System Audit Report') {
+            Log "Hudu diff: response too small and missing audit report markers -- trying direct download"
+            $directUrl = $downloadUrl.TrimEnd('/') + '/download'
+            try {
+                $resp2 = Invoke-WebRequest -Uri $directUrl -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                $htmlContent2 = if ($resp2.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp2.Content) } else { $resp2.Content }
+                if ($htmlContent2.Length -gt $htmlContent.Length) {
+                    Log ("Hudu diff: /download returned {0} chars (better)" -f $htmlContent2.Length)
+                    $htmlContent = $htmlContent2
+                }
+            } catch {
+                Log ("Hudu diff: /download fallback failed: {0}" -f $_.Exception.Message)
+            }
+        }
+
+        Log ("Hudu diff: final report size: {0} chars from asset {1}" -f $htmlContent.Length, $assetId)
         return $htmlContent
     }
     catch {
@@ -1482,83 +1501,109 @@ function Get-HuduPreviousReport {
 function Extract-AuditMetrics {
     <#
       Extracts key metrics from an audit HTML report for comparison.
-      Uses regex patterns to pull values from the structured HTML output.
-      Returns a hashtable of metric name -> value pairs.
+      Uses regex patterns matched against the known HTML structure that
+      Run-Audit.ps1 generates. Returns an ordered hashtable.
     #>
     param([string]$Html)
 
     $metrics = [ordered]@{}
     if ([string]::IsNullOrWhiteSpace($Html)) { return $metrics }
 
-    # Health score (from the score ring)
+    # ---- Health score (from the score ring) ----
     if ($Html -match "class='num'[^>]*>([0-9]+\.?[0-9]*)</span>") {
         $metrics['Health Score'] = $Matches[1]
     }
 
-    # E8 scorecard — extract control names and statuses
-    # Pattern: table rows with control name and badge status
+    # ---- E8 scorecard: control names and badge statuses ----
     $e8Pattern = "<td>(\d+)</td><td>([^<]+)</td><td><span class='badge \w+'>([^<]+)</span>"
     $e8Matches = [regex]::Matches($Html, $e8Pattern)
     foreach ($m in $e8Matches) {
-        $control = $m.Groups[2].Value.Trim()
-        $status  = $m.Groups[3].Value.Trim()
-        $metrics["E8: $control"] = $status
+        $metrics["E8: $($m.Groups[2].Value.Trim())"] = $m.Groups[3].Value.Trim()
     }
 
-    # Local admin count — from the admin privileges KV row
+    # ---- Security Baseline KV rows: <th>Label</th><td>Value</td> ----
     if ($Html -match 'Local Administrator Count[^<]*</th><td[^>]*>(\d+)\s*member') {
         $metrics['Local Admin Count'] = $Matches[1]
     }
-
-    # Patch currency — days since last patch
     if ($Html -match 'Days Since Last Patch[^<]*</th><td[^>]*>(\d+)\s*days') {
         $metrics['Days Since Last Patch'] = $Matches[1]
     }
+    if ($Html -match 'Minimum password length[^<]*</th><td[^>]*>(\d+)') {
+        $metrics['Min Password Length'] = $Matches[1]
+    }
+    if ($Html -match 'Account lockout threshold[^<]*</th><td[^>]*>([^<]+)') {
+        $metrics['Lockout Threshold'] = $Matches[1].Trim()
+    }
 
-    # Defender real-time protection
-    if ($Html -match 'Real-time protection[^<]*</div><div>(\w+)') {
+    # ---- Defender real-time protection (KV div grid) ----
+    if ($Html -match "Real-time protection[^<]*</div><div>(\w+)") {
         $metrics['Defender Real-Time'] = $Matches[1]
     }
 
-    # BitLocker — count protected/unprotected volumes
+    # ---- Defender exclusions ----
+    if ($Html -match 'No Defender exclusions configured') {
+        $metrics['Defender Exclusions'] = '0'
+    } elseif ($Html -match 'Defender has (\d+) exclusion') {
+        $metrics['Defender Exclusions'] = $Matches[1]
+    }
+
+    # ---- BitLocker ----
     $blOnCount  = ([regex]::Matches($Html, "badge good[^>]*>On</span>")).Count
     $blOffCount = ([regex]::Matches($Html, "badge warn[^>]*>Off</span>")).Count
     if ($blOnCount -gt 0 -or $blOffCount -gt 0) {
         $metrics['BitLocker Protected'] = "$blOnCount on, $blOffCount off"
     }
 
-    # Firewall profiles disabled
+    # ---- Firewall ----
     $fwDisabled = ([regex]::Matches($Html, "badge warn[^>]*>Disabled</span>")).Count
     if ($Html -match 'Windows Firewall') {
         $metrics['Firewall Disabled Profiles'] = "$fwDisabled"
     }
 
-    # Pending updates count
+    # ---- TLS/SSL protocol statuses ----
+    # Table rows: <td>PROTOCOL</td>\n<td>SIDE</td>\n<td>STATUS or <span>STATUS</span></td>
+    $tlsPattern = "<tr[^>]*>\s*<td>((?:SSL|TLS)\s*[\d.]+)</td>\s*<td>(Server|Client)</td>\s*<td>(?:<span[^>]*>)?([^<]+)"
+    $tlsMatches = [regex]::Matches($Html, $tlsPattern)
+    foreach ($m in $tlsMatches) {
+        $proto = $m.Groups[1].Value.Trim()
+        $side  = $m.Groups[2].Value.Trim()
+        $state = $m.Groups[3].Value.Trim()
+        $metrics["TLS: $proto $side"] = $state
+    }
+
+    # ---- Pending updates ----
     if ($Html -match 'Pending updates:\s*(\d+)') {
         $metrics['Pending Updates'] = $Matches[1]
     }
 
-    # Software count
+    # ---- Software count ----
     if ($Html -match 'Applications found:\s*(\d+)') {
         $metrics['Software Count'] = $Matches[1]
     }
 
-    # Entra ID joined
-    if ($Html -match 'Entra ID Joined[^<]*</div><div>(\w+)') {
+    # ---- Entra ID ----
+    if ($Html -match "Entra ID Joined[^<]*</div><div>(\w+)") {
         $metrics['Entra ID Joined'] = $Matches[1]
     }
 
-    # Defender exclusion count
-    if ($Html -match 'Defender has (\d+) exclusion') {
-        $metrics['Defender Exclusions'] = $Matches[1]
-    }
-
-    # Remote access tools count
+    # ---- Remote access tools ----
     if ($Html -match 'Remote access tools detected:\s*(\d+)') {
         $metrics['Remote Access Tools'] = $Matches[1]
     }
 
-    # Software names for diff — extract from third-party software table
+    # ---- Local user accounts ----
+    $disabledUsers = ([regex]::Matches($Html, "badge good[^>]*>Disabled</span>")).Count
+    $enabledUsers  = ([regex]::Matches($Html, "badge warn[^>]*>Enabled</span>")).Count
+    if ($disabledUsers -gt 0 -or $enabledUsers -gt 0) {
+        $metrics['Local Users Enabled'] = "$enabledUsers"
+    }
+
+    # ---- Scheduled tasks running as SYSTEM ----
+    if ($Html -match '(\d+) task\(s\) run as SYSTEM') {
+        $metrics['SYSTEM Scheduled Tasks'] = $Matches[1]
+    }
+
+    # ---- Software names for set-diff ----
     $swNames = [System.Collections.Generic.List[string]]::new()
     $swPattern = "<tr[^>]*><td>([^<]+)</td><td>([^<]*)</td><td>([^<]*)</td><td>"
     $swMatches = [regex]::Matches($Html, $swPattern)
@@ -1621,6 +1666,24 @@ function Compare-AuditReports {
             $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
         }
         elseif ($key -eq 'Defender Exclusions') {
+            $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
+        }
+        elseif ($key -eq 'Min Password Length') {
+            $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -gt [int]$prev) { 'good' } else { 'bad' }
+        }
+        elseif ($key -match '^TLS:') {
+            # "Explicitly Disabled" for legacy protocols is good; "OS Default" for legacy is warn
+            $disabledGood = @('Explicitly Disabled')
+            $wasSecure = $prev -and ($disabledGood | Where-Object { $prev -match $_ })
+            $isSecure  = $curr -and ($disabledGood | Where-Object { $curr -match $_ })
+            if ($isSecure -and -not $wasSecure) { $kind = 'good' }
+            elseif (-not $isSecure -and $wasSecure) { $kind = 'bad' }
+            else { $kind = 'info' }
+        }
+        elseif ($key -eq 'Defender Real-Time') {
+            $kind = if ($curr -eq 'True' -and $prev -ne 'True') { 'good' } elseif ($curr -ne 'True' -and $prev -eq 'True') { 'bad' } else { 'info' }
+        }
+        elseif ($key -eq 'SYSTEM Scheduled Tasks') {
             $kind = if ($null -ne $curr -and $null -ne $prev -and [int]$curr -lt [int]$prev) { 'good' } else { 'warn' }
         }
 
@@ -1851,8 +1914,12 @@ function Publish-HuduAsset {
         # European-locale machines when ConvertTo-Json serialises the payload.
         if ($scoreFieldKey) { $customFields.Add(@{ $scoreFieldKey = $HealthScore.ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture) }) }
         if ($changeFieldKey -and $null -ne $ScoreChange) {
-            $sign = if ([double]$ScoreChange -ge 0) { '+' } else { '' }
-            $changeStr = $sign + ([double]$ScoreChange).ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture)
+            if ($ScoreChange -is [string]) {
+                $changeStr = $ScoreChange
+            } else {
+                $sign = if ([double]$ScoreChange -ge 0) { '+' } else { '' }
+                $changeStr = $sign + ([double]$ScoreChange).ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture)
+            }
             $customFields.Add(@{ $changeFieldKey = $changeStr })
             Log ("Hudu: writing score change '{0}' to field '{1}'" -f $changeStr, $changeFieldKey)
         }
@@ -5514,7 +5581,14 @@ $huduBodyFragment
                     try {
                         $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
                         Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
-                    } catch {}
+                    } catch {
+                        $huduScoreChange = 'No Change'
+                        Log "Hudu diff: could not calculate score change, defaulting to 'No Change'"
+                    }
+                } else {
+                    # Previous report existed but health score could not be extracted from one or both
+                    $huduScoreChange = 'No Change'
+                    Log "Hudu diff: health score missing from previous or current report, writing 'No Change'"
                 }
 
                 if ($auditChanges -and $auditChanges.Count -gt 0) {
