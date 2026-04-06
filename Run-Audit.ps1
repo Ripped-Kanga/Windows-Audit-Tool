@@ -1410,10 +1410,11 @@ function Add-HuduUpload {
 
 function Get-HuduPreviousMetrics {
     <#
-      Reads the previous audit metrics from the "Audit Metrics" custom field on an
-      existing Hudu asset. The field stores a JSON-serialised ordered hashtable
-      written by Publish-HuduAsset on the prior run. Returns the deserialised
-      ordered hashtable, or $null if the asset/field is missing. Never throws.
+      Downloads the most recent HTML attachment from an existing Hudu asset and
+      extracts audit metrics from it. Uses server-side upload filtering
+      (?uploadable_id=&uploadable_type=Asset) for efficiency, then downloads the
+      file via Invoke-WebRequest -OutFile (binary mode) with the x-api-key header.
+      Returns an ordered hashtable of metrics, or $null if not available. Never throws.
     #>
     param(
         [string]$AssetName,
@@ -1426,58 +1427,57 @@ function Get-HuduPreviousMetrics {
             Log "Hudu diff: no existing asset found for '$AssetName'"
             return $null
         }
+        $assetId = $asset.id
 
-        # The asset list response includes the fields array.  Each element has
-        # at minimum { label, value } and sometimes { id, field_type, ... }.
-        # Fetch the full asset detail to guarantee all fields are present.
-        $assetDetail = $null
-        try {
-            $assetDetail = Invoke-HuduRequest -Endpoint "companies/$CompanyId/assets/$($asset.id)"
-            if ($assetDetail.asset) { $assetDetail = $assetDetail.asset }
-        } catch {
-            Log ("Hudu diff: could not fetch asset detail, falling back to list data - {0}" -f $_.Exception.Message)
-            $assetDetail = $asset
-        }
+        # Fetch uploads for this asset only (server-side filtered, avoids fetching all instance uploads)
+        $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
+        $headers = @{ 'x-api-key' = $script:_HuduAPIKey }
+        $uploadsResp = Invoke-RestMethod `
+            -Uri "$baseUrl/api/v1/uploads?uploadable_id=$assetId&uploadable_type=Asset" `
+            -Headers $headers -Method Get -ErrorAction Stop
 
-        # Search for the "Audit Metrics" field value
-        $metricsJson = $null
-        $fieldSources = @()
-        if ($assetDetail.fields) { $fieldSources += ,@($assetDetail.fields) }
+        $allUploads = if ($uploadsResp.uploads) { @($uploadsResp.uploads) } else { @($uploadsResp) }
+        $htmlUploads = @($allUploads | Where-Object { $_.ext -eq 'html' -or $_.name -like '*.html' })
 
-        foreach ($fieldSet in $fieldSources) {
-            foreach ($f in $fieldSet) {
-                # Hudu field objects: { label = "Audit Metrics"; value = "..." }
-                if ($f.label -eq 'Audit Metrics' -and $f.value) {
-                    $metricsJson = [string]$f.value
-                    break
-                }
-            }
-            if ($metricsJson) { break }
-        }
+        Log ("Hudu diff: {0} total upload(s), {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $htmlUploads.Count, $assetId)
 
-        if (-not $metricsJson) {
-            Log "Hudu diff: 'Audit Metrics' field empty or not found on asset $($assetDetail.id)"
+        if ($htmlUploads.Count -eq 0) {
+            Log "Hudu diff: no HTML attachment found for asset $assetId"
             return $null
         }
 
-        Log ("Hudu diff: found metrics JSON ({0} chars) on asset {1}" -f $metricsJson.Length, $assetDetail.id)
+        # Pick the most recent (highest ID)
+        $target = $htmlUploads | Sort-Object id -Descending | Select-Object -First 1
+        Log ("Hudu diff: downloading '{0}' (ID {1}) from {2}" -f $target.name, $target.id, $target.url)
 
-        # Deserialise JSON back to an ordered hashtable
-        $obj = $metricsJson | ConvertFrom-Json
-        $metrics = [ordered]@{}
-        foreach ($prop in $obj.PSObject.Properties) {
-            if ($prop.Name -eq '_SoftwareList') {
-                $metrics[$prop.Name] = @($prop.Value)
-            } else {
-                $metrics[$prop.Name] = [string]$prop.Value
-            }
+        # Download to a temp file in binary mode -- matches the approach confirmed to work with x-api-key auth
+        $tmpFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName() + '.html')
+        try {
+            Invoke-WebRequest -Uri $target.url -Headers $headers -OutFile $tmpFile -ErrorAction Stop
+            $previousHtml = Get-Content -LiteralPath $tmpFile -Raw -Encoding UTF8 -ErrorAction Stop
+        }
+        finally {
+            Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
         }
 
-        Log ("Hudu diff: loaded {0} metric(s) from previous run" -f $metrics.Count)
+        if ([string]::IsNullOrWhiteSpace($previousHtml) -or $previousHtml.Length -lt 5000) {
+            Log ("Hudu diff: downloaded file too small ({0} chars) - may be login page or empty" -f $previousHtml.Length)
+            return $null
+        }
+
+        Log ("Hudu diff: downloaded {0} chars, extracting metrics..." -f $previousHtml.Length)
+        $metrics = Extract-AuditMetrics -Html $previousHtml
+
+        if ($metrics.Count -eq 0) {
+            Log "Hudu diff: no metrics could be extracted from downloaded report"
+            return $null
+        }
+
+        Log ("Hudu diff: extracted {0} metric(s) from previous report" -f $metrics.Count)
         return $metrics
     }
     catch {
-        Log ("Hudu diff: failed to retrieve previous metrics - {0}" -f $_.Exception.Message)
+        Log ("Hudu diff: failed to retrieve previous report - {0}" -f $_.Exception.Message)
         return $null
     }
 }
@@ -1825,8 +1825,7 @@ function Publish-HuduAsset {
         [string]$AttachmentPath,
         [string]$AttachmentName,  # Optional: override the filename Hudu sees for the attachment
         [double]$HealthScore = 0,
-        $ScoreChange = $null,    # Optional: numeric change since last audit (e.g. +2.5 or -1.0)
-        [string]$MetricsJson     # Optional: JSON-serialised metrics for next-run diff comparison
+        $ScoreChange = $null     # Optional: numeric change since last audit (e.g. +2.5 or -1.0)
     )
     try {
         $companyId = $script:_HuduCompanyId
@@ -1891,18 +1890,6 @@ function Publish-HuduAsset {
             Log ("Hudu: Health Score Change field found (key '{0}')" -f $changeFieldKey)
         }
 
-        # 2d. Find the optional Audit Metrics (Text) field for storing diff data between runs.
-        $metricsFieldKey = $null
-        foreach ($f in @($layout.fields)) {
-            if ($f.label -eq 'Audit Metrics') {
-                $metricsFieldKey = ($f.label -replace '[^a-zA-Z0-9\s]', '' -replace '\s+', '_').ToLower()
-                break
-            }
-        }
-        if ($metricsFieldKey) {
-            Log ("Hudu: Audit Metrics field found (key '{0}')" -f $metricsFieldKey)
-        }
-
         # 3. Build request body (shared by create and update paths)
         $customFields = [System.Collections.Generic.List[object]]::new()
         $customFields.Add(@{ $fieldKey = $HtmlContent })
@@ -1919,10 +1906,6 @@ function Publish-HuduAsset {
             }
             $customFields.Add(@{ $changeFieldKey = $changeStr })
             Log ("Hudu: writing score change '{0}' to field '{1}'" -f $changeStr, $changeFieldKey)
-        }
-        if ($metricsFieldKey -and $MetricsJson) {
-            $customFields.Add(@{ $metricsFieldKey = $MetricsJson })
-            Log ("Hudu: writing metrics JSON ({0} chars) to field '{1}'" -f $MetricsJson.Length, $metricsFieldKey)
         }
         $body = @{
             asset = @{
@@ -5558,27 +5541,19 @@ $huduBodyFragment
     $diffSectionHtml     = ''
     $diffSectionHuduHtml = ''
     $huduScoreChange     = $null
-    $huduMetricsJson     = $null
     try {
-        Write-Host "[Hudu] Checking for previous audit metrics..." -ForegroundColor Cyan
-        Log "Hudu diff: looking up previous metrics for '$huduAssetName'"
+        Write-Host "[Hudu] Checking for previous report to compare..." -ForegroundColor Cyan
+        Log "Hudu diff: looking up previous report for '$huduAssetName'"
 
-        # Extract current metrics from the standalone HTML report we just wrote
-        $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
-        $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
-
-        # Serialise current metrics now -- they will be stored on the asset for next run
-        if ($currMetrics.Count -gt 0) {
-            $huduMetricsJson = $currMetrics | ConvertTo-Json -Depth 5 -Compress
-            Log ("Hudu diff: serialised {0} current metrics ({1} chars)" -f $currMetrics.Count, $huduMetricsJson.Length)
-        }
-
-        # Read previous metrics from the asset's "Audit Metrics" field
         $diffLayout = Get-HuduAssetLayoutByName -Name $HuduAssetLayoutName
         if ($diffLayout) {
             $prevMetrics = Get-HuduPreviousMetrics -AssetName $huduAssetName -CompanyId $script:_HuduCompanyId -LayoutId $diffLayout.id
             if ($prevMetrics -and $prevMetrics.Count -gt 0) {
-                Write-Action -What ("Previous metrics loaded ({0} values), comparing..." -f $prevMetrics.Count) -Kind run
+                Write-Action -What ("Previous report found, extracting current metrics for comparison") -Kind run
+
+                # Extract current metrics from the standalone HTML report we just wrote
+                $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
+                $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
 
                 $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
 
@@ -5608,14 +5583,14 @@ $huduBodyFragment
                     $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
                 }
             } else {
-                Write-Action -What "No previous metrics found (first run or 'Audit Metrics' field not on layout)" -Kind info
-                Log "Hudu diff: no previous metrics available"
+                Write-Action -What "No previous report found (first run or no HTML attachment yet)" -Kind info
+                Log "Hudu diff: no previous report available"
             }
         } else {
             Log "Hudu diff: could not find layout '$HuduAssetLayoutName' for diff lookup"
         }
     } catch {
-        Write-Action -What ("Metrics comparison failed: {0}" -f $_.Exception.Message) -Kind warn
+        Write-Action -What ("Report comparison failed: {0}" -f $_.Exception.Message) -Kind warn
         Log ("Hudu diff: comparison failed - {0}" -f $_.Exception.Message)
         # Non-fatal: continue with upload without diff section
     }
@@ -5700,7 +5675,6 @@ $huduBodyFragment
     }
     if ($resolvedReportName) { $publishParams['AttachmentName'] = $resolvedReportName }
     if ($null -ne $huduScoreChange) { $publishParams['ScoreChange'] = $huduScoreChange }
-    if ($huduMetricsJson) { $publishParams['MetricsJson'] = $huduMetricsJson }
     $huduResult = Publish-HuduAsset @publishParams
     if ($huduResult.AssetCreated) {
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
