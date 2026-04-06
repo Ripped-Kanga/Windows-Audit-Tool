@@ -1429,32 +1429,44 @@ function Get-HuduPreviousMetrics {
         }
         $assetId = $asset.id
 
-        # Fetch uploads for this asset only (server-side filtered, avoids fetching all instance uploads)
+        # Fetch uploads via Invoke-WebRequest + ConvertFrom-Json so PS 5.1 creates
+        # proper PSCustomObjects (Invoke-RestMethod wraps the response differently).
         $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
         $headers = @{ 'x-api-key' = $script:_HuduAPIKey }
-        $uploadsResp = Invoke-RestMethod `
-            -Uri "$baseUrl/api/v1/uploads?uploadable_id=$assetId&uploadable_type=Asset" `
-            -Headers $headers -Method Get -ErrorAction Stop
+        $rawResp = Invoke-WebRequest -Uri "$baseUrl/api/v1/uploads?uploadable_id=$assetId&uploadable_type=Asset" `
+            -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $rawBody = if ($rawResp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($rawResp.Content) } else { $rawResp.Content }
 
-        $allUploads = if ($uploadsResp.uploads) { @($uploadsResp.uploads) } else { @($uploadsResp) }
+        # Log the raw response structure so we can see exactly what Hudu returns
+        Log ("Hudu diff: raw response ({0} chars): {1}" -f $rawBody.Length, $rawBody.Substring(0, [Math]::Min($rawBody.Length, 300)))
 
-        # Filter client-side by asset ID (server-side ?uploadable_id= not honoured on all Hudu versions)
-        $htmlUploads = @($allUploads | Where-Object {
-            $_.uploadable_id -eq $assetId -and
-            ($_.ext -eq 'html' -or $_.name -like '*.html')
-        })
+        $parsed = $rawBody | ConvertFrom-Json
+        # PS 5.1: ConvertFrom-Json returns arrays as Object[] without double-wrapping
+        if ($parsed.uploads -ne $null) {
+            $allUploads = if ($parsed.uploads -is [array]) { $parsed.uploads } else { @($parsed.uploads) }
+        } else {
+            $allUploads = if ($parsed -is [array]) { $parsed } else { @($parsed) }
+        }
 
-        # Diagnostic: log raw property names and values from the first upload object
+        # Diagnostic: log first upload's actual properties via Get-Member (works in PS 5.1)
         Log ("Hudu diff: asset ID used for filter = {0} (type: {1})" -f $assetId, $assetId.GetType().Name)
         if ($allUploads.Count -gt 0) {
-            $first = $allUploads[0]
-            $propNames = ($first.PSObject.Properties | ForEach-Object { $_.Name }) -join ', '
-            Log ("Hudu diff: upload[0] properties: {0}" -f $propNames)
-            Log ("Hudu diff: upload[0] uploadable_id={0} uploadable_type={1} ext={2} name={3} id={4}" -f `
-                $first.uploadable_id, $first.uploadable_type, $first.ext, $first.name, $first.id)
+            $first    = $allUploads[0]
+            $members  = ($first | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', '
+            Log ("Hudu diff: upload[0] members: {0}" -f $members)
+            Log ("Hudu diff: upload[0] uploadable_id={0} uploadable_type={1} ext={2} name={3} file_name={4} id={5}" -f `
+                $first.uploadable_id, $first.uploadable_type, $first.ext, $first.name, $first.file_name, $first.id)
         }
-        # How many HTML files exist across ALL assets (no uploadable_id filter)
-        $anyHtml = @($allUploads | Where-Object { $_.ext -eq 'html' -or $_.name -like '*.html' })
+
+        # Filter client-side by asset ID (server-side ?uploadable_id= not honoured on all Hudu versions)
+        # Covers both field name conventions: ext+name (older Hudu) and file_name (newer Hudu)
+        $htmlUploads = @($allUploads | Where-Object {
+            $_.uploadable_id -eq $assetId -and
+            ($_.ext -eq 'html' -or $_.name -like '*.html' -or $_.file_name -like '*.html')
+        })
+
+        # Diagnostic: how many HTML files exist across ALL assets (no uploadable_id filter)
+        $anyHtml = @($allUploads | Where-Object { $_.ext -eq 'html' -or $_.name -like '*.html' -or $_.file_name -like '*.html' })
         Log ("Hudu diff: HTML uploads across all assets = {0}" -f $anyHtml.Count)
 
         Log ("Hudu diff: {0} total upload(s), {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $htmlUploads.Count, $assetId)
