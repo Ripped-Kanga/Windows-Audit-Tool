@@ -1444,10 +1444,18 @@ function Get-HuduPreviousMetrics {
             ($_.ext -eq 'html' -or $_.name -like '*.html')
         })
 
-        # Diagnostic: log the last 5 uploads so we can inspect uploadable_id / ext values
-        $sampleUploads = $allUploads | Sort-Object id -Descending | Select-Object -First 5
-        Log ("Hudu diff: last 5 uploads = {0}" -f ($sampleUploads | ConvertTo-Json -Depth 2 -Compress))
+        # Diagnostic: log raw property names and values from the first upload object
         Log ("Hudu diff: asset ID used for filter = {0} (type: {1})" -f $assetId, $assetId.GetType().Name)
+        if ($allUploads.Count -gt 0) {
+            $first = $allUploads[0]
+            $propNames = ($first.PSObject.Properties | ForEach-Object { $_.Name }) -join ', '
+            Log ("Hudu diff: upload[0] properties: {0}" -f $propNames)
+            Log ("Hudu diff: upload[0] uploadable_id={0} uploadable_type={1} ext={2} name={3} id={4}" -f `
+                $first.uploadable_id, $first.uploadable_type, $first.ext, $first.name, $first.id)
+        }
+        # How many HTML files exist across ALL assets (no uploadable_id filter)
+        $anyHtml = @($allUploads | Where-Object { $_.ext -eq 'html' -or $_.name -like '*.html' })
+        Log ("Hudu diff: HTML uploads across all assets = {0}" -f $anyHtml.Count)
 
         Log ("Hudu diff: {0} total upload(s), {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $htmlUploads.Count, $assetId)
 
