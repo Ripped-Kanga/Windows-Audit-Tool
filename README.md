@@ -6,6 +6,9 @@ An optional WPF GUI wrapper (`WindowsAuditTool.exe`) provides a launch interface
 
 ---
 
+# Author's Note
+This tools was developed with AI as both a means to test AI capabilities and to also fix some holes in our teams auditability of customer endpoints. 
+
 ![Windows Audit Tool - Audit System Health Score](assets/screenshots/WAT-Audit-Report-SHS.png)
 
 ## Quick Start
