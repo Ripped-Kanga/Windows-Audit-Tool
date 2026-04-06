@@ -5661,10 +5661,10 @@ $huduBodyFragment
         Write-Host "  Hudu upload complete: $huduAssetName" -ForegroundColor Green
         if ($huduResult.FileAttached) {
             # Both report content and file attachment succeeded - local copies are redundant
-            Remove-Item -LiteralPath $HtmlReportPath     -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $HuduHtmlReportPath -Force -ErrorAction SilentlyContinue
-            Write-Action -What "Local report files removed (content preserved in Hudu)" -Kind ok
-            Log "Hudu: local report files deleted after successful upload and attachment"
+            # Remove-Item -LiteralPath $HtmlReportPath     -Force -ErrorAction SilentlyContinue
+            # Remove-Item -LiteralPath $HuduHtmlReportPath -Force -ErrorAction SilentlyContinue
+            # Write-Action -What "Local report files removed (content preserved in Hudu)" -Kind ok
+            # Log "Hudu: local report files deleted after successful upload and attachment"
         } else {
             Write-Action -What "Attachment upload failed - local report files retained" -Kind warn
             Log "Hudu: local report files retained (attachment did not succeed)"
