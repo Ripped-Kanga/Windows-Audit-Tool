@@ -168,6 +168,11 @@ public sealed class AuditRunner : IDisposable
                 parts.Add("-HuduEntryName");
                 parts.Add($"\"{config.HuduEntryName}\"");
             }
+            if (!string.IsNullOrWhiteSpace(config.HtmlAttachmentName))
+            {
+                parts.Add("-HtmlAttachmentName");
+                parts.Add($"\"{config.HtmlAttachmentName}\"");
+            }
         }
 
         return string.Join(' ', parts);

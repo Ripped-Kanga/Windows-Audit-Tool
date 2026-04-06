@@ -56,6 +56,9 @@ public static class ConfigService
                 case "huduentryname":
                     config.HuduEntryName = value;
                     break;
+                case "htmlattachmentname":
+                    config.HtmlAttachmentName = value;
+                    break;
             }
         }
 
