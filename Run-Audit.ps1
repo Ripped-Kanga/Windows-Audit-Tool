@@ -1444,6 +1444,11 @@ function Get-HuduPreviousMetrics {
             ($_.ext -eq 'html' -or $_.name -like '*.html')
         })
 
+        # Diagnostic: log the last 5 uploads so we can inspect uploadable_id / ext values
+        $sampleUploads = $allUploads | Sort-Object id -Descending | Select-Object -First 5
+        Log ("Hudu diff: last 5 uploads = {0}" -f ($sampleUploads | ConvertTo-Json -Depth 2 -Compress))
+        Log ("Hudu diff: asset ID used for filter = {0} (type: {1})" -f $assetId, $assetId.GetType().Name)
+
         Log ("Hudu diff: {0} total upload(s), {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $htmlUploads.Count, $assetId)
 
         if ($htmlUploads.Count -eq 0) {
