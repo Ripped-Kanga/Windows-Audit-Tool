@@ -1361,7 +1361,7 @@ function Add-HuduUpload {
       Uploads a file to Hudu and attaches it to the specified record.
       Uses System.Net.Http for PS 5.1 compatible multipart form upload.
       POST /api/v1/uploads with multipart/form-data.
-      Returns $true on success, $false on failure (never throws).
+      Returns the upload URL string on success, $null on failure (never throws).
     #>
     param(
         [string]$FilePath,
@@ -1394,26 +1394,34 @@ function Add-HuduUpload {
         $httpClient.Dispose()
 
         if ($response.IsSuccessStatusCode) {
-            return $true
+            # Parse the response to extract the download URL for future diff comparisons
+            $respBody = $response.Content.ReadAsStringAsync().Result
+            try {
+                $uploadObj = $respBody | ConvertFrom-Json
+                $uploadUrl = if ($uploadObj.upload.url) { $uploadObj.upload.url } elseif ($uploadObj.url) { $uploadObj.url } else { $null }
+                return $uploadUrl
+            } catch {
+                # Response wasn't parseable JSON — upload succeeded but URL unknown
+                return $null
+            }
         }
         $respBody = $response.Content.ReadAsStringAsync().Result
         Write-Action -What ("Upload failed: {0} - {1}" -f $response.StatusCode, $respBody) -Kind bad
         Log ("Hudu: upload failed - {0} {1}" -f $response.StatusCode, $respBody)
-        return $false
+        return $null
     }
     catch {
         Write-Action -What ("Upload error: {0}" -f $_.Exception.Message) -Kind bad
         Log ("Hudu: upload error - {0}" -f $_.Exception.Message)
-        return $false
+        return $null
     }
 }
 
 function Get-HuduPreviousMetrics {
     <#
-      Downloads the most recent HTML attachment from an existing Hudu asset and
-      extracts audit metrics from it. Uses server-side upload filtering
-      (?uploadable_id=&uploadable_type=Asset) for efficiency, then downloads the
-      file via Invoke-WebRequest -OutFile (binary mode) with the x-api-key header.
+      Finds the download URL of the previous run's HTML attachment by reading the
+      HUDU_REPORT_URL sentinel written to the audit log after each successful upload.
+      Downloads the report to a temp file and extracts metrics from it.
       Returns an ordered hashtable of metrics, or $null if not available. Never throws.
     #>
     param(
@@ -1422,68 +1430,29 @@ function Get-HuduPreviousMetrics {
         [int]$LayoutId
     )
     try {
-        $asset = Get-HuduAssetByName -Name $AssetName -CompanyId $CompanyId -LayoutId $LayoutId
-        if (-not $asset) {
-            Log "Hudu diff: no existing asset found for '$AssetName'"
-            return $null
-        }
-        $assetId = $asset.id
-
-        # Fetch uploads via Invoke-WebRequest + ConvertFrom-Json so PS 5.1 creates
-        # proper PSCustomObjects (Invoke-RestMethod wraps the response differently).
-        $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
-        $headers = @{ 'x-api-key' = $script:_HuduAPIKey }
-        $rawResp = Invoke-WebRequest -Uri "$baseUrl/api/v1/uploads?uploadable_id=$assetId&uploadable_type=Asset" `
-            -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-        $rawBody = if ($rawResp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($rawResp.Content) } else { $rawResp.Content }
-
-        # Log the raw response structure so we can see exactly what Hudu returns
-        Log ("Hudu diff: raw response ({0} chars): {1}" -f $rawBody.Length, $rawBody.Substring(0, [Math]::Min($rawBody.Length, 300)))
-
-        $parsed = $rawBody | ConvertFrom-Json
-        # PS 5.1: ConvertFrom-Json returns arrays as Object[] without double-wrapping
-        if ($parsed.uploads -ne $null) {
-            $allUploads = if ($parsed.uploads -is [array]) { $parsed.uploads } else { @($parsed.uploads) }
-        } else {
-            $allUploads = if ($parsed -is [array]) { $parsed } else { @($parsed) }
-        }
-
-        # Diagnostic: log first upload's actual properties via Get-Member (works in PS 5.1)
-        Log ("Hudu diff: asset ID used for filter = {0} (type: {1})" -f $assetId, $assetId.GetType().Name)
-        if ($allUploads.Count -gt 0) {
-            $first    = $allUploads[0]
-            $members  = ($first | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', '
-            Log ("Hudu diff: upload[0] members: {0}" -f $members)
-            Log ("Hudu diff: upload[0] uploadable_id={0} uploadable_type={1} ext={2} name={3} file_name={4} id={5}" -f `
-                $first.uploadable_id, $first.uploadable_type, $first.ext, $first.name, $first.file_name, $first.id)
-        }
-
-        # Filter client-side by asset ID (server-side ?uploadable_id= not honoured on all Hudu versions)
-        # Covers both field name conventions: ext+name (older Hudu) and file_name (newer Hudu)
-        $htmlUploads = @($allUploads | Where-Object {
-            $_.uploadable_id -eq $assetId -and
-            ($_.ext -eq 'html' -or $_.name -like '*.html' -or $_.file_name -like '*.html')
-        })
-
-        # Diagnostic: how many HTML files exist across ALL assets (no uploadable_id filter)
-        $anyHtml = @($allUploads | Where-Object { $_.ext -eq 'html' -or $_.name -like '*.html' -or $_.file_name -like '*.html' })
-        Log ("Hudu diff: HTML uploads across all assets = {0}" -f $anyHtml.Count)
-
-        Log ("Hudu diff: {0} total upload(s), {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $htmlUploads.Count, $assetId)
-
-        if ($htmlUploads.Count -eq 0) {
-            Log "Hudu diff: no HTML attachment found for asset $assetId"
+        # Read the log file and find the last HUDU_REPORT_URL entry written by a prior run.
+        # The diff runs before the current run's upload, so the last entry is always previous.
+        if (-not (Test-Path -LiteralPath $LogPath)) {
+            Log "Hudu diff: log file not found, cannot retrieve previous report URL"
             return $null
         }
 
-        # Pick the most recent (highest ID)
-        $target = $htmlUploads | Sort-Object id -Descending | Select-Object -First 1
-        Log ("Hudu diff: downloading '{0}' (ID {1}) from {2}" -f $target.name, $target.id, $target.url)
+        $lastUrlLine = Select-String -LiteralPath $LogPath -Pattern 'HUDU_REPORT_URL: (.+)' |
+            Select-Object -Last 1
 
-        # Download to a temp file in binary mode -- matches the approach confirmed to work with x-api-key auth
-        $tmpFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName() + '.html')
+        if (-not $lastUrlLine) {
+            Log "Hudu diff: no HUDU_REPORT_URL entry in log (first run)"
+            return $null
+        }
+
+        $reportUrl = $lastUrlLine.Matches[0].Groups[1].Value.Trim()
+        Log ("Hudu diff: found previous report URL in log: {0}" -f $reportUrl)
+
+        # Download to a temp file in binary mode using the API key header
+        $headers  = @{ 'x-api-key' = $script:_HuduAPIKey }
+        $tmpFile  = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName() + '.html')
         try {
-            Invoke-WebRequest -Uri $target.url -Headers $headers -OutFile $tmpFile -ErrorAction Stop
+            Invoke-WebRequest -Uri $reportUrl -Headers $headers -OutFile $tmpFile -ErrorAction Stop
             $previousHtml = Get-Content -LiteralPath $tmpFile -Raw -Encoding UTF8 -ErrorAction Stop
         }
         finally {
@@ -1491,7 +1460,7 @@ function Get-HuduPreviousMetrics {
         }
 
         if ([string]::IsNullOrWhiteSpace($previousHtml) -or $previousHtml.Length -lt 5000) {
-            Log ("Hudu diff: downloaded file too small ({0} chars) - may be login page or empty" -f $previousHtml.Length)
+            Log ("Hudu diff: downloaded content too small ({0} chars) - URL may be expired or inaccessible" -f $previousHtml.Length)
             return $null
         }
 
@@ -1970,10 +1939,13 @@ function Publish-HuduAsset {
                 Write-Action -What "Attaching report: $displayName" -Kind run
                 $uploadParams = @{ FilePath = $AttachmentPath; RecordId = $assetId; RecordType = "Asset" }
                 if ($AttachmentName) { $uploadParams['FileName'] = $AttachmentName }
-                $uploaded = Add-HuduUpload @uploadParams
-                if ($uploaded) {
+                $uploadUrl = Add-HuduUpload @uploadParams
+                if ($uploadUrl -ne $null) {
                     Write-Action -What "Attachment uploaded successfully" -Kind ok
                     Log ("Hudu: attached '{0}' to asset {1}" -f $displayName, $assetId)
+                    # Write the download URL with a sentinel so future runs can find and download
+                    # the previous report for diff comparison without querying the uploads API.
+                    if ($uploadUrl) { Log ("HUDU_REPORT_URL: {0}" -f $uploadUrl) }
                     $fileAttached = $true
                 } else {
                     Write-Action -What ("Attachment upload failed (asset was still {0})." -f $verb) -Kind warn
@@ -5575,10 +5547,8 @@ $huduBodyFragment
         Write-Host "[Hudu] Checking for previous report to compare..." -ForegroundColor Cyan
         Log "Hudu diff: looking up previous report for '$huduAssetName'"
 
-        $diffLayout = Get-HuduAssetLayoutByName -Name $HuduAssetLayoutName
-        if ($diffLayout) {
-            $prevMetrics = Get-HuduPreviousMetrics -AssetName $huduAssetName -CompanyId $script:_HuduCompanyId -LayoutId $diffLayout.id
-            if ($prevMetrics -and $prevMetrics.Count -gt 0) {
+        $prevMetrics = Get-HuduPreviousMetrics
+        if ($prevMetrics -and $prevMetrics.Count -gt 0) {
                 Write-Action -What ("Previous report found, extracting current metrics for comparison") -Kind run
 
                 # Extract current metrics from the standalone HTML report we just wrote
@@ -5612,12 +5582,9 @@ $huduBodyFragment
                     Log "Hudu diff: no changes detected"
                     $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
                 }
-            } else {
-                Write-Action -What "No previous report found (first run or no HTML attachment yet)" -Kind info
-                Log "Hudu diff: no previous report available"
-            }
         } else {
-            Log "Hudu diff: could not find layout '$HuduAssetLayoutName' for diff lookup"
+            Write-Action -What "No previous report found (first run)" -Kind info
+            Log "Hudu diff: no previous report available"
         }
     } catch {
         Write-Action -What ("Report comparison failed: {0}" -f $_.Exception.Message) -Kind warn
