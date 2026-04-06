@@ -78,7 +78,12 @@ All Hudu functions live in the `# Hudu API Functions` region, defined before the
 | `Get-HuduCompanyBySlug` | Paginates all companies; returns the first whose slug matches the hex string |
 | `Get-HuduAssetByName` | Searches assets by name within a company+layout; paginates Hudu's contains-search and exact-matches locally; returns first match or `$null` |
 | `Add-HuduUpload` | Multipart file upload via `System.Net.Http` (PS 5.1 compatible); attaches to an asset record |
-| `Publish-HuduAsset` | Find-or-update: searches for an existing entry by name (`GET`), updates it (`PUT`) if found, creates it (`POST`) if not; auto-detects first RichText field; optionally attaches the standalone HTML report |
+| `Publish-HuduAsset` | Find-or-update: searches for an existing entry by name (`GET`), updates it (`PUT`) if found, creates it (`POST`) if not; auto-detects first RichText field; optionally attaches the standalone HTML report; writes metrics JSON to "Audit Metrics" field for diff comparison |
+| `Get-HuduPreviousMetrics` | Reads the "Audit Metrics" JSON field from an existing Hudu asset and deserialises it to an ordered hashtable for diff comparison; returns `$null` on first run or if field is absent |
+| `Extract-AuditMetrics` | Extracts key metrics (health score, E8 controls, security baseline, TLS, software list, etc.) from the standalone HTML report via regex; returns an ordered hashtable |
+| `Compare-AuditReports` | Compares previous and current metric hashtables; classifies each change as good/bad/warn/info; returns a list of change objects |
+| `Build-DiffSectionHtml` | Builds the "Changes Since Last Audit" HTML section for the standalone report |
+| `Build-DiffSectionHuduHtml` | Builds the inline-styled Hudu-compatible version of the diff section |
 
 ### 5. HTML Builder Infrastructure
 
