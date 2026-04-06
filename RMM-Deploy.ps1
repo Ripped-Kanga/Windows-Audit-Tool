@@ -33,6 +33,8 @@
                                 $ComputerName, $Date, $CustomerName
       -HtmlAttachmentName         Override the Hudu HTML attachment filename. Accepts
                               the same tokens. Default: "$Date - $ComputerName".
+      -KeepReports            Number of dated HTML report archives to retain on disk.
+                              Default: 6 (roughly six months at one run per month).
 
     EXIT CODES
       0  Audit completed (pass-through from Run-Audit.ps1)
@@ -56,6 +58,7 @@ param(
     [string]$HuduAssetLayoutName,
     [string]$HuduEntryName,
     [string]$HtmlAttachmentName,
+    [int]$KeepReports,
     [switch]$ForceRun
 )
 
@@ -332,6 +335,7 @@ if ($PSBoundParameters.ContainsKey('HuduCompanySlug'))     { $argList += @('-Hud
 if ($PSBoundParameters.ContainsKey('HuduAssetLayoutName')) { $argList += @('-HuduAssetLayoutName', $HuduAssetLayoutName) }
 if ($ResolvedHuduEntryName)                                { $argList += @('-HuduEntryName', $ResolvedHuduEntryName) }
 if ($ResolvedHtmlAttachmentName)                               { $argList += @('-HtmlAttachmentName', $ResolvedHtmlAttachmentName) }
+if ($PSBoundParameters.ContainsKey('KeepReports'))             { $argList += @('-KeepReports', $KeepReports) }
 
 # Log argument list with API key masked
 $logArgs = $argList | ForEach-Object {

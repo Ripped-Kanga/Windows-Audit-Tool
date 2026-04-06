@@ -58,7 +58,13 @@ param(
     # When not set the attachment uses the local report filename.
     # The .html extension is added automatically if not present.
     [Alias('html-attachment-name')]
-    [string]$HtmlAttachmentName
+    [string]$HtmlAttachmentName,
+
+    # Number of dated HTML report archives to keep in the Results folder.
+    # Older archives beyond this limit are deleted automatically. Default: 6.
+    [Alias('keep-reports')]
+    [ValidateRange(1, 99)]
+    [int]$KeepReports = 6
 )
 
 $ErrorActionPreference = "Stop"
@@ -1361,7 +1367,7 @@ function Add-HuduUpload {
       Uploads a file to Hudu and attaches it to the specified record.
       Uses System.Net.Http for PS 5.1 compatible multipart form upload.
       POST /api/v1/uploads with multipart/form-data.
-      Returns the upload URL string on success, $null on failure (never throws).
+      Returns $true on success, $false on failure (never throws).
     #>
     param(
         [string]$FilePath,
@@ -1394,16 +1400,7 @@ function Add-HuduUpload {
         $httpClient.Dispose()
 
         if ($response.IsSuccessStatusCode) {
-            # Parse the response to extract the download URL for future diff comparisons
-            $respBody = $response.Content.ReadAsStringAsync().Result
-            try {
-                $uploadObj = $respBody | ConvertFrom-Json
-                $uploadUrl = if ($uploadObj.upload.url) { $uploadObj.upload.url } elseif ($uploadObj.url) { $uploadObj.url } else { $null }
-                return $uploadUrl
-            } catch {
-                # Response wasn't parseable JSON — upload succeeded but URL unknown
-                return $null
-            }
+            return $true
         }
         $respBody = $response.Content.ReadAsStringAsync().Result
         Write-Action -What ("Upload failed: {0} - {1}" -f $response.StatusCode, $respBody) -Kind bad
@@ -1413,71 +1410,36 @@ function Add-HuduUpload {
     catch {
         Write-Action -What ("Upload error: {0}" -f $_.Exception.Message) -Kind bad
         Log ("Hudu: upload error - {0}" -f $_.Exception.Message)
-        return $null
+        return $false
     }
 }
 
-function Get-HuduPreviousMetrics {
+function Remove-OldAuditArchives {
     <#
-      Finds the download URL of the previous run's HTML attachment by reading the
-      HUDU_REPORT_URL sentinel written to the audit log after each successful upload.
-      Downloads the report to a temp file and extracts metrics from it.
-      Returns an ordered hashtable of metrics, or $null if not available. Never throws.
+      Keeps only the $MaxKeep most recent dated archive copies of the HTML report,
+      deleting any older ones. Archives are identified by the pattern:
+        <baseName>-YYYYMMDD-HHmmss.html
+      where <baseName> is the filename stem of $ReportPath (without extension).
+      Never throws.
     #>
     param(
-        [string]$AssetName,
-        [int]$CompanyId,
-        [int]$LayoutId
+        [string]$ReportPath,
+        [int]$MaxKeep = 6
     )
     try {
-        # Read the log file and find the last HUDU_REPORT_URL entry written by a prior run.
-        # The diff runs before the current run's upload, so the last entry is always previous.
-        if (-not (Test-Path -LiteralPath $LogPath)) {
-            Log "Hudu diff: log file not found, cannot retrieve previous report URL"
-            return $null
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($ReportPath)
+        $dir      = [System.IO.Path]::GetDirectoryName($ReportPath)
+        $archives = @(Get-ChildItem -LiteralPath $dir -Filter "$baseName-????????-??????.html" `
+                        -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($archives.Count -gt $MaxKeep) {
+            $toDelete = $archives | Select-Object -First ($archives.Count - $MaxKeep)
+            foreach ($f in $toDelete) {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                Log ("Archive cleanup: removed {0}" -f $f.Name)
+            }
         }
-
-        $lastUrlLine = Select-String -LiteralPath $LogPath -Pattern 'HUDU_REPORT_URL: (.+)' |
-            Select-Object -Last 1
-
-        if (-not $lastUrlLine) {
-            Log "Hudu diff: no HUDU_REPORT_URL entry in log (first run)"
-            return $null
-        }
-
-        $reportUrl = $lastUrlLine.Matches[0].Groups[1].Value.Trim()
-        Log ("Hudu diff: found previous report URL in log: {0}" -f $reportUrl)
-
-        # Download to a temp file in binary mode using the API key header
-        $headers  = @{ 'x-api-key' = $script:_HuduAPIKey }
-        $tmpFile  = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName() + '.html')
-        try {
-            Invoke-WebRequest -Uri $reportUrl -Headers $headers -OutFile $tmpFile -ErrorAction Stop
-            $previousHtml = Get-Content -LiteralPath $tmpFile -Raw -Encoding UTF8 -ErrorAction Stop
-        }
-        finally {
-            Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-        }
-
-        if ([string]::IsNullOrWhiteSpace($previousHtml) -or $previousHtml.Length -lt 5000) {
-            Log ("Hudu diff: downloaded content too small ({0} chars) - URL may be expired or inaccessible" -f $previousHtml.Length)
-            return $null
-        }
-
-        Log ("Hudu diff: downloaded {0} chars, extracting metrics..." -f $previousHtml.Length)
-        $metrics = Extract-AuditMetrics -Html $previousHtml
-
-        if ($metrics.Count -eq 0) {
-            Log "Hudu diff: no metrics could be extracted from downloaded report"
-            return $null
-        }
-
-        Log ("Hudu diff: extracted {0} metric(s) from previous report" -f $metrics.Count)
-        return $metrics
-    }
-    catch {
-        Log ("Hudu diff: failed to retrieve previous report - {0}" -f $_.Exception.Message)
-        return $null
+    } catch {
+        Log ("Archive cleanup failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -1939,13 +1901,10 @@ function Publish-HuduAsset {
                 Write-Action -What "Attaching report: $displayName" -Kind run
                 $uploadParams = @{ FilePath = $AttachmentPath; RecordId = $assetId; RecordType = "Asset" }
                 if ($AttachmentName) { $uploadParams['FileName'] = $AttachmentName }
-                $uploadUrl = Add-HuduUpload @uploadParams
-                if ($uploadUrl -ne $null) {
+                $uploaded = Add-HuduUpload @uploadParams
+                if ($uploaded) {
                     Write-Action -What "Attachment uploaded successfully" -Kind ok
                     Log ("Hudu: attached '{0}' to asset {1}" -f $displayName, $assetId)
-                    # Write the download URL with a sentinel so future runs can find and download
-                    # the previous report for diff comparison without querying the uploads API.
-                    if ($uploadUrl) { Log ("HUDU_REPORT_URL: {0}" -f $uploadUrl) }
                     $fileAttached = $true
                 } else {
                     Write-Action -What ("Attachment upload failed (asset was still {0})." -f $verb) -Kind warn
@@ -5402,9 +5361,26 @@ $($Html.ToString())
 </html>
 "@
 
+    # Archive the previous report before overwriting so diffs have history to compare against
+    if (Test-Path -LiteralPath $HtmlReportPath) {
+        try {
+            $archiveStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $archiveBase  = [System.IO.Path]::GetFileNameWithoutExtension($HtmlReportPath)
+            $archivePath  = Join-Path ([System.IO.Path]::GetDirectoryName($HtmlReportPath)) `
+                                      "$archiveBase-$archiveStamp.html"
+            Copy-Item -LiteralPath $HtmlReportPath -Destination $archivePath -Force
+            Log ("Archived previous report to {0}" -f $archivePath)
+        } catch {
+            Log ("Could not archive previous report: {0}" -f $_.Exception.Message)
+        }
+    }
+
     $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
     Write-Host "HTML report saved to $HtmlReportPath" -ForegroundColor Green
     Log "HTML report written to $HtmlReportPath"
+
+    # Keep only the most recent $KeepReports archives
+    Remove-OldAuditArchives -ReportPath $HtmlReportPath -MaxKeep $KeepReports
 
     # ---- Hudu-compatible report (only when -HuduReport is enabled) ----
     if ($HuduReport -and $HuduValid) {
@@ -5544,47 +5520,55 @@ $huduBodyFragment
     $diffSectionHuduHtml = ''
     $huduScoreChange     = $null
     try {
-        Write-Host "[Hudu] Checking for previous report to compare..." -ForegroundColor Cyan
-        Log "Hudu diff: looking up previous report for '$huduAssetName'"
+        Write-Host "[Hudu] Comparing with previous audit metrics..." -ForegroundColor Cyan
 
-        $prevMetrics = Get-HuduPreviousMetrics
+        $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
+        $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
+
+        # Find the most recent dated archive to use as the previous report
+        $prevMetrics = $null
+        $archiveBase = [System.IO.Path]::GetFileNameWithoutExtension($HtmlReportPath)
+        $archiveDir  = [System.IO.Path]::GetDirectoryName($HtmlReportPath)
+        $prevArchive = @(Get-ChildItem -LiteralPath $archiveDir -Filter "$archiveBase-????????-??????.html" `
+                            -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1)
+        if ($prevArchive) {
+            $prevHtml    = Get-Content -LiteralPath $prevArchive[0].FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            $prevMetrics = if ($prevHtml) { Extract-AuditMetrics -Html $prevHtml } else { $null }
+            if ($prevMetrics -and $prevMetrics.Count -gt 0) {
+                Log ("Hudu diff: loaded previous metrics from archive {0}" -f $prevArchive[0].Name)
+            }
+        }
+
         if ($prevMetrics -and $prevMetrics.Count -gt 0) {
-                Write-Action -What ("Previous report found, extracting current metrics for comparison") -Kind run
+            Write-Action -What "Previous metrics found, comparing..." -Kind run
 
-                # Extract current metrics from the standalone HTML report we just wrote
-                $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
-                $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
+            $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
 
-                $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
-
-                # Calculate numeric score change for the Hudu field
-                if ($prevMetrics.Contains('Health Score') -and $currMetrics.Contains('Health Score')) {
-                    try {
-                        $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
-                        Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
-                    } catch {
-                        $huduScoreChange = 'No Change'
-                        Log "Hudu diff: could not calculate score change, defaulting to 'No Change'"
-                    }
-                } else {
+            # Calculate numeric score change for the Hudu field
+            if ($prevMetrics.Contains('Health Score') -and $currMetrics.Contains('Health Score')) {
+                try {
+                    $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
+                    Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
+                } catch {
                     $huduScoreChange = 'No Change'
-                    Log "Hudu diff: health score missing from previous or current metrics, writing 'No Change'"
+                    Log "Hudu diff: could not calculate score change"
                 }
+            } else {
+                $huduScoreChange = 'No Change'
+            }
 
-                if ($auditChanges -and $auditChanges.Count -gt 0) {
-                    Write-Action -What ("{0} change(s) detected since last audit" -f $auditChanges.Count) -Kind info
-                    Log ("Hudu diff: {0} change(s) detected" -f $auditChanges.Count)
-
-                    $diffSectionHtml     = Build-DiffSectionHtml -Changes $auditChanges
-                    $diffSectionHuduHtml = Build-DiffSectionHuduHtml -Changes $auditChanges
-                } else {
-                    Write-Action -What "No significant changes since last audit" -Kind ok
-                    Log "Hudu diff: no changes detected"
-                    $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
-                }
+            if ($auditChanges -and $auditChanges.Count -gt 0) {
+                Write-Action -What ("{0} change(s) detected since last audit" -f $auditChanges.Count) -Kind info
+                Log ("Hudu diff: {0} change(s) detected" -f $auditChanges.Count)
+                $diffSectionHtml     = Build-DiffSectionHtml -Changes $auditChanges
+                $diffSectionHuduHtml = Build-DiffSectionHuduHtml -Changes $auditChanges
+            } else {
+                Write-Action -What "No significant changes since last audit" -Kind ok
+                Log "Hudu diff: no changes detected"
+                $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
+            }
         } else {
-            Write-Action -What "No previous report found (first run)" -Kind info
-            Log "Hudu diff: no previous report available"
+            Write-Action -What "No previous audit found (first run)" -Kind info
         }
     } catch {
         Write-Action -What ("Report comparison failed: {0}" -f $_.Exception.Message) -Kind warn

@@ -78,8 +78,8 @@ All Hudu functions live in the `# Hudu API Functions` region, defined before the
 | `Get-HuduCompanyBySlug` | Paginates all companies; returns the first whose slug matches the hex string |
 | `Get-HuduAssetByName` | Searches assets by name within a company+layout; paginates Hudu's contains-search and exact-matches locally; returns first match or `$null` |
 | `Add-HuduUpload` | Multipart file upload via `System.Net.Http` (PS 5.1 compatible); attaches to an asset record |
-| `Publish-HuduAsset` | Find-or-update: searches for an existing entry by name (`GET`), updates it (`PUT`) if found, creates it (`POST`) if not; auto-detects first RichText field; optionally attaches the standalone HTML report; writes metrics JSON to "Audit Metrics" field for diff comparison |
-| `Get-HuduPreviousMetrics` | Reads the "Audit Metrics" JSON field from an existing Hudu asset and deserialises it to an ordered hashtable for diff comparison; returns `$null` on first run or if field is absent |
+| `Publish-HuduAsset` | Find-or-update: searches for an existing entry by name (`GET`), updates it (`PUT`) if found, creates it (`POST`) if not; auto-detects first RichText field; optionally attaches the standalone HTML report |
+| `Remove-OldAuditArchives` | Deletes dated archive copies of the HTML report beyond the `$KeepReports` limit; archives are named `<baseName>-YYYYMMDD-HHmmss.html`; runs on every audit run, not just Hudu-enabled ones |
 | `Extract-AuditMetrics` | Extracts key metrics (health score, E8 controls, security baseline, TLS, software list, etc.) from the standalone HTML report via regex; returns an ordered hashtable |
 | `Compare-AuditReports` | Compares previous and current metric hashtables; classifies each change as good/bad/warn/info; returns a list of change objects |
 | `Build-DiffSectionHtml` | Builds the "Changes Since Last Audit" HTML section for the standalone report |
@@ -125,7 +125,10 @@ The script runs 13 sequential audit sections, each introduced with `Write-Step`:
 After all sections run, the script assembles the final HTML document:
 - Builds the TOC from the `$Toc` list
 - Wraps the `$Html` StringBuilder output in a full `<!doctype html>` page with embedded CSS
-- Writes to `$HtmlReportPath` with `-Encoding utf8`
+- If a previous report already exists at `$HtmlReportPath`, copies it to a dated archive (`<baseName>-YYYYMMDD-HHmmss.html`) before overwriting
+- Writes the new report to `$HtmlReportPath` with `-Encoding utf8`
+- Runs `Remove-OldAuditArchives` to trim archives beyond `$KeepReports` (default 6)
+- When Hudu is enabled, reads the most recent archive to extract previous metrics, compares with the current report, and injects a "Changes Since Last Audit" diff section into both the standalone HTML and the Hudu RichText field
 - Logs success or failure
 
 ---
@@ -284,6 +287,7 @@ These are non-negotiable design decisions. Do not work around them:
    - `-HuduAPIKey` / `-HuduBaseURL` / `-HuduCompanySlug` / `-HuduAssetLayoutName` — Hudu API credentials and target layout
    - `-HuduEntryName "Name"` — optional; sets the name of the individual Hudu entry; enables find-or-update behaviour (existing entry updated in place, new entry created if not found); when omitted the default name is `"HOSTNAME - dd/MM/yyyy"`
    - `-HtmlAttachmentName "Name"` — optional; sets the filename of the HTML report attachment uploaded to Hudu; accepts `$ComputerName`, `$Date`, `$CustomerName` tokens; `.html` appended automatically if missing; when omitted uses the local report filename
+   - `-KeepReports <int>` — number of dated HTML report archives to retain in the Results folder; defaults to `6`; passed through from `RMM-Deploy.ps1` when provided
    Do not add configuration parameters such as `-Verbose`, `-OutputPath`, or `-SkipSection`.
 
 3. **Preserve graceful degradation.** Every data-gathering call must use `Safe-Invoke` and handle the `"Error"` return gracefully. A broken section must never stop the audit.

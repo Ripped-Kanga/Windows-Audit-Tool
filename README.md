@@ -60,7 +60,7 @@ The deploy script is designed to be scheduled as a **daily RMM automation**. It 
 -HuduReport -HuduAPIKey "your-api-key" -HuduBaseURL "https://your-instance.huducloud.com" -HuduCompanySlug "Hex String" -HuduAssetLayoutName "Computers" -HuduEntryName $ComputerName -HtmlAttachmentName "$Date - $ComputerName"
 ```
 
-The `-HuduEntryName` parameter controls the Hudu asset name. The `-HtmlAttachmentName` parameter controls the filename of the HTML report attachment uploaded to Hudu. Both support the following tokens, which are expanded on the endpoint at runtime (enter them literally in the RMM parameter field -- no quotes needed):
+The `-HuduEntryName` parameter controls the Hudu asset name. The `-HtmlAttachmentName` parameter controls the filename of the HTML report attachment uploaded to Hudu. Both support the following tokens, which are expanded on the endpoint at runtime (enter them literally in the RMM parameter field -- no quotes needed). Use `-KeepReports <n>` to control how many dated report archives are retained on the endpoint (default: `6`):
 
 | Token | Expands to | Example |
 |---|---|---|
@@ -119,6 +119,17 @@ Output paths are determined by deployment context, not elevation level.
 > The first few log entries written before the output directory is resolved always land in `C:\Windows\Temp\AuditLog.txt` (the bootstrap log). Once the deployment context is determined, logging continues at the final path above. The `Windows Audit Tool` output subdirectory is created automatically if it does not exist.
 
 > When using `RMM-Deploy.ps1`, the script is cached at `C:\Program Files\Windows Audit Tool\Scripts\Run-Audit.ps1` and runs from that path, so RMM mode is activated automatically.
+
+**Report archives:**
+
+Before writing each new report, the script copies the existing report to a dated archive file in the same Results folder (e.g. `COMPUTERNAME-Audit-20260406-143022.html`). Only the most recent **6 archives** are kept — older ones are deleted automatically. Pass `-KeepReports <n>` to change this limit:
+
+```powershell
+.\Run-Audit.ps1 -KeepReports 12   # keep a full year of monthly archives
+.\Run-Audit.ps1 -KeepReports 3    # keep the last quarter only
+```
+
+When Hudu integration is enabled, the most recent archive is used to generate a **"Changes Since Last Audit"** diff section in both the standalone HTML report and the Hudu RichText field, highlighting improvements and regressions between runs.
 
 ---
 
@@ -220,6 +231,7 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
 | `-HuduCompanySlug` | The hex slug from your Hudu company URL (e.g. `0297b67dbba7` from `https://instance.huducloud.com/c/0297b67dbba7`) |
 | `-HuduAssetLayoutName` | The name of the asset layout to write into (e.g. `Audit Reports`, `Atera Devices`) |
 | `-HuduEntryName` | *(Optional)* The name of the individual entry within the layout. If an entry with this name already exists it is updated in place; otherwise a new entry is created. When omitted, the default name is `HOSTNAME - dd/MM/yyyy` (always creates a new dated entry). |
+| `-KeepReports` | *(Optional)* Number of dated HTML report archives to retain on disk. Default: `6`. Older archives beyond this limit are deleted after each run. |
 
 **Example — create a new dated entry each run:**
 ```powershell
@@ -246,6 +258,7 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
 3. If `-HuduEntryName` is set, the script searches the target layout for an existing entry with that name and updates it (PUT); if none is found, or if `-HuduEntryName` is omitted, a new entry is created (POST)
 4. The full standalone HTML report is attached to the entry as a downloadable file
 5. A local Hudu preview file is also saved for reference; both local files are removed after a successful upload and attachment
+6. If a previous report archive exists on disk, the script compares key metrics between runs and injects a **"Changes Since Last Audit"** section into both the Hudu entry and the standalone HTML, highlighting health score changes, new/resolved issues, and software changes
 
 **Asset layout requirements:** The target asset layout must have at least one RichText field. The script automatically detects and uses the first RichText field in the layout.
 
