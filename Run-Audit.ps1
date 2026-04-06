@@ -1437,7 +1437,12 @@ function Get-HuduPreviousMetrics {
             -Headers $headers -Method Get -ErrorAction Stop
 
         $allUploads = if ($uploadsResp.uploads) { @($uploadsResp.uploads) } else { @($uploadsResp) }
-        $htmlUploads = @($allUploads | Where-Object { $_.ext -eq 'html' -or $_.name -like '*.html' })
+
+        # Filter client-side by asset ID (server-side ?uploadable_id= not honoured on all Hudu versions)
+        $htmlUploads = @($allUploads | Where-Object {
+            $_.uploadable_id -eq $assetId -and
+            ($_.ext -eq 'html' -or $_.name -like '*.html')
+        })
 
         Log ("Hudu diff: {0} total upload(s), {1} HTML upload(s) for asset {2}" -f $allUploads.Count, $htmlUploads.Count, $assetId)
 
