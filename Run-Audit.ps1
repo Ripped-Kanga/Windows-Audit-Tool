@@ -2233,6 +2233,66 @@ if ($os -ne "Error" -and $os) {
 }
 Html-AddKV -Pairs $osKv
 
+# --- Windows Licensing ---
+Html-Add "<h3>Windows Licensing</h3>"
+$licProduct = Safe-Invoke {
+    Get-CimInstance -ClassName SoftwareLicensingProduct -Namespace root/cimv2 |
+        Where-Object { $_.PartialProductKey -and $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' } |
+        Select-Object -First 1 Name, LicenseStatus, LicenseFamily, PartialProductKey, Description
+} "Windows License Product"
+$licService = Safe-Invoke {
+    Get-CimInstance -ClassName SoftwareLicensingService -Namespace root/cimv2 |
+        Select-Object -First 1 KeyManagementServiceMachine, DiscoveredKeyManagementServiceMachinePort
+} "Windows License Service"
+
+if ($licProduct -ne "Error" -and $licProduct) {
+    $licStatusMap = @{
+        0 = 'Unlicensed'; 1 = 'Licensed'; 2 = 'OOB Grace (Out-of-Box Grace Period)'
+        3 = 'OOT Grace (Out-of-Tolerance Grace Period)'; 4 = 'Non-Genuine Grace'; 5 = 'Notification'; 6 = 'Extended Grace'
+    }
+    $licStatusNum  = [int]$licProduct.LicenseStatus
+    $licStatusText = if ($licStatusMap.ContainsKey($licStatusNum)) { $licStatusMap[$licStatusNum] } else { "Unknown ($licStatusNum)" }
+    $isLicensed    = ($licStatusNum -eq 1)
+    $isGrace       = ($licStatusNum -in @(2, 3, 6))
+
+    $licChannel = 'Unknown'
+    if ($licProduct.Description) {
+        if      ($licProduct.Description -match 'KMS')                      { $licChannel = 'Volume (KMS)' }
+        elseif  ($licProduct.Description -match 'MAK')                      { $licChannel = 'Volume (MAK)' }
+        elseif  ($licProduct.Description -match 'ADBA|Active Directory')    { $licChannel = 'Volume (ADBA)' }
+        elseif  ($licProduct.Description -match 'OEM')                      { $licChannel = 'OEM' }
+        elseif  ($licProduct.Description -match 'Retail|RETAIL')            { $licChannel = 'Retail' }
+    }
+
+    $licKv = [ordered]@{
+        'Activation Status' = $licStatusText
+        'License Channel'   = $licChannel
+        'Partial Key'       = if ($licProduct.PartialProductKey) { "XXXXX-XXXXX-XXXXX-XXXXX-$($licProduct.PartialProductKey)" } else { 'N/A' }
+    }
+    if ($licProduct.LicenseFamily) { $licKv['License Family'] = $licProduct.LicenseFamily }
+    if ($licService -ne "Error" -and $licService -and $licService.KeyManagementServiceMachine) {
+        $kmsPort = if ($licService.DiscoveredKeyManagementServiceMachinePort) { $licService.DiscoveredKeyManagementServiceMachinePort } else { 'N/A' }
+        $licKv['KMS Server'] = "$($licService.KeyManagementServiceMachine):$kmsPort"
+    }
+    Html-AddKV -Pairs $licKv
+
+    if ($isLicensed) {
+        Write-Action -What "Windows Activation: Licensed ($licChannel)" -Kind ok
+        Html-AddNote -Text "Windows is properly activated and licensed." -Kind good
+    } elseif ($isGrace) {
+        Write-Action -What ("Windows Activation: {0}" -f $licStatusText) -Kind warn
+        Html-AddNote -Text ("Windows activation is in a grace period ({0}). Activation is required before the grace period expires to maintain full functionality." -f $licStatusText) -Kind warn `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/volume-activation/volume-activation-windows-10" -KbTitle "Windows Volume Activation"
+    } else {
+        Write-Action -What ("Windows Activation: {0} -- HIGH ALERT" -f $licStatusText) -Kind bad
+        Html-AddNote -Text ("Windows is NOT activated (Status: {0}). This is a high-severity licensing issue that may invalidate support agreements, expose the organisation to compliance risk, and indicates potential use of unlicensed software." -f $licStatusText) -Kind bad `
+            -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/volume-activation/volume-activation-windows-10" -KbTitle "Windows Volume Activation"
+    }
+} else {
+    Write-Action -What "Windows Licensing: Could not retrieve licensing information." -Kind warn
+    Html-AddNote -Text "Could not retrieve Windows licensing information from the SoftwareLicensing WMI namespace." -Kind warn
+}
+
 # --- Hardware ---
 Html-Add "<h3>Hardware</h3>"
 $hwKv = [ordered]@{}
