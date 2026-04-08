@@ -72,7 +72,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.3.2"
+$ScriptVersion = "1.4.3.3"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -241,7 +241,6 @@ function Write-PrivilegedGate {
         return $true
     } else {
         Write-Action -What ("Skipped (not elevated): {0}" -f $What) -Kind skip
-        Log ("Skipped (not elevated): {0}" -f $What)
         return $false
     }
 }
@@ -970,7 +969,7 @@ function Convert-ToHuduInline {
 function Html-Add {
     param([string]$Line)
     [void]$Html.AppendLine($Line)
-    [void]$HuduHtml.AppendLine((Convert-ToHuduInline $Line))
+    if ($HuduReport) { [void]$HuduHtml.AppendLine((Convert-ToHuduInline $Line)) }
 }
 
 $SectionNumber = 0
@@ -1188,20 +1187,31 @@ function Invoke-SelfUpdate {
         return $false
     }
 
+    function Download-Asset {
+        param([string]$Url, [string]$Target, [string]$Label, [int]$TimeoutSec, [string]$OkMessage, [string]$WarnMessage)
+        try {
+            Write-Action -What $Label -Kind run
+            Invoke-WebRequest -Uri $Url -OutFile $Target -TimeoutSec $TimeoutSec -ErrorAction Stop
+            Write-Action -What $OkMessage -Kind ok
+            Log ("Self-update: {0} from {1}" -f $OkMessage, $Url)
+            return $true
+        } catch {
+            Write-Action -What ("{0}: {1}" -f $WarnMessage, $_.Exception.Message) -Kind warn
+            Log ("Self-update: {0} - {1}" -f $WarnMessage, $_.Exception.Message)
+            return $false
+        }
+    }
+
     $updated = $false
 
     # Download .ps1
     if ($IncludeScript -and $UpdateInfo.Ps1DownloadUrl) {
         $ps1Target = Join-Path $localScriptDir "Run-Audit.ps1"
-        try {
-            Write-Action -What "Downloading Run-Audit.ps1..." -Kind run
-            Invoke-WebRequest -Uri $UpdateInfo.Ps1DownloadUrl -OutFile $ps1Target -TimeoutSec 30 -ErrorAction Stop
-            Write-Action -What "Updated Run-Audit.ps1" -Kind ok
-            Log ("Self-update: downloaded Run-Audit.ps1 from {0}" -f $UpdateInfo.Ps1DownloadUrl)
+        if (Download-Asset -Url $UpdateInfo.Ps1DownloadUrl -Target $ps1Target -TimeoutSec 30 `
+                -Label "Downloading Run-Audit.ps1..." `
+                -OkMessage "Updated Run-Audit.ps1" `
+                -WarnMessage "Failed to download Run-Audit.ps1") {
             $updated = $true
-        } catch {
-            Write-Action -What ("Failed to download Run-Audit.ps1: {0}" -f $_.Exception.Message) -Kind warn
-            Log ("Self-update: failed to download .ps1 - {0}" -f $_.Exception.Message)
         }
     }
 
@@ -1211,28 +1221,20 @@ function Invoke-SelfUpdate {
         $exeTemp   = Join-Path $localScriptDir "Run-Audit.exe.update"
 
         if ($runningAsExe) {
-            # Running exe is locked - download to temp file for manual swap
-            try {
-                Write-Action -What "Downloading Run-Audit.exe (staged for next launch)..." -Kind run
-                Invoke-WebRequest -Uri $UpdateInfo.ExeDownloadUrl -OutFile $exeTemp -TimeoutSec 60 -ErrorAction Stop
-                Write-Action -What "Downloaded Run-Audit.exe.update (rename to Run-Audit.exe after this run)" -Kind warn
-                Log ("Self-update: downloaded .exe to {0} (running exe is locked)" -f $exeTemp)
+            # Running exe is locked - download to temp file for swap on next launch
+            if (Download-Asset -Url $UpdateInfo.ExeDownloadUrl -Target $exeTemp -TimeoutSec 60 `
+                    -Label "Downloading Run-Audit.exe (staged for next launch)..." `
+                    -OkMessage "Downloaded Run-Audit.exe.update (rename to Run-Audit.exe after this run)" `
+                    -WarnMessage "Failed to download Run-Audit.exe") {
                 $updated = $true
-            } catch {
-                Write-Action -What ("Failed to download Run-Audit.exe: {0}" -f $_.Exception.Message) -Kind warn
-                Log ("Self-update: failed to download .exe - {0}" -f $_.Exception.Message)
             }
         } else {
-            # Running as .ps1 - exe is not locked, overwrite directly
-            try {
-                Write-Action -What "Downloading Run-Audit.exe..." -Kind run
-                Invoke-WebRequest -Uri $UpdateInfo.ExeDownloadUrl -OutFile $exeTarget -TimeoutSec 60 -ErrorAction Stop
-                Write-Action -What "Updated Run-Audit.exe" -Kind ok
-                Log ("Self-update: downloaded Run-Audit.exe from {0}" -f $UpdateInfo.ExeDownloadUrl)
+            # Running as .ps1 - exe not locked, overwrite directly
+            if (Download-Asset -Url $UpdateInfo.ExeDownloadUrl -Target $exeTarget -TimeoutSec 60 `
+                    -Label "Downloading Run-Audit.exe..." `
+                    -OkMessage "Updated Run-Audit.exe" `
+                    -WarnMessage "Failed to download Run-Audit.exe") {
                 $updated = $true
-            } catch {
-                Write-Action -What ("Failed to download Run-Audit.exe: {0}" -f $_.Exception.Message) -Kind warn
-                Log ("Self-update: failed to download .exe - {0}" -f $_.Exception.Message)
             }
         }
     }
@@ -1293,27 +1295,40 @@ function Invoke-HuduRequest {
     Invoke-RestMethod @splat
 }
 
+function Invoke-HuduPagedQuery {
+    <#
+      Shared pagination helper for Hudu API endpoints that return pages of 25 items.
+      Calls $ItemsBlock on each response to extract the items array.
+      Calls $MatchBlock on each item; returns the first item where it returns $true.
+      Returns $null if no match is found across all pages.
+    #>
+    param(
+        [string]$EndpointTemplate,   # Endpoint string; '{0}' is replaced with the page number
+        [scriptblock]$ItemsBlock,    # Extracts the items array from the response object
+        [scriptblock]$MatchBlock     # Returns $true for the desired item
+    )
+    $page = 1
+    do {
+        $resp  = Invoke-HuduRequest -Endpoint ($EndpointTemplate -f $page)
+        $items = @(& $ItemsBlock $resp)
+        if (-not $items -or $items.Count -eq 0) { $items = @($resp) }
+        $match = $items | Where-Object { & $MatchBlock $_ } | Select-Object -First 1
+        if ($match) { return $match }
+        $page++
+    } while ($items.Count -ge 25)
+    return $null
+}
+
 function Get-HuduAssetLayoutByName {
     <#
       Paginates through all asset layouts and returns the first one whose name
       matches exactly. Returns $null if not found.
     #>
     param([string]$Name)
-    $page = 1
-    do {
-        $resp    = Invoke-HuduRequest -Endpoint "asset_layouts?page=$page"
-        $layouts = @($resp.asset_layouts)
-        if (-not $layouts -or $layouts.Count -eq 0) {
-            # Some Hudu versions return a bare array
-            $layouts = @($resp)
-        }
-        foreach ($layout in $layouts) {
-            if ($layout.name -eq $Name) { return $layout }
-        }
-        $page++
-        # Hudu returns 25 per page; stop when a page is short
-    } while ($layouts.Count -ge 25)
-    return $null
+    Invoke-HuduPagedQuery `
+        -EndpointTemplate "asset_layouts?page={0}" `
+        -ItemsBlock       { param($r) $r.asset_layouts } `
+        -MatchBlock       { param($i) $i.name -eq $Name }
 }
 
 function Get-HuduCompanyBySlug {
@@ -1324,19 +1339,10 @@ function Get-HuduCompanyBySlug {
       Returns $null if not found.
     #>
     param([string]$Slug)
-    $page = 1
-    do {
-        $resp      = Invoke-HuduRequest -Endpoint "companies?page=$page"
-        $companies = @($resp.companies)
-        if (-not $companies -or $companies.Count -eq 0) {
-            $companies = @($resp)
-        }
-        foreach ($c in $companies) {
-            if ($c.slug -eq $Slug) { return $c }
-        }
-        $page++
-    } while ($companies.Count -ge 25)
-    return $null
+    Invoke-HuduPagedQuery `
+        -EndpointTemplate "companies?page={0}" `
+        -ItemsBlock       { param($r) $r.companies } `
+        -MatchBlock       { param($i) $i.slug -eq $Slug }
 }
 
 function Get-HuduAssetByName {
@@ -1351,15 +1357,10 @@ function Get-HuduAssetByName {
         [int]$LayoutId
     )
     $encodedName = [uri]::EscapeDataString($Name)
-    $page = 1
-    do {
-        $resp   = Invoke-HuduRequest -Endpoint "assets?name=$encodedName&company_id=$CompanyId&asset_layout_id=$LayoutId&page=$page"
-        $assets = @($resp.assets)
-        $match  = $assets | Where-Object { $_.name -eq $Name } | Select-Object -First 1
-        if ($match) { return $match }
-        $page++
-    } while ($assets.Count -ge 25)
-    return $null
+    Invoke-HuduPagedQuery `
+        -EndpointTemplate "assets?name=$encodedName&company_id=$CompanyId&asset_layout_id=$LayoutId&page={0}" `
+        -ItemsBlock       { param($r) $r.assets } `
+        -MatchBlock       { param($i) $i.name -eq $Name }
 }
 
 function Add-HuduUpload {
@@ -1672,9 +1673,13 @@ function Compare-AuditReports {
 function Build-DiffSectionHtml {
     <#
       Builds an HTML section showing changes between audit runs.
+      Pass -ForHudu to produce the inline-styled Hudu-compatible variant.
       Returns the HTML string for insertion into the report, or empty string if no changes.
     #>
-    param([object[]]$Changes)
+    param(
+        [object[]]$Changes,
+        [switch]$ForHudu
+    )
 
     if (-not $Changes -or $Changes.Count -eq 0) { return '' }
 
@@ -1685,86 +1690,72 @@ function Build-DiffSectionHtml {
     $warnChanges = @($Changes | Where-Object { $_.Kind -eq 'warn' })
     $infoChanges = @($Changes | Where-Object { $_.Kind -eq 'info' })
 
-    [void]$sb.AppendLine("<div class='section' style='border-left:4px solid var(--accent);'>")
-    [void]$sb.AppendLine("<h2 style='color:var(--accent); margin:0 0 14px;'>Changes Since Last Audit</h2>")
+    if ($ForHudu) {
+        [void]$sb.AppendLine("<hr style='border:none; border-top:2px solid rgba(128,128,128,0.15); margin:28px 0 0;'>")
+        [void]$sb.AppendLine("<h2 style='margin:14px 0; font-size:18px; font-weight:700;'>Changes Since Last Audit</h2>")
+    } else {
+        [void]$sb.AppendLine("<div class='section' style='border-left:4px solid var(--accent);'>")
+        [void]$sb.AppendLine("<h2 style='color:var(--accent); margin:0 0 14px;'>Changes Since Last Audit</h2>")
+    }
+
+    # Helper: open a callout div with the right styling for the target format
+    function Open-Callout([string]$Kind) {
+        if ($ForHudu) {
+            $styleMap = @{
+                good = "border-left:4px solid #059669; background:rgba(5,150,105,0.1);"
+                bad  = "border-left:4px solid #dc2626; background:rgba(220,38,38,0.1);"
+                info = "border-left:4px solid #2E5C6E; background:rgba(46,92,110,0.1);"
+            }
+            [void]$sb.AppendLine(("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; {0}'>" -f $styleMap[$Kind]))
+        } else {
+            [void]$sb.AppendLine("<div class='callout callout-$Kind'>")
+        }
+    }
+
+    # Helper: emit one change row (list item for standalone, paragraph for Hudu)
+    function Add-ChangeRow([string]$Metric, [string]$Prev, [string]$Curr) {
+        $m = Html-Enc $Metric
+        $p = Html-Enc $Prev
+        $c = Html-Enc $Curr
+        if ($ForHudu) {
+            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f $m, $p, $c))
+        } else {
+            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f $m, $p, $c))
+        }
+    }
 
     if ($goodChanges.Count -gt 0) {
-        [void]$sb.AppendLine("<div class='callout callout-good'><strong>Improvements</strong><ul>")
-        foreach ($c in $goodChanges) {
-            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
-        }
-        [void]$sb.AppendLine("</ul></div>")
-    }
-
-    if ($badChanges.Count -gt 0) {
-        [void]$sb.AppendLine("<div class='callout callout-bad'><strong>Regressions</strong><ul>")
-        foreach ($c in $badChanges) {
-            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
-        }
-        [void]$sb.AppendLine("</ul></div>")
-    }
-
-    if ($warnChanges.Count -gt 0 -or $infoChanges.Count -gt 0) {
-        [void]$sb.AppendLine("<div class='callout callout-info'><strong>Other Changes</strong><ul>")
-        foreach ($c in (@($warnChanges) + @($infoChanges))) {
-            $prev = if ($c.Previous) { $c.Previous } else { '-' }
-            $curr = if ($c.Current) { $c.Current } else { '-' }
-            [void]$sb.AppendLine(("<li><strong>{0}:</strong> {1} &rarr; {2}</li>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($prev), [System.Net.WebUtility]::HtmlEncode($curr)))
-        }
-        [void]$sb.AppendLine("</ul></div>")
-    }
-
-    [void]$sb.AppendLine("</div>")
-
-    return $sb.ToString()
-}
-
-function Build-DiffSectionHuduHtml {
-    <#
-      Builds the Hudu-compatible inline-styled version of the diff section.
-    #>
-    param([object[]]$Changes)
-
-    if (-not $Changes -or $Changes.Count -eq 0) { return '' }
-
-    $sb = New-Object System.Text.StringBuilder
-
-    $goodChanges = @($Changes | Where-Object { $_.Kind -eq 'good' })
-    $badChanges  = @($Changes | Where-Object { $_.Kind -eq 'bad' })
-    $warnChanges = @($Changes | Where-Object { $_.Kind -eq 'warn' })
-    $infoChanges = @($Changes | Where-Object { $_.Kind -eq 'info' })
-
-    [void]$sb.AppendLine("<hr style='border:none; border-top:2px solid rgba(128,128,128,0.15); margin:28px 0 0;'>")
-    [void]$sb.AppendLine("<h2 style='margin:14px 0; font-size:18px; font-weight:700;'>Changes Since Last Audit</h2>")
-
-    if ($goodChanges.Count -gt 0) {
-        [void]$sb.AppendLine("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>")
+        Open-Callout 'good'
         [void]$sb.AppendLine("<strong>Improvements</strong>")
-        foreach ($c in $goodChanges) {
-            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
-        }
+        if (-not $ForHudu) { [void]$sb.AppendLine("<ul>") }
+        foreach ($c in $goodChanges) { Add-ChangeRow $c.Metric $c.Previous $c.Current }
+        if (-not $ForHudu) { [void]$sb.AppendLine("</ul>") }
         [void]$sb.AppendLine("</div>")
     }
 
     if ($badChanges.Count -gt 0) {
-        [void]$sb.AppendLine("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #dc2626; background:rgba(220,38,38,0.1);'>")
+        Open-Callout 'bad'
         [void]$sb.AppendLine("<strong>Regressions</strong>")
-        foreach ($c in $badChanges) {
-            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($c.Previous), [System.Net.WebUtility]::HtmlEncode($c.Current)))
-        }
+        if (-not $ForHudu) { [void]$sb.AppendLine("<ul>") }
+        foreach ($c in $badChanges) { Add-ChangeRow $c.Metric $c.Previous $c.Current }
+        if (-not $ForHudu) { [void]$sb.AppendLine("</ul>") }
         [void]$sb.AppendLine("</div>")
     }
 
     if ($warnChanges.Count -gt 0 -or $infoChanges.Count -gt 0) {
-        [void]$sb.AppendLine("<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; border-left:4px solid #2E5C6E; background:rgba(46,92,110,0.1);'>")
+        Open-Callout 'info'
         [void]$sb.AppendLine("<strong>Other Changes</strong>")
+        if (-not $ForHudu) { [void]$sb.AppendLine("<ul>") }
         foreach ($c in (@($warnChanges) + @($infoChanges))) {
             $prev = if ($c.Previous) { $c.Previous } else { '-' }
-            $curr = if ($c.Current) { $c.Current } else { '-' }
-            [void]$sb.AppendLine(("<p style='margin:4px 0;'><strong>{0}:</strong> {1} &rarr; {2}</p>" -f [System.Net.WebUtility]::HtmlEncode($c.Metric), [System.Net.WebUtility]::HtmlEncode($prev), [System.Net.WebUtility]::HtmlEncode($curr)))
+            $curr = if ($c.Current)  { $c.Current  } else { '-' }
+            Add-ChangeRow $c.Metric $prev $curr
         }
+        if (-not $ForHudu) { [void]$sb.AppendLine("</ul>") }
         [void]$sb.AppendLine("</div>")
     }
+
+    if (-not $ForHudu) { [void]$sb.AppendLine("</div>") }
 
     return $sb.ToString()
 }
@@ -2445,6 +2436,11 @@ else {
 }
 
 Html-EndSection
+
+# Default values for variables set in sections 3-4 that are consumed later in the E8 section.
+# Ensures E8 references are unambiguous if either section fails entirely via Safe-Invoke.
+$patches    = $null   # Set in [3] - reused by E8 Patch Applications block
+$muEnabled  = $null   # Set in [4] - reused by E8 Patch OS block
 
 # ============================================================
 # [3] WINDOWS PATCHES / HOTFIXES
@@ -5388,6 +5384,80 @@ $($Html.ToString())
     # All layouts here use <table> instead of nested divs to survive sanitization intact.
     Write-Host "[Final] Building Hudu report..." -ForegroundColor Cyan
 
+    $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
+
+    # ---- Step 1: Diff comparison (must run before body fragment is built) ----
+    $diffSectionHtml     = ''
+    $diffSectionHuduHtml = ''
+    $huduScoreChange     = $null
+    try {
+        Write-Host "[Hudu] Comparing with previous audit metrics..." -ForegroundColor Cyan
+
+        $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
+        $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
+
+        # Find the most recent dated archive to use as the previous report
+        $prevMetrics = $null
+        $archiveBase = [System.IO.Path]::GetFileNameWithoutExtension($HtmlReportPath)
+        $archiveDir  = [System.IO.Path]::GetDirectoryName($HtmlReportPath)
+        $prevArchive = @(Get-ChildItem -LiteralPath $archiveDir -Filter "$archiveBase-????????-??????.html" `
+                            -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1)
+        if ($prevArchive) {
+            $prevHtml    = Get-Content -LiteralPath $prevArchive[0].FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            $prevMetrics = if ($prevHtml) { Extract-AuditMetrics -Html $prevHtml } else { $null }
+            if ($prevMetrics -and $prevMetrics.Count -gt 0) {
+                Log ("Hudu diff: loaded previous metrics from archive {0}" -f $prevArchive[0].Name)
+            }
+        }
+
+        if ($prevMetrics -and $prevMetrics.Count -gt 0) {
+            Write-Action -What "Previous metrics found, comparing..." -Kind run
+
+            $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
+
+            # Calculate numeric score change for the Hudu field
+            if ($prevMetrics.Contains('Health Score') -and $currMetrics.Contains('Health Score')) {
+                try {
+                    $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
+                    Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
+                } catch {
+                    $huduScoreChange = 'No Change'
+                    Log "Hudu diff: could not calculate score change"
+                }
+            } else {
+                $huduScoreChange = 'No Change'
+            }
+
+            if ($auditChanges -and $auditChanges.Count -gt 0) {
+                Write-Action -What ("{0} change(s) detected since last audit" -f $auditChanges.Count) -Kind info
+                Log ("Hudu diff: {0} change(s) detected" -f $auditChanges.Count)
+                $diffSectionHtml     = Build-DiffSectionHtml -Changes $auditChanges
+                $diffSectionHuduHtml = Build-DiffSectionHtml -Changes $auditChanges -ForHudu
+            } else {
+                Write-Action -What "No significant changes since last audit" -Kind ok
+                Log "Hudu diff: no changes detected"
+                $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
+            }
+        } else {
+            Write-Action -What "No previous audit found (first run)" -Kind info
+        }
+    } catch {
+        Write-Action -What ("Report comparison failed: {0}" -f $_.Exception.Message) -Kind warn
+        Log ("Hudu diff: comparison failed - {0}" -f $_.Exception.Message)
+        # Non-fatal: continue with upload without diff section
+    }
+
+    # ---- Step 2: Inject diff into standalone HTML report if present ----
+    if ($diffSectionHtml) {
+        $htmlContent = $htmlContent -replace '(</div>\s*<!-- scoreCardHtml -->)', "`$1`n$diffSectionHtml"
+        if ($htmlContent -notmatch '<!-- scoreCardHtml -->') {
+            $htmlContent = $htmlContent -replace "(<div class='issues-summary'>)", "$diffSectionHtml`n`$1"
+        }
+        $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
+    }
+
+    # ---- Step 3: Build Hudu header, score card, TOC, and global summary ----
+
     # Hudu header - table layout prevents ActionText from splitting container around h1
     $huduUpdateLine = ""
     if ($UpdateInfo -and $UpdateInfo.UpdateAvailable) {
@@ -5475,110 +5545,8 @@ $huduUpdateLine
         }
     }
 
-    # Build Hudu HTML body fragment (used for both file preview and API upload)
+    # ---- Step 4: Build Hudu body fragment (single construction, diff already known) ----
     $huduBodyFragment = @"
-$huduHeaderHtml
-
-$huduScoreCardHtml
-
-$huduGlobalSummaryHtml
-
-$huduTocHtml
-
-$($HuduHtml.ToString())
-
-<hr style='border:none; border-top:1px solid rgba(128,128,128,0.2); margin:24px 0 0;'>
-<p style='opacity:0.6; font-size:12px; text-align:center; padding-top:16px;'>
-  Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-</p>
-"@
-
-    # Write Hudu HTML preview file
-    $huduContent = @"
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>System Audit Report - $safeReportTitle (Hudu)</title>
-</head>
-<body style="font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif; margin:0; padding:24px; line-height:1.5;">
-
-$huduBodyFragment
-
-</body>
-</html>
-"@
-
-    $huduContent | Out-File -FilePath $HuduHtmlReportPath -Force -Encoding utf8
-    Write-Host "Hudu HTML preview saved to $HuduHtmlReportPath" -ForegroundColor Green
-    Log "Hudu HTML preview written to $HuduHtmlReportPath"
-
-    # ---- Hudu Diff: Compare with previous metrics ----
-    $huduAssetName = if ($HuduEntryName) { $HuduEntryName } else { "$ComputerName - $(Get-Date -Format 'dd/MM/yyyy')" }
-    $diffSectionHtml     = ''
-    $diffSectionHuduHtml = ''
-    $huduScoreChange     = $null
-    try {
-        Write-Host "[Hudu] Comparing with previous audit metrics..." -ForegroundColor Cyan
-
-        $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
-        $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
-
-        # Find the most recent dated archive to use as the previous report
-        $prevMetrics = $null
-        $archiveBase = [System.IO.Path]::GetFileNameWithoutExtension($HtmlReportPath)
-        $archiveDir  = [System.IO.Path]::GetDirectoryName($HtmlReportPath)
-        $prevArchive = @(Get-ChildItem -LiteralPath $archiveDir -Filter "$archiveBase-????????-??????.html" `
-                            -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1)
-        if ($prevArchive) {
-            $prevHtml    = Get-Content -LiteralPath $prevArchive[0].FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            $prevMetrics = if ($prevHtml) { Extract-AuditMetrics -Html $prevHtml } else { $null }
-            if ($prevMetrics -and $prevMetrics.Count -gt 0) {
-                Log ("Hudu diff: loaded previous metrics from archive {0}" -f $prevArchive[0].Name)
-            }
-        }
-
-        if ($prevMetrics -and $prevMetrics.Count -gt 0) {
-            Write-Action -What "Previous metrics found, comparing..." -Kind run
-
-            $auditChanges = Compare-AuditReports -Previous $prevMetrics -Current $currMetrics
-
-            # Calculate numeric score change for the Hudu field
-            if ($prevMetrics.Contains('Health Score') -and $currMetrics.Contains('Health Score')) {
-                try {
-                    $huduScoreChange = [double]$currMetrics['Health Score'] - [double]$prevMetrics['Health Score']
-                    Log ("Hudu diff: health score change = {0}" -f $huduScoreChange)
-                } catch {
-                    $huduScoreChange = 'No Change'
-                    Log "Hudu diff: could not calculate score change"
-                }
-            } else {
-                $huduScoreChange = 'No Change'
-            }
-
-            if ($auditChanges -and $auditChanges.Count -gt 0) {
-                Write-Action -What ("{0} change(s) detected since last audit" -f $auditChanges.Count) -Kind info
-                Log ("Hudu diff: {0} change(s) detected" -f $auditChanges.Count)
-                $diffSectionHtml     = Build-DiffSectionHtml -Changes $auditChanges
-                $diffSectionHuduHtml = Build-DiffSectionHuduHtml -Changes $auditChanges
-            } else {
-                Write-Action -What "No significant changes since last audit" -Kind ok
-                Log "Hudu diff: no changes detected"
-                $diffSectionHuduHtml = "<div style='padding:10px 14px; border-radius:8px; font-size:13px; margin:16px 0; border-left:4px solid #059669; background:rgba(5,150,105,0.1);'>No significant changes since last audit.</div>"
-            }
-        } else {
-            Write-Action -What "No previous audit found (first run)" -Kind info
-        }
-    } catch {
-        Write-Action -What ("Report comparison failed: {0}" -f $_.Exception.Message) -Kind warn
-        Log ("Hudu diff: comparison failed - {0}" -f $_.Exception.Message)
-        # Non-fatal: continue with upload without diff section
-    }
-
-    # Inject diff section into Hudu body fragment (after score card, before global summary)
-    if ($diffSectionHuduHtml) {
-        $huduBodyFragment = @"
 $huduHeaderHtml
 
 $huduScoreCardHtml
@@ -5596,21 +5564,9 @@ $($HuduHtml.ToString())
   Windows Audit Tool v$safeVersion &bull; Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
 </p>
 "@
-    }
 
-    # Also inject diff into standalone HTML if present
-    if ($diffSectionHtml) {
-        $htmlContent = $htmlContent -replace '(</div>\s*<!-- scoreCardHtml -->)', "`$1`n$diffSectionHtml"
-        # If the marker isn't present, inject after the first score-card div
-        if ($htmlContent -notmatch '<!-- scoreCardHtml -->') {
-            $htmlContent = $htmlContent -replace "(<div class='issues-summary'>)", "$diffSectionHtml`n`$1"
-        }
-        $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
-    }
-
-    # Re-write Hudu preview with diff section included
-    if ($diffSectionHuduHtml) {
-        $huduContent = @"
+    # ---- Step 5: Write Hudu HTML preview file (single write) ----
+    $huduContent = @"
 <!doctype html>
 <html lang="en">
 <head>
@@ -5625,11 +5581,11 @@ $huduBodyFragment
 </body>
 </html>
 "@
-        $huduContent | Out-File -FilePath $HuduHtmlReportPath -Force -Encoding utf8
-        Log "Hudu HTML preview updated with diff section"
-    }
+    $huduContent | Out-File -FilePath $HuduHtmlReportPath -Force -Encoding utf8
+    Write-Host "Hudu HTML preview saved to $HuduHtmlReportPath" -ForegroundColor Green
+    Log "Hudu HTML preview written to $HuduHtmlReportPath"
 
-    # ---- Resolve Hudu attachment filename ----
+    # ---- Step 6: Resolve Hudu attachment filename ----
     $resolvedReportName = $null
     if ($HtmlAttachmentName) {
         $resolvedReportName = $HtmlAttachmentName `
@@ -5640,7 +5596,7 @@ $huduBodyFragment
         Log ("Hudu attachment name: '{0}' -> '{1}'" -f $HtmlAttachmentName, $resolvedReportName)
     }
 
-    # ---- Upload to Hudu via API ----
+    # ---- Step 7: Upload to Hudu via API ----
     Write-Host "[Hudu] Uploading report to Hudu..." -ForegroundColor Yellow
     Log "STEP Hudu: Uploading report to Hudu"
     # Strip null bytes and control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) - they are
