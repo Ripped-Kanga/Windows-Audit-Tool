@@ -1476,11 +1476,12 @@ function Get-HuduPreviousReportMetrics {
             Log "Hudu diff: existing asset has no file attachments"
             return $null
         }
-        # Most recent non-archived HTML attachment. Report names are date-prefixed,
-        # so a descending name sort yields the latest prior report.
+        # Most recent non-archived HTML attachment. Upload id is a monotonic
+        # counter, so the highest id is the latest upload - reliable regardless of
+        # how the attachment is named (the name is not always date-prefixed).
         $htmlFiles = @($files |
             Where-Object { $_.ext -eq 'html' -and -not $_.archived_at } |
-            Sort-Object -Property name -Descending)
+            Sort-Object -Property id -Descending)
         if ($htmlFiles.Count -eq 0) {
             Log "Hudu diff: existing asset has no HTML report attachment"
             return $null
