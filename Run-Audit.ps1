@@ -72,7 +72,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.3.3"
+$ScriptVersion = "1.4.4"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -1415,32 +1415,122 @@ function Add-HuduUpload {
     }
 }
 
+function Get-HuduUploadFile {
+    <#
+      Downloads a Hudu upload (file attachment) by its numeric upload id to a
+      local path. Uses GET /api/v1/uploads/{id}?download=true, which 302-redirects
+      to a pre-signed object-store URL that Invoke-WebRequest follows.
+
+      The request deliberately omits a Content-Type header: Invoke-HuduRequest
+      always sends "application/json", which the object-store fetch rejects - so
+      this helper cannot reuse it. The x-api-key header is harmless on the
+      redirect target. (Mechanism validated against Hudu 2.43.1.)
+      Returns $true on success, $false otherwise. Never throws.
+    #>
+    param(
+        [int]$UploadId,
+        [string]$DestPath
+    )
+    try {
+        $baseUrl = $script:_HuduBaseURL.TrimEnd('/')
+        $uri     = "$baseUrl/api/v1/uploads/$UploadId" + "?download=true"
+        $headers = @{ "x-api-key" = $script:_HuduAPIKey }
+        Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $DestPath `
+            -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 120 -ErrorAction Stop | Out-Null
+        return (Test-Path -LiteralPath $DestPath)
+    } catch {
+        Log ("Hudu: upload download failed (id {0}) - {1}" -f $UploadId, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Get-HuduPreviousReportMetrics {
+    <#
+      Downloads the most recent HTML audit report already attached to the target
+      Hudu asset and extracts its metrics for diffing. Returns a metrics hashtable
+      (from Extract-AuditMetrics) or $null when no prior report is available.
+      Never throws.
+
+      Runs before the current run uploads its new report, so the asset's existing
+      .html attachments represent prior audits. This is the reliable previous
+      source when the local report filename is date-stamped or local reports are
+      not retained on the endpoint.
+    #>
+    param(
+        [string]$AssetName,
+        [int]$CompanyId,
+        [int]$LayoutId
+    )
+    try {
+        $asset = Get-HuduAssetByName -Name $AssetName -CompanyId $CompanyId -LayoutId $LayoutId
+        if (-not $asset) {
+            Log "Hudu diff: no existing asset found for previous-report lookup"
+            return $null
+        }
+        # Fetch full asset detail to guarantee the files array is populated
+        # (the assets search endpoint may omit attachments).
+        $detail   = Invoke-HuduRequest -Endpoint ("companies/{0}/assets/{1}" -f $CompanyId, $asset.id)
+        $assetObj = if ($detail.asset) { $detail.asset } elseif ($detail.files) { $detail } else { $asset }
+        $files    = @($assetObj.files)
+        if ($files.Count -eq 0) {
+            Log "Hudu diff: existing asset has no file attachments"
+            return $null
+        }
+        # Most recent non-archived HTML attachment. Report names are date-prefixed,
+        # so a descending name sort yields the latest prior report.
+        $htmlFiles = @($files |
+            Where-Object { $_.ext -eq 'html' -and -not $_.archived_at } |
+            Sort-Object -Property name -Descending)
+        if ($htmlFiles.Count -eq 0) {
+            Log "Hudu diff: existing asset has no HTML report attachment"
+            return $null
+        }
+        $prev = $htmlFiles[0]
+        $tmp  = Join-Path $env:TEMP ("audit-prev-{0}.html" -f $prev.id)
+        if (-not (Get-HuduUploadFile -UploadId $prev.id -DestPath $tmp)) {
+            return $null
+        }
+        $prevHtml = Get-Content -LiteralPath $tmp -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        if (-not $prevHtml) { return $null }
+        Log ("Hudu diff: loaded previous metrics from Hudu attachment '{0}' (upload {1})" -f $prev.name, $prev.id)
+        return Extract-AuditMetrics -Html $prevHtml
+    } catch {
+        Log ("Hudu diff: previous-report download failed - {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
 function Remove-OldAuditArchives {
     <#
-      Keeps only the $MaxKeep most recent dated archive copies of the HTML report,
-      deleting any older ones. Archives are identified by the pattern:
-        <baseName>-YYYYMMDD-HHmmss.html
-      where <baseName> is the filename stem of $ReportPath (without extension).
-      Never throws.
+      Keeps only the $MaxKeep most recent dated audit reports for this machine,
+      deleting any older ones. Reports are date-prefixed:
+        <yyyy-MM-dd> - [<Customer> - ]<host>-Audit.html
+      so the host-specific "<host>-Audit.html" suffix is derived from $ReportPath
+      and used to match this machine's reports only. Lexical sort is chronological
+      (yyyy-MM-dd), so the oldest sort first. The "-Audit-Hudu.html" preview is a
+      single overwritten file and is excluded. Never throws.
     #>
     param(
         [string]$ReportPath,
         [int]$MaxKeep = 6
     )
     try {
-        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($ReportPath)
-        $dir      = [System.IO.Path]::GetDirectoryName($ReportPath)
-        $archives = @(Get-ChildItem -LiteralPath $dir -Filter "$baseName-????????-??????.html" `
+        $dir  = [System.IO.Path]::GetDirectoryName($ReportPath)
+        $leaf = [System.IO.Path]::GetFileName($ReportPath)
+        # Host suffix = last non-whitespace token ending in "-Audit.html".
+        $suffix  = if ($leaf -match '(\S+-Audit\.html)$') { $Matches[1] } else { $leaf }
+        $reports = @(Get-ChildItem -LiteralPath $dir -Filter "*$suffix" `
                         -ErrorAction SilentlyContinue | Sort-Object Name)
-        if ($archives.Count -gt $MaxKeep) {
-            $toDelete = $archives | Select-Object -First ($archives.Count - $MaxKeep)
+        if ($reports.Count -gt $MaxKeep) {
+            $toDelete = $reports | Select-Object -First ($reports.Count - $MaxKeep)
             foreach ($f in $toDelete) {
                 Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
-                Log ("Archive cleanup: removed {0}" -f $f.Name)
+                Log ("Report cleanup: removed old report {0}" -f $f.Name)
             }
         }
     } catch {
-        Log ("Archive cleanup failed: {0}" -f $_.Exception.Message)
+        Log ("Report cleanup failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -1840,6 +1930,9 @@ function Publish-HuduAsset {
         if ($changeFieldKey) {
             Write-Action -What ("Health Score Change field found: {0}" -f $changeFieldKey) -Kind info
             Log ("Hudu: Health Score Change field found (key '{0}')" -f $changeFieldKey)
+        } else {
+            Write-Action -What "No 'Health Score Change' field found in layout - change will not be written to list view." -Kind warn
+            Log "Hudu: 'Health Score Change' field not found in layout '$LayoutName' - skipping change field"
         }
 
         # 3. Build request body (shared by create and update paths)
@@ -1858,6 +1951,9 @@ function Publish-HuduAsset {
             }
             $customFields.Add(@{ $changeFieldKey = $changeStr })
             Log ("Hudu: writing score change '{0}' to field '{1}'" -f $changeStr, $changeFieldKey)
+        } elseif ($changeFieldKey) {
+            Write-Action -What "Health Score Change field present but no change computed (no previous report) - leaving unchanged." -Kind info
+            Log "Hudu: Health Score Change field present but no score change computed (no previous report)"
         }
         $body = @{
             asset = @{
@@ -5023,7 +5119,7 @@ try {
         # SVG ring parameters
         $circumference = [math]::Round(2 * [math]::PI * 52, 2)
         $offset = [math]::Round($circumference * (1 - $score / 10), 2)
-        $scoreDisplay = $score.ToString("0.0")
+        $scoreDisplay = $score.ToString("0.0", [System.Globalization.CultureInfo]::InvariantCulture)
 
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.AppendLine("<div class='score-card'>")
@@ -5356,6 +5452,7 @@ $updateNoticeHtml
   </div>
 
 $scoreCardHtml
+<!-- scoreCardHtml -->
 
 $globalSummaryHtml
 
@@ -5417,25 +5514,14 @@ $($Html.ToString())
 </html>
 "@
 
-    # Archive the previous report before overwriting so diffs have history to compare against
-    if (Test-Path -LiteralPath $HtmlReportPath) {
-        try {
-            $archiveStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-            $archiveBase  = [System.IO.Path]::GetFileNameWithoutExtension($HtmlReportPath)
-            $archivePath  = Join-Path ([System.IO.Path]::GetDirectoryName($HtmlReportPath)) `
-                                      "$archiveBase-$archiveStamp.html"
-            Copy-Item -LiteralPath $HtmlReportPath -Destination $archivePath -Force
-            Log ("Archived previous report to {0}" -f $archivePath)
-        } catch {
-            Log ("Could not archive previous report: {0}" -f $_.Exception.Message)
-        }
-    }
-
+    # The report filename is date-prefixed (one file per run), so each run's
+    # report is itself the dated history that diffs compare against - no separate
+    # archive copy is needed. Older reports are trimmed below.
     $htmlContent | Out-File -FilePath $HtmlReportPath -Force -Encoding utf8
     Write-Host "HTML report saved to $HtmlReportPath" -ForegroundColor Green
     Log "HTML report written to $HtmlReportPath"
 
-    # Keep only the most recent $KeepReports archives
+    # Keep only the most recent $KeepReports dated reports for this machine
     Remove-OldAuditArchives -ReportPath $HtmlReportPath -MaxKeep $KeepReports
 
     # ---- Hudu-compatible report (only when -HuduReport is enabled) ----
@@ -5456,17 +5542,36 @@ $($Html.ToString())
         $currentReportHtml = Get-Content -LiteralPath $HtmlReportPath -Raw -Encoding UTF8 -ErrorAction Stop
         $currMetrics = Extract-AuditMetrics -Html $currentReportHtml
 
-        # Find the most recent dated archive to use as the previous report
+        # ---- Source previous metrics for the diff ----
+        # Primary: download the most recent HTML report attached to the Hudu asset.
+        # This survives the date-stamped report filename and endpoints that do not
+        # retain local reports (the asset accumulates each run's report in Hudu).
+        # Fallback: the most recent prior local report for this machine.
         $prevMetrics = $null
-        $archiveBase = [System.IO.Path]::GetFileNameWithoutExtension($HtmlReportPath)
-        $archiveDir  = [System.IO.Path]::GetDirectoryName($HtmlReportPath)
-        $prevArchive = @(Get-ChildItem -LiteralPath $archiveDir -Filter "$archiveBase-????????-??????.html" `
-                            -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1)
-        if ($prevArchive) {
-            $prevHtml    = Get-Content -LiteralPath $prevArchive[0].FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-            $prevMetrics = if ($prevHtml) { Extract-AuditMetrics -Html $prevHtml } else { $null }
-            if ($prevMetrics -and $prevMetrics.Count -gt 0) {
-                Log ("Hudu diff: loaded previous metrics from archive {0}" -f $prevArchive[0].Name)
+
+        $huduLayout   = Get-HuduAssetLayoutByName -Name $HuduAssetLayoutName
+        $huduLayoutId = if ($huduLayout) { $huduLayout.id } else { $null }
+        if ($huduLayoutId) {
+            $prevMetrics = Get-HuduPreviousReportMetrics `
+                -AssetName $huduAssetName -CompanyId $script:_HuduCompanyId -LayoutId $huduLayoutId
+        }
+
+        if (-not ($prevMetrics -and $prevMetrics.Count -gt 0)) {
+            # Fallback: most recent prior local report. Filenames are date-prefixed
+            # ("<yyyy-MM-dd> - [<Customer> - ]<host>-Audit.html"); lexical sort is
+            # chronological, so take the latest sibling that is not this run's file.
+            $reportDir  = [System.IO.Path]::GetDirectoryName($HtmlReportPath)
+            $reportLeaf = [System.IO.Path]::GetFileName($HtmlReportPath)
+            $prevLocal  = @(Get-ChildItem -LiteralPath $reportDir -Filter "*${ComputerName}-Audit.html" `
+                                -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -ne $reportLeaf } |
+                            Sort-Object Name | Select-Object -Last 1)
+            if ($prevLocal) {
+                $prevHtml    = Get-Content -LiteralPath $prevLocal[0].FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                $prevMetrics = if ($prevHtml) { Extract-AuditMetrics -Html $prevHtml } else { $null }
+                if ($prevMetrics -and $prevMetrics.Count -gt 0) {
+                    Log ("Hudu diff: loaded previous metrics from local report {0}" -f $prevLocal[0].Name)
+                }
             }
         }
 
