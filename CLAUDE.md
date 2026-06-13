@@ -78,8 +78,10 @@ All Hudu functions live in the `# Hudu API Functions` region, defined before the
 | `Get-HuduCompanyBySlug` | Paginates all companies; returns the first whose slug matches the hex string |
 | `Get-HuduAssetByName` | Searches assets by name within a company+layout; paginates Hudu's contains-search and exact-matches locally; returns first match or `$null` |
 | `Add-HuduUpload` | Multipart file upload via `System.Net.Http` (PS 5.1 compatible); attaches to an asset record |
-| `Publish-HuduAsset` | Find-or-update: searches for an existing entry by name (`GET`), updates it (`PUT`) if found, creates it (`POST`) if not; auto-detects first RichText field; optionally attaches the standalone HTML report |
-| `Remove-OldAuditArchives` | Deletes dated archive copies of the HTML report beyond the `$KeepReports` limit; archives are named `<baseName>-YYYYMMDD-HHmmss.html`; runs on every audit run, not just Hudu-enabled ones |
+| `Get-HuduUploadFile` | Downloads a Hudu upload by id via `GET /uploads/{id}?download=true`, which 302-redirects to a pre-signed object-store URL; deliberately omits the `Content-Type: application/json` header (the object store rejects it) since `Invoke-HuduRequest` cannot be reused; never throws |
+| `Get-HuduPreviousReportMetrics` | Finds the target asset, downloads its most recent non-archived `.html` attachment (the prior run's report), and extracts metrics for diffing; the primary previous-report source in Hudu mode (survives the date-stamped filename and endpoints that do not retain local reports) |
+| `Publish-HuduAsset` | Find-or-update: searches for an existing entry by name (`GET`), updates it (`PUT`) if found, creates it (`POST`) if not; auto-detects first RichText field; optionally attaches the standalone HTML report; warns when the optional `Health Score` / `Health Score Change` list-view fields are absent from the layout |
+| `Remove-OldAuditArchives` | Trims the date-prefixed reports for this machine beyond the `$KeepReports` limit; matches on the `<host>-Audit.html` suffix derived from the report path; runs on every audit run, not just Hudu-enabled ones |
 | `Extract-AuditMetrics` | Extracts key metrics (health score, E8 controls, security baseline, TLS, software list, etc.) from the standalone HTML report via regex; returns an ordered hashtable |
 | `Compare-AuditReports` | Compares previous and current metric hashtables; classifies each change as good/bad/warn/info; returns a list of change objects |
 | `Build-DiffSectionHtml` | Builds the "Changes Since Last Audit" HTML section for the standalone report |
@@ -125,10 +127,9 @@ The script runs 13 sequential audit sections, each introduced with `Write-Step`:
 After all sections run, the script assembles the final HTML document:
 - Builds the TOC from the `$Toc` list
 - Wraps the `$Html` StringBuilder output in a full `<!doctype html>` page with embedded CSS
-- If a previous report already exists at `$HtmlReportPath`, copies it to a dated archive (`<baseName>-YYYYMMDD-HHmmss.html`) before overwriting
-- Writes the new report to `$HtmlReportPath` with `-Encoding utf8`
-- Runs `Remove-OldAuditArchives` to trim archives beyond `$KeepReports` (default 6)
-- When Hudu is enabled, reads the most recent archive to extract previous metrics, compares with the current report, and injects a "Changes Since Last Audit" diff section into both the standalone HTML and the Hudu RichText field
+- Writes the new report to `$HtmlReportPath` with `-Encoding utf8`. The filename is date-prefixed (`<yyyy-MM-dd> - [<Customer> - ]<host>-Audit.html`), so each run produces its own dated file. These dated reports *are* the comparison history; no separate archive copy is made
+- Runs `Remove-OldAuditArchives` to trim the dated reports for this machine beyond `$KeepReports` (default 6)
+- When Hudu is enabled, sources previous metrics by **downloading the most recent HTML report attached to the Hudu asset** (`Get-HuduPreviousReportMetrics`), falling back to the most recent prior local report; compares with the current report, and injects a "Changes Since Last Audit" diff section into both the standalone HTML (via the `<!-- scoreCardHtml -->` marker) and the Hudu RichText field
 - Logs success or failure
 
 ---
@@ -141,7 +142,9 @@ Output paths are determined at runtime based on deployment context (`$IsRmmMode`
 |---|---|---|
 | RMM: running from `C:\Program Files\...` | `C:\Program Files\Windows Audit Tool\Results` | `C:\Program Files\Windows Audit Tool\Logs\AuditLog.txt` |
 | Interactive / GUI (any other location) | `<script-dir>\Windows Audit Tool\` | `<script-dir>\Windows Audit Tool\AuditLog.txt` |
-| With `-CustomerName` | same as above | `<CustomerName> - <ComputerName>-Audit.html` |
+| With `-CustomerName` | same as above | report named `<yyyy-MM-dd> - <CustomerName> - <ComputerName>-Audit.html` |
+
+The HTML report filename is **date-prefixed**: `<yyyy-MM-dd> - [<CustomerName> - ]<ComputerName>-Audit.html` (`$ReportDate = Get-Date -Format 'yyyy-MM-dd'`). The previous-report diff and `Remove-OldAuditArchives` are both built around this date-prefixed naming.
 
 `$IsRmmMode` is `$true` when `$ScriptDir` starts with `C:\Program Files` (the `-Silent` flag only suppresses interactive prompts, it does not affect output paths). Both `$ScriptDir` and `$IsRmmMode` are resolved early in the main `try` block. `$LogPath` starts as a bootstrap path (`C:\Windows\Temp\AuditLog.txt`) for the first few log lines, then is updated to its final value after the output directory routing block. `$HtmlReportPath` and `$HuduHtmlReportPath` are derived from `$ReportDir`. Do not add configuration file support or additional path parameters.
 
@@ -222,7 +225,7 @@ The script auto-requests elevation via UAC if not already admin. If the user dec
 ```
 
 **Check outputs (interactive mode, run from e.g. Desktop):**
-- HTML report: `<script-dir>\Windows Audit Tool\<ComputerName>-Audit.html`
+- HTML report: `<script-dir>\Windows Audit Tool\<yyyy-MM-dd> - <ComputerName>-Audit.html`
 - Operational log: `<script-dir>\Windows Audit Tool\AuditLog.txt`
 
 ### Recompiling the .exe
