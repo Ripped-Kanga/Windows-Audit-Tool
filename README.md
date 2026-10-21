@@ -281,16 +281,16 @@ The script can upload audit reports directly to [Hudu](https://www.huducloud.com
 The audit runs 13 sequential sections. Each section fails independently — a problem in one area never stops the rest.
 
 ### 1. System Information
-Operating system, edition, build number, install date, uptime, CPU model and core count, total RAM, and attached disk drives with size and model.
+Operating system, edition, build number, OS role (workstation, server, or domain controller), install date, uptime, CPU model and core count, total RAM, and attached disk drives with size and model. Uptime is flagged after 30 days on workstations and after 90 days on Windows Server, where long uptime between patch windows is expected.
 
 ### 2. Installed Software
 Merged inventory from all available sources: HKLM and HKCU uninstall registry keys (both 64-bit and WOW6432Node), per-user registry hives including offline NTUSER.DAT files, AppX/Store packages, and Winget. Automatically deduplicates across sources, merging scope and origin metadata. Displayed as two separate tables — **Microsoft software** and **Third-Party software** — each with an independent interactive search/filter bar.
 
 ### 3. Patches / Hotfixes
-All installed Windows hotfixes and cumulative updates via `Get-HotFix`, sorted by install date.
+All installed Windows hotfixes and cumulative updates via `Get-HotFix`, sorted by install date. Patch age is flagged as a warning after 30 days on workstations and after 60 days on Windows Server (to allow for maintenance-window patch cadence), and as a problem after 90 days on either.
 
 ### 4. Pending Windows Updates
-Queries the Windows Update Agent (WUA) COM API directly — no PSWindowsUpdate module required. Reports update title, KB number, size, and severity for all pending updates.
+Queries the Windows Update Agent (WUA) COM API directly — no PSWindowsUpdate module required. Reports update title, KB number, size, and severity for all pending updates. On Windows Server the section follows a maintenance-window cadence: updates published within the last 60 days are treated as expected rather than flagged, a pending reboot is only flagged once uptime also exceeds 90 days, and the last Windows Update scan is flagged after 30 days (warning) and 60 days (problem) instead of 7 and 30.
 
 ### 5. Network Adapters
 All physical and virtual adapters with connection status, MAC address, link speed, media type, driver version, driver date, and manufacturer. For each connected adapter: IPv4 address with prefix length, IPv6 addresses (global and link-local), default gateways, DNS servers, DHCP status, DHCP server address, lease obtained/expires dates, and network profile (Public/Private/Domain).
