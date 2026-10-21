@@ -72,7 +72,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------- #
 # Version                   #
 # ------------------------- #
-$ScriptVersion = "1.4.4"
+$ScriptVersion = "1.4.5"
 
 # ------------------------- #
 # Paths (per computer)      #
@@ -274,10 +274,15 @@ function Get-PendingWindowsUpdatesWUA {
             try { if ($update.KBArticleIDs -and $update.KBArticleIDs.Count -gt 0) { $kbId = ($update.KBArticleIDs -join ", ") } } catch {}
             $categoryNames = "N/A"
             try { if ($update.Categories -and $update.Categories.Count -gt 0) { $categoryNames = (@($update.Categories) | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", " } } catch {}
+            # Publish/approval date on the update source (WU or WSUS) - used to judge how long an update has been pending
+            $published     = $null
+            try { if ($update.LastDeploymentChangeTime -and ([datetime]$update.LastDeploymentChangeTime).Year -ge 2000) { $published = [datetime]$update.LastDeploymentChangeTime } } catch {}
             $list.Add([pscustomobject]@{
                 Title          = $update.Title
                 KB             = $kbId
                 Categories     = $categoryNames
+                Published      = if ($published) { $published.ToString('yyyy-MM-dd') } else { $null }
+                AgeDays        = if ($published) { [math]::Floor(((Get-Date) - $published).TotalDays) } else { $null }
                 Downloaded     = $update.IsDownloaded
                 Mandatory      = $update.IsMandatory
                 RebootRequired = $update.RebootRequired
@@ -2297,6 +2302,30 @@ if ($os -ne "Error" -and $os) {
     Write-Action -What "Operating System: Error" -Kind warn
 }
 
+# Server OS detection - servers run for months between reboots and are patched on a
+# maintenance-window cadence, so the uptime and patch-age checks use relaxed thresholds.
+# ProductType: 1 = Workstation, 2 = Domain Controller, 3 = Server (registry: WinNT / LanmanNT / ServerNT)
+$osProductType = if ($os -ne "Error" -and $os -and $os.ProductType) { [int]$os.ProductType } else {
+    Safe-Invoke {
+        switch ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions' -Name ProductType -ErrorAction Stop).ProductType) {
+            'WinNT'    { 1 }
+            'LanmanNT' { 2 }
+            'ServerNT' { 3 }
+            default    { $null }
+        }
+    } "OS Product Type"
+}
+$IsServerOS = ($osProductType -eq 2 -or $osProductType -eq 3)
+$OsRole     = switch ($osProductType) { 1 { "Workstation" } 2 { "Domain Controller" } 3 { "Server" } default { $null } }
+if ($IsServerOS) { Write-Action -What ("OS role: {0} (server uptime/patch thresholds applied)" -f $OsRole) -Kind info }
+
+# Uptime, patch-age, and Windows Update scan thresholds (days).
+# $PatchWarnDays also sets the server window in which pending updates are expected (Section 4).
+$UptimeWarnDays = if ($IsServerOS) { 90 } else { 30 }
+$PatchWarnDays  = if ($IsServerOS) { 60 } else { 30 }
+$ScanWarnDays   = if ($IsServerOS) { 30 } else { 7 }
+$ScanBadDays    = if ($IsServerOS) { 60 } else { 30 }
+
 $winVer = Safe-Invoke {
     Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" |
         Select-Object -Property ReleaseId, DisplayVersion
@@ -2328,6 +2357,7 @@ if ($os -ne "Error" -and $os) {
     $osKv["Build Number"]     = $os.BuildNumber
     $osKv["Architecture"]     = $os.OSArchitecture
 }
+if ($OsRole) { $osKv["OS Role"] = $OsRole }
 Html-AddKV -Pairs $osKv
 
 # --- Windows Licensing ---
@@ -2499,11 +2529,14 @@ if ($uptime) {
     Html-AddKV -Pairs ([ordered]@{
         "Uptime" = ("{0} days, {1} hours, {2} minutes" -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
     })
-    # Uptime health check - machines that haven't rebooted miss kernel-level patches
-    if ($uptime.TotalDays -gt 30) {
-        Write-Action -What ("Uptime: {0} days (exceeds 30-day threshold)" -f $uptime.Days) -Kind warn
+    # Uptime health check - machines that haven't rebooted miss kernel-level patches.
+    # Servers use a higher threshold ($UptimeWarnDays) as extended uptime between patch windows is expected.
+    if ($uptime.TotalDays -gt $UptimeWarnDays) {
+        Write-Action -What ("Uptime: {0} days (exceeds {1}-day threshold)" -f $uptime.Days, $UptimeWarnDays) -Kind warn
         Html-AddNote -Text ("System has not rebooted in {0} days. Machines that go without rebooting for extended periods may be missing kernel-level patches." -f $uptime.Days) -Kind warn `
             -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
+    } elseif ($IsServerOS) {
+        Html-AddNote -Text ("Last reboot: {0} days ago. Extended uptime is expected on servers; the uptime warning threshold is {1} days." -f $uptime.Days, $UptimeWarnDays) -Kind good
     } else {
         Html-AddNote -Text ("Last reboot: {0} days ago" -f $uptime.Days) -Kind good
     }
@@ -2623,8 +2656,9 @@ if ($patches -ne "Error" -and $patches) {
             Write-Action -What ("Last patch: {0} days ago (exceeds 90-day threshold)" -f $daysSincePatch) -Kind bad
             Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Systems should be patched at least every 90 days." -f $daysSincePatch, $latestPatch.HotFixID) -Kind bad `
                 -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
-        } elseif ($daysSincePatch -gt 30) {
-            Write-Action -What ("Last patch: {0} days ago (exceeds 30-day threshold)" -f $daysSincePatch) -Kind warn
+        } elseif ($daysSincePatch -gt $PatchWarnDays) {
+            # Servers use a higher threshold ($PatchWarnDays) to allow for maintenance-window patch cadence
+            Write-Action -What ("Last patch: {0} days ago (exceeds {1}-day threshold)" -f $daysSincePatch, $PatchWarnDays) -Kind warn
             Html-AddNote -Text ("Last patch was installed {0} days ago (KB: {1}). Consider applying recent updates." -f $daysSincePatch, $latestPatch.HotFixID) -Kind warn `
                 -KbUrl "https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-overview" -KbTitle "Windows Update overview"
         } else {
@@ -2731,9 +2765,10 @@ $pendingUpdates = Safe-Invoke { Get-PendingWindowsUpdatesWUA } "Pending Windows 
 Html-StartKvTable
 
 if ($wuLastScan -ne "Error" -and $wuLastScan) {
-    $scanClass = if ($wuLastScan.DaysAgo -le 7) { '' } elseif ($wuLastScan.DaysAgo -le 30) { 'sev-warn' } else { 'sev-bad' }
+    # Servers are often only scanned around their maintenance window (WSUS / RMM-driven patching)
+    $scanClass = if ($wuLastScan.DaysAgo -le $ScanWarnDays) { '' } elseif ($wuLastScan.DaysAgo -le $ScanBadDays) { 'sev-warn' } else { 'sev-bad' }
     Html-AddKvRow -Key "Last Scan" -Value ("{0} ({1} days ago)" -f $wuLastScan.DateTime, $wuLastScan.DaysAgo) -RowClass $scanClass
-    Write-Action -What ("Last WU scan: {0} ({1} days ago)" -f $wuLastScan.DateTime, $wuLastScan.DaysAgo) -Kind $(if ($wuLastScan.DaysAgo -le 7) { "ok" } elseif ($wuLastScan.DaysAgo -le 30) { "warn" } else { "bad" })
+    Write-Action -What ("Last WU scan: {0} ({1} days ago)" -f $wuLastScan.DateTime, $wuLastScan.DaysAgo) -Kind $(if ($wuLastScan.DaysAgo -le $ScanWarnDays) { "ok" } elseif ($wuLastScan.DaysAgo -le $ScanBadDays) { "warn" } else { "bad" })
 } else {
     Html-AddKvRow -Key "Last Scan" -Value "Could not determine" -RowClass "sev-warn"
 }
@@ -2760,11 +2795,15 @@ if ($muEnabled -ne "Error") {
 }
 
 if ($rebootPending -ne "Error" -and $rebootPending) {
-    $rbClass = if ($rebootPending.Pending) { 'sev-warn' } else { '' }
+    # On servers a pending reboot is expected between update installation and the maintenance-window
+    # reboot; only flag it once uptime has also exceeded the server threshold.
+    $rbExpected = $IsServerOS -and -not ($uptime -and $uptime.TotalDays -gt $UptimeWarnDays)
+    $rbClass = if ($rebootPending.Pending -and -not $rbExpected) { 'sev-warn' } else { '' }
     $rbText  = if ($rebootPending.Pending) { "Yes ($($rebootPending.Signals))" } else { 'No' }
+    if ($rebootPending.Pending -and $rbExpected) { $rbText += " - expected until the next maintenance window" }
     Html-AddKvRow -Key "Reboot Pending" -Value $rbText -RowClass $rbClass
     if ($rebootPending.Pending) {
-        Write-Action -What ("Reboot pending: {0}" -f $rebootPending.Signals) -Kind warn
+        Write-Action -What ("Reboot pending: {0}" -f $rebootPending.Signals) -Kind $(if ($rbExpected) { "info" } else { "warn" })
     }
 }
 
@@ -2788,14 +2827,21 @@ else {
         Html-AddNote -Text "No pending updates found." -Kind good
     }
     else {
+        # Servers patch on a maintenance-window cadence, so updates published within $PatchWarnDays
+        # are expected to be pending and are not flagged. An unknown publish date counts as outside the window.
+        $inPatchWindow = { param($u) $IsServerOS -and $null -ne $u.AgeDays -and $u.AgeDays -le $PatchWarnDays }
+
         $count   = $real.Count
         $cCrit   = 0; $cSec = 0; $cDriver = 0; $cEula = 0; $cOther = 0
+        $cInWindow = 0; $cOverdueSec = 0
         foreach ($upd in $real) {
             if     ($upd.Categories -match 'Critical Updates')  { $cCrit++ }
             elseif ($upd.Categories -match 'Security Updates')  { $cSec++ }
             elseif ($upd.Categories -match 'Drivers')           { $cDriver++ }
             else                                                { $cOther++ }
             if ($upd.EulaAccepted -eq $false)                   { $cEula++ }
+            if (& $inPatchWindow $upd)                          { $cInWindow++ }
+            elseif ($upd.Categories -match 'Critical Updates|Security Updates') { $cOverdueSec++ }
         }
 
         $summaryParts = [System.Collections.Generic.List[string]]::new()
@@ -2805,9 +2851,14 @@ else {
         if ($cOther  -gt 0) { $summaryParts.Add("Other: $cOther") }
         $summaryStr = if ($summaryParts.Count -gt 0) { $summaryParts -join ' | ' } else { "Total: $count" }
 
-        $overallKind = if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" }
-        Write-Action -What ("Pending updates: {0} - {1}" -f $count, $summaryStr) -Kind $overallKind
-        Html-AddNote -Text ("Pending updates: {0} - {1}" -f $count, $summaryStr) -Kind $(if ($cCrit -gt 0 -or $cSec -gt 0) { "bad" } else { "warn" })
+        # Workstations never have in-window updates, so this reduces to bad (critical/security) or warn
+        $overallKind = if ($cInWindow -eq $count) { "info" } elseif ($cOverdueSec -gt 0) { "bad" } else { "warn" }
+        $pendingText = "Pending updates: {0} - {1}" -f $count, $summaryStr
+        if ($cInWindow -gt 0) {
+            $pendingText += (" ({0} published within the last {1} days - expected to install at the next maintenance window)" -f $cInWindow, $PatchWarnDays)
+        }
+        Write-Action -What $pendingText -Kind $overallKind
+        Html-AddNote -Text $pendingText -Kind $overallKind
 
         if ($cEula -gt 0) {
             Html-AddNote -Text ("$cEula update(s) have not had their EULA accepted and will not install automatically.") -Kind warn
@@ -2818,6 +2869,8 @@ else {
                 KB             = $_.KB
                 Title          = $_.Title
                 Categories     = $_.Categories
+                Published      = $_.Published
+                AgeDays        = $_.AgeDays
                 Downloaded     = $_.Downloaded
                 Mandatory      = $_.Mandatory
                 RebootRequired = $_.RebootRequired
@@ -2830,12 +2883,14 @@ else {
             @{ Header="KB";            Property="KB" },
             @{ Header="Title";         Property="Title" },
             @{ Header="Categories";    Property="Categories" },
+            @{ Header="Published";     Property="Published" },
             @{ Header="Downloaded";    Property="Downloaded" },
             @{ Header="Mandatory";     Property="Mandatory" },
             @{ Header="Reboot";        Property="RebootRequired" },
             @{ Header="EULA Accepted"; Property="EulaAccepted" }
         ) -RowClass {
             param($r)
+            if (& $inPatchWindow $r) { return '' }
             if ($r.Categories -match 'Critical Updates|Security Updates') { return 'sev-bad' }
             if ($r.RebootRequired -eq $true -or $r.Mandatory -eq $true)   { return 'sev-bad' }
             return 'sev-warn'

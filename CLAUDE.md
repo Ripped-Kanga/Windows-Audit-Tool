@@ -122,6 +122,8 @@ The script runs 13 sequential audit sections, each introduced with `Write-Step`:
 | 12 | Microsoft Entra ID Join Status | `dsregcmd.exe /status` output parsing |
 | 13 | Essential Eight Assessment | `Get-AppLockerPolicy`, `Get-MpPreference` (CFA/NP/ASR), `Get-WindowsOptionalFeature`, `Get-PnpDevice`, `Get-CimInstance Win32_ShadowCopy`, `Get-ScheduledTask`, registry (UAC, Office macros, WH4B, WU policy); includes summary scorecard |
 
+**Server-aware thresholds:** Section 1 sets `$IsServerOS` from `Win32_OperatingSystem.ProductType` (2 = DC, 3 = Server; registry `ProductOptions` fallback; defaults to workstation) and defines the threshold variables `$UptimeWarnDays`, `$PatchWarnDays`, `$ScanWarnDays`, and `$ScanBadDays` in one block. Sections 1, 3, and 4 use these instead of hard-coded day counts; on servers, pending updates published within `$PatchWarnDays` and pending reboots (while uptime is under `$UptimeWarnDays`) are not flagged. The Essential Eight patch scoring deliberately keeps its fixed thresholds for all OS types.
+
 ### 7. Report Generation
 
 After all sections run, the script assembles the final HTML document:
